@@ -68,17 +68,13 @@ func (c *ServerConfig) Validate() error {
 	if len(c.Control.Token) < 16 {
 		return fmt.Errorf("control.token must be at least 16 bytes")
 	}
-	for _, spec := range c.Ports.Allow {
-		if err := validatePortSpec("ports.allow", spec); err != nil {
-			return err
-		}
+	if err := validatePortRanges("ports.allow", c.Ports.Allow); err != nil {
+		return err
 	}
-	for _, spec := range c.Ports.Deny {
-		if err := validatePortSpec("ports.deny", spec); err != nil {
-			return err
-		}
+	if err := validatePortRanges("ports.deny", c.Ports.Deny); err != nil {
+		return err
 	}
-	if err := validatePortSpec("ports.auto_range", c.Ports.AutoRange); err != nil {
+	if err := validatePortRanges("ports.auto_range", []string{c.Ports.AutoRange}); err != nil {
 		return err
 	}
 	if err := validateWeb(&c.Web); err != nil {

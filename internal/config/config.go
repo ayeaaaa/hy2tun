@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 
+	"hy2tun/internal/ports"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -181,39 +183,13 @@ func validateHostPort(field, value string, allowEmptyHost, allowZeroPort bool) e
 	return nil
 }
 
-// validatePortSpec checks a single port or an inclusive start-end range.
-func validatePortSpec(field, value string) error {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return fmt.Errorf("%s must not be empty", field)
-	}
-	parts := strings.Split(value, "-")
-	if len(parts) > 2 {
-		return fmt.Errorf("%s has an invalid port range %q", field, value)
-	}
-	start, err := parsePort(field, parts[0])
-	if err != nil {
-		return err
-	}
-	end := start
-	if len(parts) == 2 {
-		end, err = parsePort(field, parts[1])
-		if err != nil {
-			return err
-		}
-	}
-	if start > end {
-		return fmt.Errorf("%s has an invalid port range %q: start is after end", field, value)
+// validatePortRanges checks a list of port specifications with the same
+// parser used by the runtime port policy.
+func validatePortRanges(field string, specs []string) error {
+	if _, err := ports.ParseRanges(specs); err != nil {
+		return fmt.Errorf("%s: %w", field, err)
 	}
 	return nil
-}
-
-func parsePort(field, value string) (int, error) {
-	port, err := strconv.Atoi(strings.TrimSpace(value))
-	if err != nil || port < 1 || port > 65535 {
-		return 0, fmt.Errorf("%s has an invalid port %q", field, value)
-	}
-	return port, nil
 }
 
 func validateMappings(mappings []Mapping) error {

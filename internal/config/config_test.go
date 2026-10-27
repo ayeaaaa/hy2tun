@@ -210,6 +210,18 @@ func TestServerConfigRejectsBadPortRange(t *testing.T) {
 	require.ErrorContains(t, cfg.Validate(), "ports.allow")
 }
 
+func TestServerConfigRejectsBadDenyRange(t *testing.T) {
+	cfg := validServerConfig()
+	cfg.Ports.Deny = []string{"70000"}
+	require.ErrorContains(t, cfg.Validate(), "ports.deny")
+}
+
+func TestServerConfigRejectsNonNumericAllowRange(t *testing.T) {
+	cfg := validServerConfig()
+	cfg.Ports.Allow = []string{"http"}
+	require.ErrorContains(t, cfg.Validate(), "ports.allow")
+}
+
 func TestServerConfigRejectsBadAutoRange(t *testing.T) {
 	cfg := validServerConfig()
 	cfg.Ports.AutoRange = "not-a-range"
