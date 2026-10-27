@@ -42,13 +42,16 @@ const (
 // ErrWeakSessionKey reports a session signing key shorter than 32 bytes.
 var ErrWeakSessionKey = errors.New("shared: session key must be at least 32 bytes")
 
-// SessionManager issues and validates HMAC-SHA256 signed session cookies. It
-// is stateless: logout clears the browser cookie, and a captured token remains
-// valid until it expires.
+// SessionManager issues and validates HMAC-SHA256 signed session cookies.
+// Issued session IDs are kept in memory so logout revokes a captured cookie
+// immediately. Restarting the process invalidates all sessions.
 type SessionManager struct {
 	secret []byte
 	ttl    time.Duration
 	now    func() time.Time
+
+	mu       sync.Mutex
+	sessions map[string]time.Time
 }
 
 // NewSessionManager returns a manager using secret. The secret must be at
@@ -62,17 +65,23 @@ func NewSessionManager(secret []byte, ttl time.Duration) (*SessionManager, error
 	}
 	key := make([]byte, len(secret))
 	copy(key, secret)
-	return &SessionManager{secret: key, ttl: ttl, now: time.Now}, nil
+	return &SessionManager{
+		secret:   key,
+		ttl:      ttl,
+		now:      time.Now,
+		sessions: make(map[string]time.Time),
+	}, nil
 }
 
 type sessionClaims struct {
 	Subject   string `json:"sub"`
 	IssuedAt  int64  `json:"iat"`
 	ExpiresAt int64  `json:"exp"`
-	Nonce     string `json:"nonce"`
+	SessionID string `json:"sid"`
 }
 
-// Issue signs a session cookie for username and writes it to w.
+// Issue signs a session cookie for username and writes it to w. The random
+// session ID is recorded in memory so logout can revoke it.
 func (m *SessionManager) Issue(w http.ResponseWriter, r *http.Request, username string) error {
 	if m == nil {
 		return errors.New("shared: session manager is nil")
@@ -82,15 +91,16 @@ func (m *SessionManager) Issue(w http.ResponseWriter, r *http.Request, username 
 	}
 
 	now := m.now()
-	var nonce [16]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		return fmt.Errorf("shared: generate session nonce: %w", err)
+	var sessionIDBytes [16]byte
+	if _, err := rand.Read(sessionIDBytes[:]); err != nil {
+		return fmt.Errorf("shared: generate session ID: %w", err)
 	}
+	sessionID := hex.EncodeToString(sessionIDBytes[:])
 	claims := sessionClaims{
 		Subject:   username,
 		IssuedAt:  now.Unix(),
 		ExpiresAt: now.Add(m.ttl).Unix(),
-		Nonce:     hex.EncodeToString(nonce[:]),
+		SessionID: sessionID,
 	}
 	payload, err := json.Marshal(claims)
 	if err != nil {
@@ -100,6 +110,18 @@ func (m *SessionManager) Issue(w http.ResponseWriter, r *http.Request, username 
 	mac := hmac.New(sha256.New, m.secret)
 	_, _ = mac.Write([]byte(encoded))
 	signature := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+
+	m.mu.Lock()
+	if m.sessions == nil {
+		m.sessions = make(map[string]time.Time)
+	}
+	for existing, expiry := range m.sessions {
+		if !now.Before(expiry) {
+			delete(m.sessions, existing)
+		}
+	}
+	m.sessions[sessionID] = now.Add(m.ttl)
+	m.mu.Unlock()
 
 	secure := r != nil && r.TLS != nil
 	http.SetCookie(w, &http.Cookie{
@@ -115,7 +137,9 @@ func (m *SessionManager) Issue(w http.ResponseWriter, r *http.Request, username 
 	return nil
 }
 
-func (m *SessionManager) claims(r *http.Request) (*sessionClaims, bool) {
+// signedClaims verifies the cookie signature and its embedded timestamps
+// without checking the server-side session store.
+func (m *SessionManager) signedClaims(r *http.Request) (*sessionClaims, bool) {
 	if m == nil || r == nil {
 		return nil, false
 	}
@@ -146,12 +170,30 @@ func (m *SessionManager) claims(r *http.Request) (*sessionClaims, bool) {
 	}
 	now := m.now()
 	if claims.Subject == "" ||
+		claims.SessionID == "" ||
 		claims.ExpiresAt <= now.Unix() ||
 		claims.ExpiresAt <= claims.IssuedAt ||
 		claims.IssuedAt > now.Add(time.Minute).Unix() {
 		return nil, false
 	}
 	return &claims, true
+}
+
+func (m *SessionManager) claims(r *http.Request) (*sessionClaims, bool) {
+	claims, ok := m.signedClaims(r)
+	if !ok {
+		return nil, false
+	}
+	now := m.now()
+	m.mu.Lock()
+	expiry, exists := m.sessions[claims.SessionID]
+	if !exists || !now.Before(expiry) {
+		delete(m.sessions, claims.SessionID)
+		m.mu.Unlock()
+		return nil, false
+	}
+	m.mu.Unlock()
+	return claims, true
 }
 
 // Valid reports whether r carries a correctly signed, unexpired session.
@@ -169,8 +211,14 @@ func (m *SessionManager) Username(r *http.Request) string {
 	return claims.Subject
 }
 
-// Clear writes an expired cookie to the response.
+// Clear revokes the signed session in memory and writes an expired cookie.
+// The same cookie value is rejected immediately even if it was captured.
 func (m *SessionManager) Clear(w http.ResponseWriter, r *http.Request) {
+	if claims, ok := m.signedClaims(r); ok {
+		m.mu.Lock()
+		delete(m.sessions, claims.SessionID)
+		m.mu.Unlock()
+	}
 	secure := r != nil && r.TLS != nil
 	http.SetCookie(w, &http.Cookie{
 		Name:     CookieName,
@@ -220,22 +268,28 @@ func IsAPIRequest(r *http.Request) bool {
 	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), "application/json")
 }
 
-// RequireCSRF rejects state-changing requests without the custom header or
-// with a cross-origin Origin/Sec-Fetch-Site. An absent Origin is accepted:
-// browsers cannot set X-Requested-With on a cross-origin request without a
-// CORS preflight, so the custom header is the primary defense.
+// RequireCSRF rejects state-changing requests without X-Requested-With:
+// hy2tun, without an Origin header, or with an Origin whose scheme or host
+// differs from the request. Non-browser API clients must send an Origin header
+// that matches the scheme and Host they use to reach the console.
 func RequireCSRF(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get(CSRFHeader) != CSRFValue {
 			writeJSONError(w, http.StatusForbidden, "forbidden")
 			return
 		}
-		if origin := r.Header.Get("Origin"); origin != "" {
-			parsed, err := url.Parse(origin)
-			if err != nil || parsed.Host == "" || !strings.EqualFold(parsed.Host, r.Host) {
-				writeJSONError(w, http.StatusForbidden, "forbidden")
-				return
-			}
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			writeJSONError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		parsed, err := url.Parse(origin)
+		if err != nil ||
+			parsed.Host == "" ||
+			!strings.EqualFold(parsed.Scheme, requestScheme(r)) ||
+			!strings.EqualFold(parsed.Host, r.Host) {
+			writeJSONError(w, http.StatusForbidden, "forbidden")
+			return
 		}
 		switch r.Header.Get("Sec-Fetch-Site") {
 		case "", "same-origin", "none":
@@ -245,6 +299,28 @@ func RequireCSRF(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func requestScheme(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	// A TLS-terminating reverse proxy is a supported deployment. Trust the
+	// de facto forwarded scheme only for this comparison; the custom CSRF
+	// header and the Host comparison remain the primary defenses.
+	if forwarded := r.Header.Get("X-Forwarded-Proto"); forwarded != "" {
+		if first, _, ok := strings.Cut(forwarded, ","); ok {
+			forwarded = first
+		}
+		switch scheme := strings.ToLower(strings.TrimSpace(forwarded)); scheme {
+		case "http", "https":
+			return scheme
+		}
+	}
+	return "http"
 }
 
 type loginEntry struct {

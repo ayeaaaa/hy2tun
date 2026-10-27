@@ -118,6 +118,45 @@ func TestSessionManagerRejectsEmptyUsername(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestSessionManagerLogoutRevokesSession(t *testing.T) {
+	manager, err := NewSessionManager(testSecret(), time.Hour)
+	require.NoError(t, err)
+
+	issueRecorder := httptest.NewRecorder()
+	require.NoError(t, manager.Issue(issueRecorder, httptest.NewRequest(http.MethodGet, "http://example.com/", nil), "admin"))
+	cookie := issueRecorder.Result().Cookies()[0]
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	req.AddCookie(cookie)
+	require.True(t, manager.Valid(req))
+	require.Equal(t, "admin", manager.Username(req))
+
+	// Logout revokes the server-side session, not just the browser cookie.
+	manager.Clear(httptest.NewRecorder(), req)
+
+	reused := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	reused.AddCookie(cookie)
+	require.False(t, manager.Valid(reused))
+	require.Empty(t, manager.Username(reused))
+}
+
+func TestSessionManagerRestartInvalidatesSessions(t *testing.T) {
+	manager, err := NewSessionManager(testSecret(), time.Hour)
+	require.NoError(t, err)
+
+	issueRecorder := httptest.NewRecorder()
+	require.NoError(t, manager.Issue(issueRecorder, httptest.NewRequest(http.MethodGet, "http://example.com/", nil), "admin"))
+	cookie := issueRecorder.Result().Cookies()[0]
+
+	// The in-memory store is empty after a restart, so old cookies fail even
+	// though the persisted signing key is reused.
+	restarted, err := NewSessionManager(testSecret(), time.Hour)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	req.AddCookie(cookie)
+	require.False(t, restarted.Valid(req))
+}
+
 func TestRequireAuth(t *testing.T) {
 	manager, err := NewSessionManager(testSecret(), time.Hour)
 	require.NoError(t, err)
@@ -191,7 +230,7 @@ func TestRequireCSRF(t *testing.T) {
 		{"evil origin", map[string]string{"X-Requested-With": "hy2tun", "Origin": "http://evil.example"}, http.StatusForbidden},
 		{"null origin", map[string]string{"X-Requested-With": "hy2tun", "Origin": "null"}, http.StatusForbidden},
 		{"matching origin", map[string]string{"X-Requested-With": "hy2tun", "Origin": "http://example.com"}, http.StatusNoContent},
-		{"no origin", map[string]string{"X-Requested-With": "hy2tun"}, http.StatusNoContent},
+		{"no origin", map[string]string{"X-Requested-With": "hy2tun"}, http.StatusForbidden},
 		{"same-origin fetch metadata", map[string]string{"X-Requested-With": "hy2tun", "Origin": "http://example.com", "Sec-Fetch-Site": "same-origin"}, http.StatusNoContent},
 		{"cross-site fetch metadata", map[string]string{"X-Requested-With": "hy2tun", "Origin": "http://example.com", "Sec-Fetch-Site": "cross-site"}, http.StatusForbidden},
 		{"same-site fetch metadata", map[string]string{"X-Requested-With": "hy2tun", "Origin": "http://example.com", "Sec-Fetch-Site": "same-site"}, http.StatusForbidden},
@@ -207,6 +246,63 @@ func TestRequireCSRF(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRequireCSRFRequiresMatchingScheme(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := RequireCSRF(next)
+
+	cases := []struct {
+		name   string
+		target string
+		origin string
+	}{
+		{"http request with https origin", "http://example.com/api/clients/c1/mappings", "https://example.com"},
+		{"https request with http origin", "https://example.com/api/clients/c1/mappings", "http://example.com"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPut, tc.target, nil)
+			req.Header.Set("X-Requested-With", "hy2tun")
+			req.Header.Set("Origin", tc.origin)
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, req)
+			require.Equal(t, http.StatusForbidden, recorder.Code)
+		})
+	}
+
+	// A matching HTTPS origin is accepted.
+	req := httptest.NewRequest(http.MethodPut, "https://example.com/api/clients/c1/mappings", nil)
+	req.Header.Set("X-Requested-With", "hy2tun")
+	req.Header.Set("Origin", "https://example.com")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+	require.Equal(t, http.StatusNoContent, recorder.Code)
+}
+
+func TestRequireCSRFUsesForwardedProtoBehindTLSProxy(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := RequireCSRF(next)
+
+	newRequest := func(origin string) *http.Request {
+		req := httptest.NewRequest(http.MethodPut, "http://example.com/api/clients/c1/mappings", nil)
+		req.Header.Set("X-Requested-With", "hy2tun")
+		req.Header.Set("X-Forwarded-Proto", "https")
+		req.Header.Set("Origin", origin)
+		return req
+	}
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, newRequest("https://example.com"))
+	require.Equal(t, http.StatusNoContent, recorder.Code)
+
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, newRequest("http://example.com"))
+	require.Equal(t, http.StatusForbidden, recorder.Code)
 }
 
 func TestLoginLimiter(t *testing.T) {

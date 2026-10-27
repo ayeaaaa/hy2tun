@@ -43,7 +43,7 @@
       <tbody>
         {{if .Client.Mappings}}
         {{range .Client.Mappings}}
-        <tr data-mapping-id="{{.ID}}" data-mapping-type="{{.Type}}" data-mapping-port="{{if .RemotePort}}{{.RemotePort}}{{else}}{{.AssignedPort}}{{end}}" data-mapping-local="{{.LocalAddr}}" data-mapping-note="{{.Note}}" data-mapping-enabled="{{.Enabled}}" data-mapping-assigned="{{.AssignedPort}}">
+        <tr data-mapping-id="{{.ID}}" data-mapping-type="{{.Type}}" data-mapping-port="{{.RemotePort}}" data-mapping-local="{{.LocalAddr}}" data-mapping-note="{{.Note}}" data-mapping-enabled="{{.Enabled}}" data-mapping-assigned="{{.AssignedPort}}">
           <td><span class="type-tag type-{{.Type}}">{{upper .Type}}</span></td>
           <td class="mono">{{if .AssignedPort}}{{.AssignedPort}}{{else if .RemotePort}}{{.RemotePort}}{{else}}<span class="muted">自动</span>{{end}}</td>
           <td class="mono">{{.LocalAddr}}</td>

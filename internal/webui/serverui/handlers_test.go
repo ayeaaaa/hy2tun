@@ -346,6 +346,12 @@ func TestServerWebLogout(t *testing.T) {
 	require.Contains(t, setCookie, "Max-Age=0")
 	resp.Body.Close()
 
+	// The captured cookie is revoked server-side, not just cleared in the
+	// browser.
+	resp = doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/api/clients", "", cookie, nil)
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	resp.Body.Close()
+
 	// The cleared cookie no longer authenticates.
 	cleared := &http.Cookie{Name: "hy2tun_session", Value: ""}
 	resp = doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/api/clients", "", cleared, nil)
@@ -386,6 +392,15 @@ func TestMutationsRequireCustomHeaderAndOrigin(t *testing.T) {
 		"X-Requested-With": "hy2tun",
 		"Origin":           ts.URL,
 		"Sec-Fetch-Site":   "cross-site",
+	})
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	resp.Body.Close()
+
+	// The Origin scheme must match the request scheme, not just the host.
+	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/clients/c1/mappings", body, cookie, map[string]string{
+		"Content-Type":     "application/json",
+		"X-Requested-With": "hy2tun",
+		"Origin":           strings.Replace(ts.URL, "http://", "https://", 1),
 	})
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	resp.Body.Close()
@@ -445,6 +460,7 @@ func TestServerWebPushMappings(t *testing.T) {
 	require.Len(t, api.pushMappings, 2)
 	require.Equal(t, "ssh", api.pushMappings[0].Note)
 	require.Equal(t, "wg", api.pushMappings[1].Note)
+	require.Zero(t, api.pushMappings[1].RemotePort, "auto mappings must keep remote_port 0")
 
 	// The detail fragment reflects the new revision and mappings.
 	resp = doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/clients/c1/detail", "", cookie, nil)
@@ -458,6 +474,51 @@ func TestServerWebPushMappings(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	client := readJSON[view.ClientView](t, resp)
 	require.Equal(t, int64(4), client.Revision)
+}
+
+func TestServerWebAutoMappingKeepsAutoPort(t *testing.T) {
+	api := &fakeServerAPI{
+		clients: []view.ClientView{{
+			ID:       "c1",
+			Name:     "home",
+			Online:   true,
+			Revision: 2,
+			Mappings: []view.MappingView{{
+				Mapping: config.Mapping{
+					ID:         "m-auto",
+					Type:       "udp",
+					RemotePort: 0,
+					LocalAddr:  "127.0.0.1:51820",
+					Note:       "auto",
+					Enabled:    true,
+				},
+				Status:       "running",
+				AssignedPort: 20001,
+			}},
+		}},
+	}
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	resp := doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/clients/c1/detail", "", cookie, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readBody(t, resp)
+	require.Contains(t, body, `data-mapping-id="m-auto"`)
+	// The drawer's collectMappings reads data-mapping-port. Auto rows must
+	// keep 0 so a note-only edit does not pin the server-assigned port.
+	require.Contains(t, body, `data-mapping-port="0"`)
+	require.Contains(t, body, `data-mapping-assigned="20001"`)
+	require.Contains(t, body, "20001")
+
+	// A note-only edit keeps remote_port 0, so the server keeps the
+	// auto-assigned port instead of pinning it.
+	noteOnly := `{"base_revision":2,"mappings":[{"id":"m-auto","type":"udp","remote_port":0,"local_addr":"127.0.0.1:51820","note":"renamed","enabled":true}]}`
+	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/clients/c1/mappings", noteOnly, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	resp.Body.Close()
+	require.Equal(t, 1, api.pushes)
+	require.Zero(t, api.pushMappings[0].RemotePort)
+	require.Equal(t, "renamed", api.pushMappings[0].Note)
 }
 
 func TestServerWebPushErrors(t *testing.T) {
@@ -533,7 +594,7 @@ func TestServerWebPushValidation(t *testing.T) {
 	}
 }
 
-func TestServerWebPushAllowsAbsentOrigin(t *testing.T) {
+func TestServerWebPushRequiresOrigin(t *testing.T) {
 	api := &fakeServerAPI{clients: []view.ClientView{{ID: "c1", Online: true, Revision: 1}}}
 	_, ts := newTestWeb(t, api)
 	cookie := login(t, ts)
@@ -543,9 +604,9 @@ func TestServerWebPushAllowsAbsentOrigin(t *testing.T) {
 		"Content-Type":     "application/json",
 		"X-Requested-With": "hy2tun",
 	})
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	resp.Body.Close()
-	require.Equal(t, 1, api.pushes)
+	require.Zero(t, api.pushes)
 }
 
 func TestServerWebClientsPages(t *testing.T) {
