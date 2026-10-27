@@ -278,14 +278,14 @@ func (s *Server) newHandler() http.Handler {
 
 	mux.HandleFunc("GET /login", s.handleLoginPage)
 	mux.Handle("POST /api/login", s.login)
-	mux.Handle("POST /api/logout", shared.RequireCSRFAllowMissingOrigin(http.HandlerFunc(s.handleLogout)))
+	mux.Handle("POST /api/logout", shared.RequireCSRF(http.HandlerFunc(s.handleLogout)))
 
 	mux.Handle("GET /{$}", s.auth(http.HandlerFunc(s.handlePage)))
 	mux.Handle("GET /api/status", s.auth(http.HandlerFunc(s.handleStatusJSON)))
 	mux.Handle("GET /api/mappings", s.auth(http.HandlerFunc(s.handleMappingsJSON)))
-	mux.Handle("POST /api/mappings", s.auth(shared.RequireCSRFAllowMissingOrigin(http.HandlerFunc(s.handleAddMapping))))
-	mux.Handle("PUT /api/mappings/{id}", s.auth(shared.RequireCSRFAllowMissingOrigin(http.HandlerFunc(s.handleUpdateMapping))))
-	mux.Handle("DELETE /api/mappings/{id}", s.auth(shared.RequireCSRFAllowMissingOrigin(http.HandlerFunc(s.handleDeleteMapping))))
+	mux.Handle("POST /api/mappings", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleAddMapping))))
+	mux.Handle("PUT /api/mappings/{id}", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateMapping))))
+	mux.Handle("DELETE /api/mappings/{id}", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleDeleteMapping))))
 	mux.Handle("GET /api/logs", s.auth(http.HandlerFunc(s.handleLogsJSON)))
 	mux.Handle("GET /api/events", s.auth(http.HandlerFunc(s.handleEvents)))
 
@@ -569,11 +569,10 @@ func validateMapping(mapping config.Mapping) error {
 }
 
 func (s *Server) writeMappingError(w http.ResponseWriter, err error) {
-	message := err.Error()
 	switch {
-	case strings.Contains(message, "not found"):
+	case errors.Is(err, config.ErrMappingNotFound):
 		writeJSONErrorCode(w, http.StatusNotFound, "not_found", "映射不存在")
-	case strings.Contains(message, "already exists"):
+	case errors.Is(err, config.ErrMappingExists):
 		writeJSONErrorCode(w, http.StatusConflict, "conflict", "映射 ID 已存在")
 	default:
 		s.log.Warn("client mapping edit failed", "error", err)

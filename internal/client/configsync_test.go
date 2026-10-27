@@ -48,6 +48,26 @@ func loadClientConfig(t *testing.T, path string) *config.ClientConfig {
 	return cfg
 }
 
+func TestMappingEditErrorsUseSentinels(t *testing.T) {
+	cfgPath := writeTempClientConfig(t, 1)
+	cl, err := New(loadClientConfig(t, cfgPath), slog.Default())
+	require.NoError(t, err)
+	defer cl.Close()
+
+	err = cl.UpdateMapping(config.Mapping{
+		ID: "missing", Type: "tcp", LocalAddr: "127.0.0.1:9002", Enabled: true,
+	})
+	require.ErrorIs(t, err, config.ErrMappingNotFound)
+
+	err = cl.DeleteMapping("missing")
+	require.ErrorIs(t, err, config.ErrMappingNotFound)
+
+	err = cl.AddMapping(config.Mapping{
+		ID: "m1", Type: "tcp", LocalAddr: "127.0.0.1:9002", Enabled: true,
+	})
+	require.ErrorIs(t, err, config.ErrMappingExists)
+}
+
 func TestAddMappingWritesConfigAndBumpsRevision(t *testing.T) {
 	cfgPath := writeTempClientConfig(t, 3)
 	cl, err := New(loadClientConfig(t, cfgPath), slog.Default())

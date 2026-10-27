@@ -30,7 +30,7 @@ func (c *Client) AddMapping(mapping config.Mapping) error {
 		if mapping.ID != "" {
 			for _, existing := range cfg.Mappings {
 				if existing.ID == mapping.ID {
-					return fmt.Errorf("mapping %q already exists", mapping.ID)
+					return fmt.Errorf("mapping %q: %w", mapping.ID, config.ErrMappingExists)
 				}
 			}
 		}
@@ -56,7 +56,7 @@ func (c *Client) UpdateMapping(mapping config.Mapping) error {
 				return nil
 			}
 		}
-		return fmt.Errorf("mapping %q not found", mapping.ID)
+		return fmt.Errorf("mapping %q: %w", mapping.ID, config.ErrMappingNotFound)
 	}); err != nil {
 		return err
 	}
@@ -78,7 +78,7 @@ func (c *Client) DeleteMapping(id string) error {
 			cfg.Mappings = append(cfg.Mappings[:i], cfg.Mappings[i+1:]...)
 			return nil
 		}
-		return fmt.Errorf("mapping %q not found", id)
+		return fmt.Errorf("mapping %q: %w", id, config.ErrMappingNotFound)
 	}); err != nil {
 		return err
 	}
@@ -184,6 +184,15 @@ func (c *Client) storeConfigLocked(next *config.ClientConfig, tokens map[string]
 	c.mappingConfigs = mappingConfigMap(next.Mappings)
 	c.udpTokens = tokens
 	c.mappings = views
+	remaining := make(map[string]struct{}, len(next.Mappings))
+	for _, mapping := range next.Mappings {
+		remaining[mapping.ID] = struct{}{}
+	}
+	for id := range c.traffic {
+		if _, ok := remaining[id]; !ok {
+			delete(c.traffic, id)
+		}
+	}
 	c.mu.Unlock()
 }
 

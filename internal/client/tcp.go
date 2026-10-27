@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	hyclient "github.com/apernet/hysteria/core/v2/client"
@@ -105,9 +106,25 @@ func (c *Client) pipe(local, remote net.Conn) {
 	c.pipeMapping("", local, remote)
 }
 
+// countingWriter increments a mapping counter for every byte written. It is
+// deliberately a plain io.Writer so io.Copy cannot bypass it with ReaderFrom.
+type countingWriter struct {
+	writer  io.Writer
+	counter *atomic.Uint64
+}
+
+func (w countingWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	if n > 0 && w.counter != nil {
+		w.counter.Add(uint64(n))
+	}
+	return n, err
+}
+
 // pipeMapping is pipe with per-mapping traffic accounting. Bytes from the
 // server to the local target count as down (Rx); bytes from the local target
-// back to the server count as up (Tx).
+// back to the server count as up (Tx). Counters advance on each successful
+// write, so long-lived connections update while they are still open.
 func (c *Client) pipeMapping(mappingID string, local, remote net.Conn) {
 	traffic := c.trafficFor(mappingID)
 
@@ -119,20 +136,21 @@ func (c *Client) pipeMapping(mappingID string, local, remote net.Conn) {
 		})
 	}
 
+	rxWriter := io.Writer(local)
+	txWriter := io.Writer(remote)
+	if traffic != nil {
+		rxWriter = countingWriter{writer: local, counter: &traffic.rx}
+		txWriter = countingWriter{writer: remote, counter: &traffic.tx}
+	}
+
 	done := make(chan struct{}, 2)
 	go func() {
 		defer func() { done <- struct{}{} }()
-		n, _ := io.Copy(local, remote)
-		if traffic != nil {
-			traffic.rx.Add(uint64(n))
-		}
+		_, _ = io.Copy(rxWriter, remote)
 	}()
 	go func() {
 		defer func() { done <- struct{}{} }()
-		n, _ := io.Copy(remote, local)
-		if traffic != nil {
-			traffic.tx.Add(uint64(n))
-		}
+		_, _ = io.Copy(txWriter, local)
 	}()
 
 	<-done

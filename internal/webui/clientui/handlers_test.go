@@ -223,6 +223,7 @@ func TestClientWebAddMappingWritesConfig(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/mappings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Requested-With", "hy2tun")
+	req.Header.Set("Origin", ts.URL)
 	req.AddCookie(resp.Cookies()[0])
 	resp, err = client.Do(req)
 	require.NoError(t, err)
@@ -242,7 +243,7 @@ func TestClientWebUpdateMapping(t *testing.T) {
 
 	cookie := loginClientWeb(t, ts)
 	body := `{"id":"m1","type":"tcp","remote_port":2222,"local_addr":"192.168.1.10:22","note":"changed","enabled":true}`
-	resp := doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/mappings/m1", body, cookie, map[string]string{"X-Requested-With": "hy2tun"})
+	resp := doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/mappings/m1", body, cookie, map[string]string{"X-Requested-With": "hy2tun", "Origin": ts.URL})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Len(t, api.updated, 1)
 	require.Equal(t, "changed", api.updated[0].Note)
@@ -255,10 +256,31 @@ func TestClientWebDeleteMapping(t *testing.T) {
 	_, ts := newTestClientWeb(t, api)
 
 	cookie := loginClientWeb(t, ts)
-	resp := doClientRequest(t, ts.Client(), http.MethodDelete, ts.URL+"/api/mappings/m1", "", cookie, map[string]string{"X-Requested-With": "hy2tun"})
+	resp := doClientRequest(t, ts.Client(), http.MethodDelete, ts.URL+"/api/mappings/m1", "", cookie, map[string]string{"X-Requested-With": "hy2tun", "Origin": ts.URL})
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 	require.Equal(t, []string{"m1"}, api.deleted)
 	resp.Body.Close()
+}
+
+func TestClientWebMappingErrorStatusCodes(t *testing.T) {
+	api := &fakeClientAPI{addErr: config.ErrMappingExists, updateErr: config.ErrMappingNotFound}
+	_, ts := newTestClientWeb(t, api)
+	cookie := loginClientWeb(t, ts)
+
+	body := `{"id":"m1","type":"tcp","remote_port":2222,"local_addr":"127.0.0.1:22","enabled":true}`
+	resp := doClientRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/mappings", body, cookie, map[string]string{
+		"X-Requested-With": "hy2tun",
+		"Origin":           ts.URL,
+	})
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	readClientBody(t, resp)
+
+	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/mappings/m1", body, cookie, map[string]string{
+		"X-Requested-With": "hy2tun",
+		"Origin":           ts.URL,
+	})
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	readClientBody(t, resp)
 }
 
 func TestClientWebRejectsBadMapping(t *testing.T) {
@@ -267,7 +289,7 @@ func TestClientWebRejectsBadMapping(t *testing.T) {
 
 	cookie := loginClientWeb(t, ts)
 	body := `{"type":"tcp","remote_port":2222,"local_addr":"","enabled":true}`
-	resp := doClientRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/mappings", body, cookie, map[string]string{"X-Requested-With": "hy2tun"})
+	resp := doClientRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/mappings", body, cookie, map[string]string{"X-Requested-With": "hy2tun", "Origin": ts.URL})
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	require.Empty(t, api.added)
 	readClientBody(t, resp)
@@ -388,10 +410,25 @@ func TestClientWebRequiresAuthAndCSRF(t *testing.T) {
 	resp.Body.Close()
 
 	cookie := loginClientWeb(t, ts)
-	resp = doClientRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/mappings", `{"type":"tcp","local_addr":"127.0.0.1:22","enabled":true}`, cookie, nil)
+	body := `{"type":"tcp","local_addr":"127.0.0.1:22","enabled":true}`
+	resp = doClientRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/mappings", body, cookie, nil)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
-	require.Empty(t, api.added)
 	resp.Body.Close()
+
+	// A custom header alone is not enough: a same-origin Origin is required.
+	resp = doClientRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/mappings", body, cookie, map[string]string{"X-Requested-With": "hy2tun"})
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	resp.Body.Close()
+
+	// A cross-origin Origin is rejected even with the custom header.
+	resp = doClientRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/mappings", body, cookie, map[string]string{
+		"X-Requested-With": "hy2tun",
+		"Origin":           "http://evil.example",
+	})
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	resp.Body.Close()
+
+	require.Empty(t, api.added)
 }
 
 func TestClientWebStaticAndLoginPage(t *testing.T) {

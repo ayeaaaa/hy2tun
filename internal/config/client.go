@@ -3,11 +3,19 @@ package config
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"time"
 
 	"gopkg.in/yaml.v3"
+)
+
+// Mapping edit errors are stable so API layers can map them to status codes
+// without matching error strings.
+var (
+	ErrMappingNotFound = errors.New("mapping not found")
+	ErrMappingExists   = errors.New("mapping already exists")
 )
 
 // DefaultClientWebListen is the conventional LAN management address for the

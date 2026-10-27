@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -32,8 +33,8 @@ func newLogBuffer(size int) *logBuffer {
 }
 
 // Write parses one or more newline-delimited log records. A JSON record (as
-// produced by slog's JSON handler) preserves its timestamp, level, and message;
-// any other line is stored as an informational message.
+// produced by slog's JSON handler) preserves its timestamp, level, message, and
+// structured attributes; any other line is stored as an informational message.
 func (b *logBuffer) Write(p []byte) (int, error) {
 	if b == nil {
 		return len(p), nil
@@ -51,28 +52,74 @@ func (b *logBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-type jsonLogLine struct {
-	Time  string `json:"time"`
-	Level string `json:"level"`
-	Msg   string `json:"msg"`
+// standardLogFields are consumed into dedicated LogEntry fields. Every other
+// top-level JSON key is a structured attribute and is appended to the message.
+var standardLogFields = map[string]struct{}{
+	"time":   {},
+	"level":  {},
+	"msg":    {},
+	"source": {},
 }
 
 func parseLogLine(line string) view.LogEntry {
-	var raw jsonLogLine
-	if err := json.Unmarshal([]byte(line), &raw); err == nil && (raw.Level != "" || raw.Msg != "") {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(line), &fields); err == nil && fields != nil && len(fields) > 0 {
 		entry := view.LogEntry{
 			Time:    time.Now(),
-			Level:   strings.ToUpper(raw.Level),
-			Message: raw.Msg,
+			Level:   strings.ToUpper(jsonString(fields["level"])),
+			Message: jsonString(fields["msg"]),
 		}
-		if raw.Time != "" {
-			if parsed, err := time.Parse(time.RFC3339Nano, raw.Time); err == nil {
+		if rawTime := jsonString(fields["time"]); rawTime != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, rawTime); err == nil {
 				entry.Time = parsed
 			}
+		}
+		if attrs := formatLogAttrs(fields); attrs != "" {
+			if entry.Message != "" {
+				entry.Message += " "
+			}
+			entry.Message += attrs
 		}
 		return entry
 	}
 	return view.LogEntry{Time: time.Now(), Level: "INFO", Message: line}
+}
+
+func jsonString(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return value
+}
+
+// formatLogAttrs renders non-standard fields as key=value pairs in a stable
+// order so the log tab shows mapping IDs, errors, and other slog attributes.
+func formatLogAttrs(fields map[string]json.RawMessage) string {
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		if _, standard := standardLogFields[key]; standard {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+"="+jsonValue(fields[key]))
+	}
+	return strings.Join(parts, " ")
+}
+
+func jsonValue(raw json.RawMessage) string {
+	if value := jsonString(raw); value != "" {
+		return value
+	}
+	return strings.TrimSpace(string(raw))
 }
 
 func (b *logBuffer) appendLocked(entry view.LogEntry) {

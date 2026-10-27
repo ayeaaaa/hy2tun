@@ -1,6 +1,7 @@
 package client
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"testing"
@@ -19,6 +20,20 @@ func TestLogBufferKeepsLastN(t *testing.T) {
 	require.Len(t, entries, logBufferSize)
 	require.Equal(t, "line 101", entries[0].Message)
 	require.Equal(t, "line 600", entries[len(entries)-1].Message)
+}
+
+func TestLogBufferIncludesStructuredAttrs(t *testing.T) {
+	buffer := newLogBuffer(10)
+	logger := slog.New(slog.NewJSONHandler(buffer, nil))
+
+	logger.Warn("reverse UDP receive failed", "mapping", "m1", "error", errors.New("boom"))
+
+	entries := buffer.Entries("", 0)
+	require.Len(t, entries, 1)
+	require.Equal(t, "WARN", entries[0].Level)
+	require.Contains(t, entries[0].Message, "reverse UDP receive failed")
+	require.Contains(t, entries[0].Message, "mapping=m1")
+	require.Contains(t, entries[0].Message, "error=boom")
 }
 
 func TestLogBufferFiltersByLevelAndLimits(t *testing.T) {

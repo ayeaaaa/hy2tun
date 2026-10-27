@@ -273,17 +273,6 @@ func IsAPIRequest(r *http.Request) bool {
 // differs from the request. Non-browser API clients must send an Origin header
 // that matches the scheme and Host they use to reach the console.
 func RequireCSRF(next http.Handler) http.Handler {
-	return requireCSRF(next, false)
-}
-
-// RequireCSRFAllowMissingOrigin is RequireCSRF for API clients that do not send
-// an Origin header. It still requires X-Requested-With and rejects any Origin
-// that does not match the request, as well as cross-site fetch metadata.
-func RequireCSRFAllowMissingOrigin(next http.Handler) http.Handler {
-	return requireCSRF(next, true)
-}
-
-func requireCSRF(next http.Handler, allowMissingOrigin bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get(CSRFHeader) != CSRFValue {
 			writeJSONError(w, http.StatusForbidden, "forbidden")
@@ -291,15 +280,7 @@ func requireCSRF(next http.Handler, allowMissingOrigin bool) http.Handler {
 		}
 		origin := r.Header.Get("Origin")
 		if origin == "" {
-			if !allowMissingOrigin {
-				writeJSONError(w, http.StatusForbidden, "forbidden")
-				return
-			}
-			if !allowedFetchSite(r) {
-				writeJSONError(w, http.StatusForbidden, "forbidden")
-				return
-			}
-			next.ServeHTTP(w, r)
+			writeJSONError(w, http.StatusForbidden, "forbidden")
 			return
 		}
 		parsed, err := url.Parse(origin)
@@ -310,21 +291,14 @@ func requireCSRF(next http.Handler, allowMissingOrigin bool) http.Handler {
 			writeJSONError(w, http.StatusForbidden, "forbidden")
 			return
 		}
-		if !allowedFetchSite(r) {
+		switch r.Header.Get("Sec-Fetch-Site") {
+		case "", "same-origin", "none":
+		default:
 			writeJSONError(w, http.StatusForbidden, "forbidden")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-func allowedFetchSite(r *http.Request) bool {
-	switch r.Header.Get("Sec-Fetch-Site") {
-	case "", "same-origin", "none":
-		return true
-	default:
-		return false
-	}
 }
 
 func requestScheme(r *http.Request) string {
