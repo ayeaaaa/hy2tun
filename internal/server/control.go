@@ -122,11 +122,10 @@ func (h *controlHandler) loop(sess *clientSession) {
 		case *control.Update:
 			results, accepted := h.server.mappings.update(sess, message.Revision, message.Mappings)
 			if !accepted {
-				h.log.Debug("rejected stale control update",
+				h.log.Debug("rejected control update",
 					"client", sess.id,
 					"revision", message.Revision,
 				)
-				results = []control.Result{{Error: string(control.CodeStaleRevision)}}
 			}
 			if err := sess.write(&control.UpdateAck{
 				Type:     control.TypeUpdateAck,

@@ -42,6 +42,7 @@ type Client struct {
 	serverAddr  net.Addr
 	tlsConfig   hyclient.TLSConfig
 	connFactory hyclient.ConnFactory
+	newHY2      func(*hyclient.Config) (hyclient.Client, *hyclient.HandshakeInfo, error)
 	startedAt   time.Time
 
 	mu          sync.Mutex
@@ -98,6 +99,7 @@ func New(cfg *config.ClientConfig, log *slog.Logger) (*Client, error) {
 		serverAddr:  serverAddr,
 		tlsConfig:   tlsConfig,
 		connFactory: connFactory,
+		newHY2:      hyclient.NewClient,
 		startedAt:   time.Now(),
 		mappings:    mappingViews(cfg.Mappings, nil),
 		udpTokens:   make(map[string]string),

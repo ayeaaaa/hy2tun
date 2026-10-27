@@ -42,11 +42,51 @@ type mappingRuntime struct {
 	tcpListener net.Listener
 	udpConn     *net.UDPConn
 
+	activeMu sync.Mutex
+	active   map[net.Conn]struct{}
+
 	txBytes atomic.Uint64
 	rxBytes atomic.Uint64
 }
 
-// close releases the listener or UDP socket owned by the runtime.
+// trackActive records a live data-plane connection for this mapping.
+func (m *mappingRuntime) trackActive(conn net.Conn) {
+	if conn == nil {
+		return
+	}
+	m.activeMu.Lock()
+	if m.active == nil {
+		m.active = make(map[net.Conn]struct{})
+	}
+	m.active[conn] = struct{}{}
+	m.activeMu.Unlock()
+}
+
+// untrackActive removes a connection from the active set.
+func (m *mappingRuntime) untrackActive(conn net.Conn) {
+	m.activeMu.Lock()
+	delete(m.active, conn)
+	m.activeMu.Unlock()
+}
+
+// closeActive closes every live connection for this mapping. It is used when a
+// mapping is removed, disabled, or retargeted.
+func (m *mappingRuntime) closeActive() {
+	m.activeMu.Lock()
+	conns := make([]net.Conn, 0, len(m.active))
+	for conn := range m.active {
+		conns = append(conns, conn)
+	}
+	m.active = make(map[net.Conn]struct{})
+	m.activeMu.Unlock()
+
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+}
+
+// close releases the listener, UDP socket, and active connections owned by the
+// runtime.
 func (m *mappingRuntime) close() {
 	if m.tcpListener != nil {
 		_ = m.tcpListener.Close()
@@ -54,6 +94,7 @@ func (m *mappingRuntime) close() {
 	if m.udpConn != nil {
 		_ = m.udpConn.Close()
 	}
+	m.closeActive()
 }
 
 // clientSession is one live control stream and its registered mappings.
@@ -146,29 +187,183 @@ func (m *mappingManager) register(sess *clientSession, mappings []config.Mapping
 }
 
 // update applies a new mapping list from the client. It reports false when the
-// revision is not newer than the one already recorded.
+// revision is not newer than the one already recorded or when a new/changed
+// mapping cannot be bound. In the failure case the previous mapping set is left
+// untouched.
 func (m *mappingManager) update(sess *clientSession, revision int64, mappings []config.Mapping) ([]control.Result, bool) {
 	now := time.Now()
 
 	m.mu.Lock()
+	results, accepted := m.updateLocked(sess, revision, mappings, now)
+	m.mu.Unlock()
+
+	if accepted {
+		m.saveState()
+	}
+	return results, accepted
+}
+
+// updateLocked diffs the new mapping list against the live session. Unchanged
+// mappings keep their listener and UDP token; new or changed mappings are
+// pre-bound while the old set is still running. Any pre-bind failure rolls back
+// the new listeners and leaves the old session untouched.
+func (m *mappingManager) updateLocked(sess *clientSession, revision int64, mappings []config.Mapping, now time.Time) ([]control.Result, bool) {
 	if m.sessions[sess.id] != sess {
-		m.mu.Unlock()
 		return nil, false
 	}
 	if revision <= sess.revision {
-		m.mu.Unlock()
-		return nil, false
+		return []control.Result{{Error: string(control.CodeStaleRevision)}}, false
 	}
 
-	m.closeMappingsLocked(sess)
+	results := make([]control.Result, len(mappings))
+	next := make(map[string]config.Mapping, len(mappings))
+	malformed := false
+	for i, mapping := range mappings {
+		results[i] = control.Result{ID: mapping.ID}
+		switch {
+		case mapping.ID == "":
+			results[i].Error = string(control.CodeBadMessage)
+			malformed = true
+		default:
+			if _, duplicate := next[mapping.ID]; duplicate {
+				results[i].Error = string(control.CodeBadMessage)
+				malformed = true
+				continue
+			}
+			next[mapping.ID] = mapping
+		}
+	}
+	if malformed {
+		markRolledBack(results)
+		return results, false
+	}
+
+	type updatePlan struct {
+		mapping config.Mapping
+		old     *mappingRuntime
+		fresh   *mappingRuntime
+		keep    bool
+	}
+	plans := make([]updatePlan, len(mappings))
+	ignored := make(map[*mappingRuntime]struct{})
+	for i, mapping := range mappings {
+		old := sess.mappings[mapping.ID]
+		plan := updatePlan{mapping: mapping, old: old}
+		if old != nil {
+			switch {
+			case old.status == mappingStatusRunning:
+				if mapping.Enabled &&
+					old.mapping.Type == mapping.Type &&
+					mappingPortUnchanged(old, mapping) {
+					plan.keep = true
+				}
+			case old.status == mappingStatusDisabled:
+				plan.keep = !mapping.Enabled
+			}
+		}
+		if !plan.keep && old != nil {
+			ignored[old] = struct{}{}
+		}
+		plans[i] = plan
+	}
+	for id, old := range sess.mappings {
+		if _, exists := next[id]; !exists {
+			ignored[old] = struct{}{}
+		}
+	}
+
+	var prebound []*mappingRuntime
+	failed := false
+	for i := range plans {
+		plan := &plans[i]
+		if plan.keep {
+			results[i] = control.Result{
+				ID:           plan.mapping.ID,
+				OK:           true,
+				AssignedPort: plan.old.assignedPort,
+				UDPToken:     plan.old.udpToken,
+			}
+			continue
+		}
+		if !plan.mapping.Enabled {
+			plan.fresh = &mappingRuntime{
+				mapping: plan.mapping,
+				status:  mappingStatusDisabled,
+			}
+			results[i] = control.Result{ID: plan.mapping.ID, OK: true}
+			continue
+		}
+
+		rt := &mappingRuntime{mapping: plan.mapping, status: mappingStatusPending}
+		result := m.bindLocked(sess, rt, ignored, prebound)
+		results[i] = result
+		if !result.OK {
+			failed = true
+			continue
+		}
+		plan.fresh = rt
+		prebound = append(prebound, rt)
+	}
+	if failed {
+		for _, rt := range prebound {
+			rt.close()
+		}
+		markRolledBack(results)
+		return results, false
+	}
+
+	newMappings := make(map[string]*mappingRuntime, len(plans))
+	newOrder := make([]string, 0, len(plans))
+	for i := range plans {
+		plan := &plans[i]
+		if plan.keep {
+			rt := plan.old
+			localAddrChanged := rt.mapping.LocalAddr != plan.mapping.LocalAddr
+			rt.mapping = plan.mapping
+			if localAddrChanged {
+				rt.closeActive()
+			}
+			newMappings[plan.mapping.ID] = rt
+			newOrder = append(newOrder, plan.mapping.ID)
+			continue
+		}
+		if plan.old != nil {
+			plan.old.close()
+		}
+		newMappings[plan.mapping.ID] = plan.fresh
+		newOrder = append(newOrder, plan.mapping.ID)
+	}
+	for id, old := range sess.mappings {
+		if _, exists := next[id]; !exists {
+			old.close()
+		}
+	}
+
+	sess.mappings = newMappings
+	sess.order = newOrder
 	sess.revision = revision
 	sess.lastSeen = now
-	results := m.applyLocked(sess, mappings)
 	m.persistLocked(sess, now)
-	m.mu.Unlock()
-
-	m.saveState()
 	return results, true
+}
+
+// mappingPortUnchanged reports whether next keeps the port currently bound for
+// old. A requested port of 0 means "keep the server-assigned port".
+func mappingPortUnchanged(old *mappingRuntime, next config.Mapping) bool {
+	if next.RemotePort == 0 {
+		return true
+	}
+	return next.RemotePort == old.assignedPort
+}
+
+// markRolledBack replaces successful results with an internal error so clients
+// can tell that no part of a failed update was applied.
+func markRolledBack(results []control.Result) {
+	for i := range results {
+		if results[i].Error == "" {
+			results[i] = control.Result{ID: results[i].ID, Error: string(control.CodeInternal)}
+		}
+	}
 }
 
 // sessionRevision returns the current revision of sess, or zero when the
@@ -268,14 +463,14 @@ func (m *mappingManager) applyLocked(sess *clientSession, mappings []config.Mapp
 			results = append(results, control.Result{ID: mapping.ID, OK: true})
 			continue
 		}
-		results = append(results, m.bindLocked(sess, rt))
+		results = append(results, m.bindLocked(sess, rt, nil, nil))
 	}
 	return results
 }
 
 // bindLocked allocates and binds one mapping while the manager lock is held,
 // so no other client can claim the same port in between.
-func (m *mappingManager) bindLocked(sess *clientSession, rt *mappingRuntime) control.Result {
+func (m *mappingManager) bindLocked(sess *clientSession, rt *mappingRuntime, ignore map[*mappingRuntime]struct{}, extra []*mappingRuntime) control.Result {
 	mapping := rt.mapping
 	if mapping.Type != "tcp" && mapping.Type != "udp" {
 		return m.fail(rt, control.CodeBadMessage)
@@ -301,7 +496,7 @@ func (m *mappingManager) bindLocked(sess *clientSession, rt *mappingRuntime) con
 			if _, reserved := m.reserved[candidate]; reserved {
 				return false
 			}
-			return m.portFreeLocked(mapping.Type, candidate)
+			return m.portFreeLocked(mapping.Type, candidate, ignore, extra)
 		}, func(candidate int) bool {
 			_, reserved := softReserved[candidate]
 			return reserved
@@ -384,15 +579,30 @@ func (m *mappingManager) acceptTCP(listener net.Listener) {
 }
 
 // portFreeLocked reports whether no live mapping of typ currently owns port.
-func (m *mappingManager) portFreeLocked(typ string, port int) bool {
+// Runtimes in ignore are being replaced or removed by the current update and
+// do not block their old ports; extra contains runtimes pre-bound by the same
+// update and not yet committed.
+func (m *mappingManager) portFreeLocked(typ string, port int, ignore map[*mappingRuntime]struct{}, extra []*mappingRuntime) bool {
+	matches := func(rt *mappingRuntime) bool {
+		return rt.status == mappingStatusRunning &&
+			rt.mapping.Type == typ &&
+			rt.assignedPort == port
+	}
 	for _, sess := range m.sessions {
 		for _, rt := range sess.mappings {
-			if rt.status != mappingStatusRunning {
-				continue
+			if ignore != nil {
+				if _, skip := ignore[rt]; skip {
+					continue
+				}
 			}
-			if rt.mapping.Type == typ && rt.assignedPort == port {
+			if matches(rt) {
 				return false
 			}
+		}
+	}
+	for _, rt := range extra {
+		if matches(rt) {
+			return false
 		}
 	}
 	return true
