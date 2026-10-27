@@ -1,0 +1,83 @@
+# hy2tund example configuration.
+#
+# Copy this file to /etc/hy2tun/server.yaml and replace every placeholder.
+# The file contains secrets (HY2 password, control token, bcrypt hash) and
+# must be readable only by root: chmod 600 /etc/hy2tun/server.yaml.
+
+# Public HY2 listener. UDP 443 is the conventional choice because it survives
+# most restrictive networks. Use ":443" to listen on every interface.
+listen: ":443"
+
+# Optional address used for the public reverse-mapping listeners. An empty
+# value binds them on every interface.
+listen_host: ""
+
+auth:
+  type: password
+  password: "change-me-to-a-strong-password"
+  # userpass authentication is also supported:
+  # type: userpass
+  # users:
+  #   alice: "another-strong-password"
+
+tls:
+  cert: "/etc/hy2tun/cert.pem"
+  key: "/etc/hy2tun/key.pem"
+
+# Optional Salamander obfuscation. The same password must be configured on
+# every client. Leave type empty to disable it.
+obfs:
+  type: ""
+  salamander:
+    password: ""
+
+# HY2 bandwidth limits. 0 means unlimited. Values are bit rates when written
+# with a "ps" suffix ("100 mbps") and bytes when written without it.
+bandwidth:
+  up: 0
+  down: 0
+  ignore_client: false
+
+quic:
+  initial_stream_receive_window: "8 mb"
+  max_stream_receive_window: "8 mb"
+  initial_connection_receive_window: "20 mb"
+  max_connection_receive_window: "20 mb"
+  max_idle_timeout: "30s"
+  max_incoming_streams: 4096
+
+# Shared secret for the hy2tun control protocol. It is independent from the
+# HY2 password above and must be identical on the server and every client.
+# Generate one with: openssl rand -hex 32
+control:
+  token: "replace-with-a-random-32-byte-hex-string"
+
+# Public ports that clients may request. An empty allow list permits every
+# free port; deny always wins. Each entry is a single port or an inclusive
+# range. remote_port: 0 on the client allocates from allow when it is
+# non-empty, otherwise from auto_range.
+ports:
+  allow: ["2222", "8000-8100", "51820"]
+  deny: []
+  auto_range: "20000-29999"
+  offline_reserve: "24h"
+
+# The example management console binds to loopback. Reach it through SSH,
+# a VPN, or a TLS reverse proxy; do not expose it directly to the internet.
+# An empty password_hash makes the server generate a password on first start
+# and print it once to stderr.
+web:
+  listen: "127.0.0.1:7500"
+  username: "admin"
+  password_hash: ""
+  tls:
+    cert: ""
+    key: ""
+
+# Persists the last-known client and mapping state so offline reservations
+# survive a restart. The directory must be writable by the hy2tund user.
+state_file: "/var/lib/hy2tun/state.json"
+
+log:
+  level: "info"
+  file: ""

@@ -1,0 +1,23 @@
+[Unit]
+Description=hy2tun client (reverse port mappings)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The client writes its generated ID, assigned public ports, and web session
+# key next to client.yaml. Run it as root by default, or change User= and make
+# /etc/hy2tun writable by that account.
+User=root
+Group=root
+ExecStart=/usr/local/bin/hy2tun -c /etc/hy2tun/client.yaml
+Restart=always
+RestartSec=2s
+LimitNOFILE=1048576
+NoNewPrivileges=true
+PrivateTmp=true
+ConfigurationDirectory=hy2tun
+WorkingDirectory=/etc/hy2tun
+
+[Install]
+WantedBy=multi-user.target

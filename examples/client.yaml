@@ -1,0 +1,88 @@
+# hy2tun example configuration.
+#
+# Copy this file to /etc/hy2tun/client.yaml and replace every placeholder.
+# The file contains secrets (HY2 password and control token) and must be
+# readable only by the user that runs hy2tun: chmod 600 /etc/hy2tun/client.yaml.
+
+# Address and port of the hy2tund HY2 listener.
+server: "sg.example.com:443"
+
+# The HY2 password from the server's auth section. For userpass auth use
+# "user:password" instead.
+auth: "change-me-to-the-server-password"
+
+tls:
+  # SNI sent to the server. Leave empty to use the host part of "server".
+  sni: "sg.example.com"
+  # Do not enable this on an untrusted network. Prefer "ca" or a public
+  # certificate instead.
+  insecure: false
+  # Optional SHA-256 pin of the server certificate (DER). Generate it with:
+  # openssl x509 -in cert.pem -outform der | sha256sum
+  pin_sha256: ""
+  # Copy the server certificate here for a self-signed deployment, or leave
+  # empty to use the system trust store (for example Let's Encrypt).
+  ca: "/etc/hy2tun/cert.pem"
+
+# Must match the server's obfs section.
+obfs:
+  type: ""
+  salamander:
+    password: ""
+
+bandwidth:
+  up: "50 mbps"
+  down: "200 mbps"
+
+# Must match the server's control.token exactly (at least 16 bytes).
+control:
+  token: "replace-with-the-server-control-token"
+
+client:
+  # Empty means the client generates an ID on first start and writes it back.
+  id: ""
+  name: "home-router"
+  revision: 1
+
+# Each mapping exposes one server public port to a host reachable from this
+# client. remote_port: 0 asks the server to allocate a free port from its
+# allowed ranges. enabled: false keeps a mapping in the configuration without
+# registering it.
+mappings:
+  - id: "m-ssh"
+    type: tcp
+    remote_port: 2222
+    local_addr: "192.168.1.10:22"
+    note: "NAS SSH"
+    enabled: true
+  - id: "m-wireguard"
+    type: udp
+    remote_port: 51820
+    local_addr: "192.168.1.10:51820"
+    note: "WireGuard"
+    enabled: true
+
+# The example client console listens on the LAN and always requires a
+# login. An empty password_hash makes the client generate a password on first
+# start and print it once to stderr. Enable web.tls or keep the console on a
+# trusted LAN/VPN because HTTP management traffic is not encrypted.
+web:
+  listen: "0.0.0.0:7501"
+  username: "admin"
+  password_hash: ""
+  tls:
+    cert: ""
+    key: ""
+
+# Optional local SOCKS5 and HTTP CONNECT proxies. They use the same HY2
+# connection and are disabled when the address is empty. Never expose them
+# outside localhost unless you set *_auth and understand the risk.
+proxy:
+  socks5: "127.0.0.1:1080"
+  socks5_auth: ""
+  http: "127.0.0.1:8080"
+  http_auth: ""
+
+log:
+  level: "info"
+  file: ""

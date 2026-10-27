@@ -1,0 +1,26 @@
+[Unit]
+Description=hy2tun server (HY2 proxy and reverse port mappings)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# hy2tund must bind the public HY2 port (usually UDP 443) and every configured
+# mapping port, so it runs as root. Keep the configuration readable only by
+# root.
+User=root
+Group=root
+ExecStart=/usr/local/bin/hy2tund -c /etc/hy2tun/server.yaml
+Restart=always
+RestartSec=2s
+LimitNOFILE=1048576
+NoNewPrivileges=true
+PrivateTmp=true
+# Create /etc/hy2tun and /var/lib/hy2tun automatically. The state file and the
+# generated web password hash/web session key live in these directories.
+ConfigurationDirectory=hy2tun
+StateDirectory=hy2tun
+WorkingDirectory=/var/lib/hy2tun
+
+[Install]
+WantedBy=multi-user.target
