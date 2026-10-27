@@ -48,6 +48,12 @@ func (c *ClientConfig) WebEnabled() bool {
 	return c != nil && c.Web.Listen != ""
 }
 
+// ProxyEnabled reports whether at least one local proxy listener is configured.
+// Proxy listeners are opt-in, so an empty proxy section leaves both disabled.
+func (c *ClientConfig) ProxyEnabled() bool {
+	return c != nil && (c.Proxy.SOCKS5 != "" || c.Proxy.HTTP != "")
+}
+
 // LoadClient reads, parses, and validates a client config file.
 func LoadClient(path string) (*ClientConfig, error) {
 	data, err := os.ReadFile(path)

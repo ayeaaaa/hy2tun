@@ -23,6 +23,7 @@ import (
 
 	"hy2tun/internal/config"
 	"hy2tun/internal/control"
+	"hy2tun/internal/proxy"
 	"hy2tun/internal/version"
 	"hy2tun/internal/view"
 	"hy2tun/internal/webui/clientui"
@@ -72,6 +73,10 @@ type Client struct {
 	// when web.listen is empty.
 	logs *logBuffer
 	web  *clientui.Server
+
+	// proxies are the optional local SOCKS5/HTTP CONNECT listeners. They are
+	// bound during New and their accept loops run with the client.
+	proxies []*proxy.Server
 
 	// configMu serializes local configuration edits, server pushes, and the
 	// assigned-port write-backs that follow a handshake. The client config is
@@ -162,7 +167,73 @@ func New(cfg *config.ClientConfig, log *slog.Logger) (*Client, error) {
 		}
 		cl.web = web
 	}
+	if err := cl.initProxies(); err != nil {
+		if cl.web != nil {
+			_ = cl.web.Close()
+		}
+		return nil, err
+	}
 	return cl, nil
+}
+
+// initProxies binds the optional local proxy listeners. Binding happens during
+// New so a bad listen address or credentials fail startup before the client
+// attempts to connect. Start runs the accept loops.
+func (c *Client) initProxies() error {
+	if !c.cfg.ProxyEnabled() {
+		return nil
+	}
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if network != "tcp" {
+			return nil, fmt.Errorf("proxy supports TCP only, got %q", network)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return c.TCP(addr)
+	}
+
+	if listen := c.cfg.Proxy.SOCKS5; listen != "" {
+		srv, err := proxy.NewSOCKS5(listen, dial, c.log, c.cfg.Proxy.SOCKS5Auth)
+		if err != nil {
+			c.closeProxies()
+			return fmt.Errorf("create SOCKS5 proxy on %s: %w", listen, err)
+		}
+		c.proxies = append(c.proxies, srv)
+	}
+	if listen := c.cfg.Proxy.HTTP; listen != "" {
+		srv, err := proxy.NewHTTP(listen, dial, c.log, c.cfg.Proxy.HTTPAuth)
+		if err != nil {
+			c.closeProxies()
+			return fmt.Errorf("create HTTP proxy on %s: %w", listen, err)
+		}
+		c.proxies = append(c.proxies, srv)
+	}
+	return nil
+}
+
+// startProxies runs each bound proxy's accept loop. The listeners are already
+// bound, so Start only fails on an unexpected accept error.
+func (c *Client) startProxies() {
+	for _, srv := range c.proxies {
+		c.log.Info("local proxy listening", "addr", srv.Addr())
+		go func(srv *proxy.Server) {
+			if err := srv.Start(); err != nil {
+				c.log.Warn("local proxy stopped", "addr", srv.Addr(), "error", err)
+			}
+		}(srv)
+	}
+}
+
+// closeProxies closes every proxy listener and its active connections. Server
+// Close is idempotent, so this is safe from both New's error path and Client
+// shutdown.
+func (c *Client) closeProxies() {
+	for _, srv := range c.proxies {
+		if err := srv.Close(); err != nil {
+			c.log.Warn("close local proxy", "addr", srv.Addr(), "error", err)
+		}
+	}
 }
 
 // loadClientWebSessionKey loads the persisted web session signing key next to
@@ -199,6 +270,7 @@ func (c *Client) Start(ctx context.Context) error {
 			return fmt.Errorf("start client web console: %w", err)
 		}
 	}
+	c.startProxies()
 
 	backoff := initialBackoff
 	for {
@@ -272,6 +344,10 @@ func (c *Client) Close() error {
 		if hy != nil {
 			_ = hy.Close()
 		}
+		// The HY2 client is closed before waiting for proxy handlers, so a
+		// stream request blocked in hy.TCP is released. Proxy listeners stop
+		// accepting and their active connections are closed here.
+		c.closeProxies()
 		// The HY2 client is closed first so any blocked UDP send is released
 		// before the mapping waits for its goroutines.
 		c.stopUDPMappings()
@@ -383,6 +459,26 @@ func (c *Client) WebAddr() string {
 	c.configMu.Lock()
 	defer c.configMu.Unlock()
 	return c.cfg.Web.Listen
+}
+
+// TCP opens a TCP stream to addr through the live HY2 connection. It is the
+// dial path used by the local proxy listeners.
+func (c *Client) TCP(addr string) (net.Conn, error) {
+	if addr == "" {
+		return nil, fmt.Errorf("address is required")
+	}
+	hy := c.hyClient()
+	if hy == nil {
+		return nil, fmt.Errorf("client is not connected")
+	}
+	conn, err := hy.TCP(addr)
+	if err != nil {
+		return nil, err
+	}
+	if conn == nil {
+		return nil, fmt.Errorf("HY2 returned a nil TCP stream")
+	}
+	return conn, nil
 }
 
 // trafficFor returns the shared counters for a mapping, creating them on first
