@@ -6,11 +6,17 @@ v1; use Task Scheduler to start it at boot and restart it if it exits.
 ## Install
 
 1. Download the Windows archive from the release page and extract it, for
-   example to `C:\Program Files\hy2tun\`.
-2. Create `C:\ProgramData\hy2tun\` and copy `client.yaml` there. Edit the
-   server address, password, control token, and mappings. The example file
-   uses Linux paths such as `/etc/hy2tun/cert.pem`; replace them with Windows
-   paths such as `C:\ProgramData\hy2tun\cert.pem`.
+   example to `C:\Program Files\hy2tun\`. The archive contains `hy2tun.exe`,
+   `hy2tund.exe`, `examples\client.yaml`, `examples\server.yaml`,
+   `scripts\`, `README.md`, and `SHA256SUMS`; only `hy2tun.exe` is needed on a
+   Windows client. To verify the download, compare
+   `Get-FileHash .\hy2tun.exe -Algorithm SHA256` with the archive's
+   `SHA256SUMS` file.
+2. Create `C:\ProgramData\hy2tun\` and copy `examples\client.yaml` there as
+   `client.yaml`. Edit the server address, password, control token, and
+   mappings. The example file uses Linux paths such as
+   `/etc/hy2tun/cert.pem`; replace them with Windows paths such as
+   `C:\ProgramData\hy2tun\cert.pem`.
 3. Restrict the configuration file, because it contains secrets:
 
    ```powershell

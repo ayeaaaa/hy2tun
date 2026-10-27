@@ -3,8 +3,9 @@
 # linux/mipsle, linux/mips (both softfloat), and windows/amd64.
 #
 # Every archive contains the stripped, statically linked server and client
-# binaries, the example configurations, README, and the matching deployment
-# files. dist/SHA256SUMS covers every archive.
+# binaries under friendly names, the example configurations, README, the
+# deployment scripts, and a per-archive SHA256SUMS. dist/SHA256SUMS covers
+# every archive.
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -51,19 +52,15 @@ package() {
 
 	pkg="$WORK/pkg-$os-$arch"
 	mkdir -p "$pkg/examples"
-	cp "$out/hy2tund-$os-$arch$ext" "$pkg/"
-	cp "$out/hy2tun-$os-$arch$ext" "$pkg/"
+	cp "$out/hy2tund-$os-$arch$ext" "$pkg/hy2tund$ext"
+	cp "$out/hy2tun-$os-$arch$ext" "$pkg/hy2tun$ext"
 	cp examples/server.yaml examples/client.yaml "$pkg/examples/"
 	cp README.md "$pkg/"
+	# Include every deployment note in every archive so README links to
+	# scripts/windows/README.md work on Linux and vice versa.
+	cp -R scripts "$pkg/"
 
-	if [ "$os" = "linux" ]; then
-		mkdir -p "$pkg/scripts/systemd" "$pkg/scripts/openwrt"
-		cp scripts/systemd/hy2tund.service scripts/systemd/hy2tun.service "$pkg/scripts/systemd/"
-		cp scripts/openwrt/hy2tun.init "$pkg/scripts/openwrt/"
-	else
-		mkdir -p "$pkg/scripts/windows"
-		cp scripts/windows/README.md "$pkg/scripts/windows/"
-	fi
+	(cd "$pkg" && sha256sum "hy2tund$ext" "hy2tun$ext" > SHA256SUMS)
 
 	name="hy2tun_${VERSION}_${os}_${arch}"
 	if [ "$os" = "windows" ]; then

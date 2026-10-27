@@ -135,11 +135,13 @@ release matrix is:
 Each archive is named `hy2tun_<version>_<os>_<arch>.tar.gz` (or `.zip` for
 Windows) and contains:
 
-- `hy2tund-<os>-<arch>` and `hy2tun-<os>-<arch>` (with `.exe` on Windows);
+- `hy2tund` and `hy2tun` (with `.exe` on Windows), ready to install without
+  renaming;
 - `examples/server.yaml` and `examples/client.yaml`;
 - `README.md`;
-- systemd and OpenWrt files on Linux, or `scripts/windows/README.md` on
-  Windows.
+- the complete `scripts/` tree with systemd, OpenWrt, and Windows deployment
+  notes;
+- `SHA256SUMS` covering the two binaries.
 
 `dist/SHA256SUMS` contains the SHA-256 of every archive. Set `VERSION`,
 `COMMIT`, or `DATE` to override the values embedded in the binaries:
@@ -208,7 +210,7 @@ state_file: "/var/lib/hy2tun/state.json"
 Start it:
 
 ```bash
-sudo ./bin/hy2tund -c /etc/hy2tun/server.yaml
+sudo ./bin/hy2tund -c /etc/hy2tun/server.yaml   # release archive: ./hy2tund
 ```
 
 If `web.password_hash` is empty, `hy2tund` generates a 20-character password,
@@ -261,7 +263,7 @@ web:
 Start it:
 
 ```bash
-sudo ./bin/hy2tun -c /etc/hy2tun/client.yaml
+sudo ./bin/hy2tun -c /etc/hy2tun/client.yaml   # release archive: ./hy2tun
 ```
 
 Open `http://<client-lan-ip>:7501/` and `http://127.0.0.1:7500/` on the server
@@ -272,8 +274,21 @@ password printed at startup.
 
 **systemd (Linux server and client):**
 
+From a source build:
+
 ```bash
 sudo install -m 0755 bin/hy2tund bin/hy2tun /usr/local/bin/
+```
+
+From a release archive (run in the extracted directory):
+
+```bash
+sudo install -m 0755 hy2tund hy2tun /usr/local/bin/
+```
+
+Then install the units and enable the service:
+
+```bash
 sudo install -d -m 0755 /etc/hy2tun /var/lib/hy2tun
 sudo install -m 0644 scripts/systemd/hy2tund.service /etc/systemd/system/
 sudo install -m 0644 scripts/systemd/hy2tun.service /etc/systemd/system/
@@ -285,18 +300,25 @@ sudo journalctl -u hy2tund -f
 
 **OpenWrt (procd):**
 
+Run these commands from the extracted Linux archive root:
+
 ```bash
 opkg update && opkg install ca-bundle
 cp hy2tun /usr/bin/hy2tun
 chmod +x /usr/bin/hy2tun
 install -d -m 0755 /etc/hy2tun
-cp client.yaml /etc/hy2tun/client.yaml
+cp examples/client.yaml /etc/hy2tun/client.yaml
 chmod 600 /etc/hy2tun/client.yaml
-cp hy2tun.init /etc/init.d/hy2tun
+cp scripts/openwrt/hy2tun.init /etc/init.d/hy2tun
 chmod +x /etc/init.d/hy2tun
 /etc/init.d/hy2tun enable
 /etc/init.d/hy2tun start
 ```
+
+After editing `/etc/hy2tun/client.yaml` externally, apply the change with
+`service hy2tun restart`. Do not watch that file with procd: the client
+rewrites it on startup, assigned-port write-back, server push, and web edits,
+so file watching would restart the tunnel on every write.
 
 For MIPS routers use the `linux/mipsle` or `linux/mips` build; for ARM
 routers use `linux/arm` or `linux/arm64`. The MIPS builds already use

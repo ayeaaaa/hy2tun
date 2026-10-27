@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -132,26 +134,42 @@ func TestEndToEnd(t *testing.T) {
 	defer cancelReady()
 	require.NoError(t, cl.WaitReady(readyCtx))
 
-	// 4. Wait for both mappings to be running and for the client's assigned
-	// port write-back to settle, so a web push has a stable base revision.
-	var settled view.ClientView
+	// 4. Wait for both mappings to be running with assigned public ports and
+	// for the client's assigned-port write-back to settle. The revision must
+	// be unchanged across two polls so a web push has a stable base revision.
+	var (
+		settled      view.ClientView
+		lastRevision int64 = -1
+		stablePolls  int
+	)
 	require.Eventually(t, func() bool {
 		views := srv.Clients()
 		if len(views) != 1 {
+			lastRevision, stablePolls = -1, 0
 			return false
 		}
 		candidate := views[0]
 		if candidate.Revision == 0 || len(candidate.Mappings) != 2 {
+			lastRevision, stablePolls = -1, 0
 			return false
 		}
 		for _, mapping := range candidate.Mappings {
-			if mapping.Status != "running" {
+			if mapping.Status != "running" || mapping.AssignedPort == 0 {
+				lastRevision, stablePolls = -1, 0
 				return false
 			}
 		}
+		if candidate.Revision != lastRevision {
+			lastRevision, stablePolls = candidate.Revision, 1
+			return false
+		}
+		stablePolls++
+		if stablePolls < 2 {
+			return false
+		}
 		settled = candidate
 		return true
-	}, 10*time.Second, 20*time.Millisecond, "both mappings must register and settle")
+	}, 10*time.Second, 20*time.Millisecond, "both mappings must register, get ports, and settle")
 	require.Equal(t, "e2e-client", settled.ID)
 
 	tcpPort := mappingPort(t, settled, "e2e-tcp")
@@ -254,11 +272,14 @@ func TestEndToEnd(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		conn, err := net.DialTimeout("tcp", pushedAddr, 200*time.Millisecond)
-		if err != nil {
-			return true
+		if err == nil {
+			_ = conn.Close()
+			return false
 		}
-		_ = conn.Close()
-		return false
+		// A closed listener must refuse the connection. A timeout means the
+		// packet was dropped (for example by a firewall) and does not prove
+		// that the public port was released.
+		return errors.Is(err, syscall.ECONNREFUSED)
 	}, 5*time.Second, 50*time.Millisecond, "deleting the mapping must close its public TCP port")
 
 	// The original mappings must keep working after the delete.
