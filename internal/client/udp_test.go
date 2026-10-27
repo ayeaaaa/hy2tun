@@ -226,8 +226,46 @@ func TestUDPMappingDropsOversizedDatagram(t *testing.T) {
 		log:   slog.Default(),
 		peers: make(map[string]*udpPeer),
 	}
-	require.NoError(t, u.send(make([]byte, udpMaxDatagram+1), "203.0.113.1:1"))
-	require.Equal(t, 0, len(fake.sent), "an oversized datagram must not reach the core")
+	const addr = "203.0.113.1:1"
+	limit := udpPayloadLimit(addr)
+	require.Less(t, limit, udpMessageBufferSize, "the payload limit must reserve room for the header")
+
+	// A payload that fits exactly is sent.
+	require.NoError(t, u.send(make([]byte, limit), addr))
+	require.Equal(t, 1, len(fake.sent))
+
+	// Anything larger, including the 4096-byte message buffer size, is
+	// dropped before it reaches the core.
+	for _, size := range []int{limit + 1, udpMessageBufferSize} {
+		require.NoError(t, u.send(make([]byte, size), addr))
+	}
+	require.Equal(t, 1, len(fake.sent), "oversized datagrams must not reach the core")
+}
+
+func TestUDPMappingPeerCapPrefersIdlePeer(t *testing.T) {
+	u := newTestUDPMapping(t)
+	defer u.close()
+	u.maxPeers = 2
+
+	// p1 is older than p2 but still active; p2 is idle. The idle peer should
+	// be evicted instead of the older active one.
+	p1, err := u.peer("203.0.113.1:1")
+	require.NoError(t, err)
+	p2, err := u.peer("203.0.113.2:2")
+	require.NoError(t, err)
+	p1.last.Store(time.Now().Add(-30 * time.Second).UnixNano())
+	p2.last.Store(time.Now().Add(-2 * time.Minute).UnixNano())
+
+	_, err = u.peer("203.0.113.3:3")
+	require.NoError(t, err)
+	require.Equal(t, 2, u.peerCount())
+
+	u.mu.Lock()
+	_, hasActive := u.peers["203.0.113.1:1"]
+	_, hasIdle := u.peers["203.0.113.2:2"]
+	u.mu.Unlock()
+	require.True(t, hasActive, "the active peer must be retained")
+	require.False(t, hasIdle, "the idle peer must be evicted first")
 }
 
 func TestUDPMappingPeerCapDropsOldest(t *testing.T) {

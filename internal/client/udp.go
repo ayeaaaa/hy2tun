@@ -28,12 +28,24 @@ const (
 	udpPeerCleanupInterval = 10 * time.Second
 	// udpMaxPeers bounds the number of local sockets one mapping may own.
 	udpMaxPeers = 1024
-	// udpMaxDatagram is the HY2 UDP payload limit. Larger datagrams are
-	// dropped with a warning instead of being handed to the core.
-	udpMaxDatagram = 4096
+	// udpMessageBufferSize is the HY2 UDPMessage buffer size. It bounds the
+	// whole message (fixed header + address + payload), not just the payload.
+	udpMessageBufferSize = 4096
 	// udpReadBufferSize is large enough for any IPv4/IPv6 UDP datagram.
 	udpReadBufferSize = 64 * 1024
 )
+
+// udpPayloadLimit returns the largest payload that fits in one HY2 UDPMessage
+// for addr: an 8-byte fixed header, a two-byte address-length varint, the
+// address itself, and the payload. Two bytes cover every realistic peer
+// address; a longer address simply leaves a little space unused.
+func udpPayloadLimit(addr string) int {
+	limit := udpMessageBufferSize - 8 - 2 - len(addr)
+	if limit < 1 {
+		return 1
+	}
+	return limit
+}
 
 // udpVirtualAddress returns the virtual address that carries one reverse UDP
 // mapping. The token is never logged.
@@ -238,11 +250,11 @@ func (u *udpMapping) receiveLoop(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if len(data) > udpMaxDatagram {
+		if len(data) > udpMessageBufferSize {
 			u.logger().Warn("dropping oversized reverse UDP datagram",
 				"mapping", u.id,
 				"size", len(data),
-				"limit", udpMaxDatagram,
+				"limit", udpMessageBufferSize,
 			)
 			continue
 		}
@@ -295,12 +307,12 @@ func (u *udpMapping) peer(addr string) (*udpPeer, error) {
 		limit = udpMaxPeers
 	}
 	if len(u.peers) >= limit {
-		if oldest := u.oldestPeerLocked(); oldest != nil {
-			delete(u.peers, oldest.addr)
-			oldest.close()
-			u.logger().Warn("reverse UDP peer limit reached; dropped oldest peer",
+		if victim := u.evictPeerLocked(time.Now()); victim != nil {
+			delete(u.peers, victim.addr)
+			victim.close()
+			u.logger().Warn("reverse UDP peer limit reached; dropped peer",
 				"mapping", u.id,
-				"peer", oldest.addr,
+				"peer", victim.addr,
 				"limit", limit,
 			)
 		}
@@ -331,11 +343,11 @@ func (u *udpMapping) replyLoop(peer *udpPeer) {
 			u.removePeer(peer)
 			return
 		}
-		if n > udpMaxDatagram {
+		if n > udpMessageBufferSize {
 			u.logger().Warn("dropping oversized local UDP reply",
 				"mapping", u.id,
 				"size", n,
-				"limit", udpMaxDatagram,
+				"limit", udpMessageBufferSize,
 			)
 			continue
 		}
@@ -427,12 +439,25 @@ func (u *udpMapping) expirePeers(now time.Time) {
 	}
 }
 
-func (u *udpMapping) oldestPeerLocked() *udpPeer {
-	var oldest *udpPeer
+// evictPeerLocked returns an idle peer if one exists, otherwise the least
+// recently used peer. The caller must hold u.mu.
+func (u *udpMapping) evictPeerLocked(now time.Time) *udpPeer {
+	timeout := u.idleTimeout
+	if timeout <= 0 {
+		timeout = udpPeerIdleTimeout
+	}
+	var idle, oldest *udpPeer
 	for _, p := range u.peers {
-		if oldest == nil || p.lastSeen().Before(oldest.lastSeen()) {
+		last := p.lastSeen()
+		if oldest == nil || last.Before(oldest.lastSeen()) {
 			oldest = p
 		}
+		if now.Sub(last) > timeout && (idle == nil || last.Before(idle.lastSeen())) {
+			idle = p
+		}
+	}
+	if idle != nil {
+		return idle
 	}
 	return oldest
 }
@@ -446,14 +471,16 @@ func (u *udpMapping) removePeer(peer *udpPeer) {
 	peer.close()
 }
 
-// send serializes every HyUDPConn.Send call and drops datagrams that exceed the
-// HY2 payload limit instead of handing them to the core.
+// send serializes every HyUDPConn.Send call and drops datagrams that do not
+// fit in one HY2 UDPMessage (including its header and address) instead of
+// handing them to the core.
 func (u *udpMapping) send(data []byte, addr string) error {
-	if len(data) > udpMaxDatagram {
-		u.logger().Warn("dropping oversized reverse UDP datagram",
+	limit := udpPayloadLimit(addr)
+	if len(data) > limit {
+		u.logger().Warn("dropping reverse UDP datagram that exceeds the HY2 message buffer",
 			"mapping", u.id,
 			"size", len(data),
-			"limit", udpMaxDatagram,
+			"limit", limit,
 		)
 		return nil
 	}

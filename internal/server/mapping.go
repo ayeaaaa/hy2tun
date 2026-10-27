@@ -48,6 +48,13 @@ type mappingRuntime struct {
 	udpConn     *net.UDPConn
 	data        *dataStreams
 	closed      atomic.Bool
+	closeOnce   sync.Once
+
+	// udpMu serializes publicUDPConn creation with the eviction of the
+	// previous HY2 UDP session wrapper. udpSession is the wrapper whose read
+	// loop currently owns the public socket; only one session may read it.
+	udpMu      sync.Mutex
+	udpSession *publicUDPConn
 
 	activeMu sync.Mutex
 	active   map[net.Conn]struct{}
@@ -93,19 +100,22 @@ func (m *mappingRuntime) closeActive() {
 }
 
 // close releases the listener, UDP socket, pending data streams, and active
-// connections owned by the runtime.
+// connections owned by the runtime. The public UDP socket is owned by the
+// runtime and is closed here exactly once.
 func (m *mappingRuntime) close() {
-	m.closed.Store(true)
-	if m.tcpListener != nil {
-		_ = m.tcpListener.Close()
-	}
-	if m.udpConn != nil {
-		_ = m.udpConn.Close()
-	}
-	m.closeActive()
-	if m.data != nil {
-		m.data.dropMapping(m)
-	}
+	m.closeOnce.Do(func() {
+		m.closed.Store(true)
+		if m.tcpListener != nil {
+			_ = m.tcpListener.Close()
+		}
+		if m.udpConn != nil {
+			_ = m.udpConn.Close()
+		}
+		m.closeActive()
+		if m.data != nil {
+			m.data.dropMapping(m)
+		}
+	})
 }
 
 // clientSession is one live control stream and its registered mappings.
