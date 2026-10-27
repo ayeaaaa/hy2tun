@@ -2,7 +2,9 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"sync"
@@ -60,6 +62,7 @@ type udpMapping struct {
 	virtualAddr string
 	conn        hyclient.HyUDPConn
 	hy          hyclient.Client
+	client      *Client
 	log         *slog.Logger
 	traffic     *mappingTraffic
 
@@ -140,6 +143,7 @@ func (c *Client) startUDP(m config.Mapping, token string) (*udpMapping, error) {
 		virtualAddr:       udpVirtualAddress(token),
 		conn:              conn,
 		hy:                hy,
+		client:            c,
 		log:               c.log,
 		traffic:           c.trafficFor(m.ID),
 		cancel:            cancel,
@@ -288,13 +292,30 @@ func (c *Client) stopUDPMappings() {
 }
 
 // receiveLoop forwards datagrams from the server to the local socket that
-// belongs to the public peer address.
+// belongs to the public peer address. An unexpected Receive error means this
+// HY2 UDP session is dead; the mapping stays registered in the read model, so
+// the control stream is closed to force a full reconnect and resync instead of
+// leaving a running but deaf mapping.
 func (u *udpMapping) receiveLoop(ctx context.Context) {
 	for {
 		data, peerAddr, err := u.conn.Receive()
 		if err != nil {
-			if ctx.Err() == nil && !u.isClosed() {
-				u.logger().Debug("reverse UDP receive failed", "mapping", u.id, "error", err)
+			if ctx.Err() != nil || u.isClosed() || (u.client != nil && u.client.isClosed()) {
+				return
+			}
+			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+				// Expected while a control stream is being torn down.
+				u.logger().Debug("reverse UDP receive closed; reconnecting control stream",
+					"mapping", u.id,
+				)
+			} else {
+				u.logger().Warn("reverse UDP receive failed; reconnecting control stream",
+					"mapping", u.id,
+					"error", err,
+				)
+			}
+			if u.client != nil {
+				u.client.forceControlResync()
 			}
 			return
 		}

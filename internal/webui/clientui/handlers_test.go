@@ -453,6 +453,22 @@ func TestClientWebStaticAndLoginPage(t *testing.T) {
 	require.Contains(t, body, "登录客户端控制台")
 }
 
+func TestClientWebHSTSBehindTLSProxy(t *testing.T) {
+	web, _ := newTestClientWeb(t, &fakeClientAPI{})
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/login", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	recorder := httptest.NewRecorder()
+	web.Handler().ServeHTTP(recorder, req)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "max-age=31536000", recorder.Header().Get("Strict-Transport-Security"))
+
+	req = httptest.NewRequest(http.MethodGet, "http://example.com/login", nil)
+	recorder = httptest.NewRecorder()
+	web.Handler().ServeHTTP(recorder, req)
+	require.Empty(t, recorder.Header().Get("Strict-Transport-Security"))
+}
+
 func TestClientWebSSE(t *testing.T) {
 	api := &fakeClientAPI{
 		status: view.ClientStatus{Name: "home", Server: "example.com:443", Connected: true},

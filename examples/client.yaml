@@ -70,6 +70,8 @@ web:
   listen: "0.0.0.0:7501"
   username: "admin"
   password_hash: ""
+  # Set to true only when a trusted reverse proxy overwrites X-Forwarded-For.
+  trust_proxy: false
   tls:
     cert: ""
     key: ""

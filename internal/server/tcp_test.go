@@ -167,7 +167,7 @@ func TestMappingUpdateDuringPublicAccept(t *testing.T) {
 			Note:       fmt.Sprintf("update-%d", i),
 			Enabled:    true,
 		}}
-		results, accepted := pair.Server.mappings.update(sess, revision+1, next)
+		results, accepted, _ := pair.Server.mappings.update(sess, revision+1, next)
 		require.True(t, accepted)
 		require.True(t, findResult(t, results, "tcp1").OK)
 	}

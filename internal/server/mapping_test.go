@@ -147,7 +147,7 @@ func TestUpdateKeepsUnchangedMappings(t *testing.T) {
 		{ID: "tcp1", Type: "tcp", RemotePort: 0, LocalAddr: "127.0.0.1:9001", Note: "changed", Enabled: true},
 		{ID: "udp1", Type: "udp", RemotePort: 0, LocalAddr: "127.0.0.1:9002", Enabled: true},
 	}
-	results, accepted := pair.Server.mappings.update(sess, revision+1, next)
+	results, accepted, _ := pair.Server.mappings.update(sess, revision+1, next)
 	require.True(t, accepted)
 	require.True(t, findResult(t, results, "tcp1").OK)
 	require.True(t, findResult(t, results, "udp1").OK)
@@ -190,7 +190,7 @@ func TestUpdateLocalAddrChangeKeepsRuntimeAndClosesActive(t *testing.T) {
 	next := []config.Mapping{
 		{ID: "tcp1", Type: "tcp", RemotePort: 0, LocalAddr: "127.0.0.1:9999", Enabled: true},
 	}
-	results, accepted := pair.Server.mappings.update(sess, revision+1, next)
+	results, accepted, _ := pair.Server.mappings.update(sess, revision+1, next)
 	require.True(t, accepted)
 	require.True(t, findResult(t, results, "tcp1").OK)
 	require.True(t, active.closed.Load(), "local_addr change must close active connections")
@@ -228,7 +228,7 @@ func TestUpdateRollsBackOnBadMapping(t *testing.T) {
 		{ID: "valid", Type: "tcp", RemotePort: validPort, LocalAddr: "127.0.0.1:9002", Enabled: true},
 		{ID: "bad", Type: "tcp", RemotePort: occupiedPort, LocalAddr: "127.0.0.1:9003", Enabled: true},
 	}
-	results, accepted := pair.Server.mappings.update(sess, revision+1, next)
+	results, accepted, _ := pair.Server.mappings.update(sess, revision+1, next)
 	require.False(t, accepted)
 	require.Equal(t, "internal", findResult(t, results, "valid").Error)
 	require.Equal(t, "port_in_use", findResult(t, results, "bad").Error)
@@ -269,7 +269,7 @@ func TestUpdatePortChangeRebinds(t *testing.T) {
 	next := []config.Mapping{
 		{ID: "tcp1", Type: "tcp", RemotePort: newPort, LocalAddr: "127.0.0.1:9001", Enabled: true},
 	}
-	results, accepted := pair.Server.mappings.update(sess, revision+1, next)
+	results, accepted, _ := pair.Server.mappings.update(sess, revision+1, next)
 	require.True(t, accepted)
 	require.Equal(t, newPort, findResult(t, results, "tcp1").AssignedPort)
 

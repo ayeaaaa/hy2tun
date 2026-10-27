@@ -109,6 +109,7 @@ func New(api API, cfg config.WebConfig, sessionKey []byte, log *slog.Logger) (*S
 		Username:     cfg.Username,
 		PasswordHash: cfg.PasswordHash,
 		Log:          log,
+		TrustProxy:   cfg.TrustProxy,
 		OnSuccess: func(w http.ResponseWriter, r *http.Request) {
 			if wantsHTML(r) {
 				http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -305,7 +306,7 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 		header.Set("Content-Security-Policy",
 			"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "+
 				"connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
-		if r.TLS != nil {
+		if shared.RequestScheme(r) == "https" {
 			header.Set("Strict-Transport-Security", "max-age=31536000")
 		}
 		next.ServeHTTP(w, r)

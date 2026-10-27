@@ -70,6 +70,9 @@ web:
   listen: "127.0.0.1:7500"
   username: "admin"
   password_hash: ""
+  # Set to true only when a trusted reverse proxy overwrites X-Forwarded-For.
+  # It makes login rate limiting use the real client IP instead of the proxy's.
+  trust_proxy: false
   tls:
     cert: ""
     key: ""

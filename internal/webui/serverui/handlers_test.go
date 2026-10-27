@@ -788,6 +788,23 @@ func TestServerWebStaticAndLoginPage(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestServerWebHSTSBehindTLSProxy(t *testing.T) {
+	web, _ := newTestWeb(t, &fakeServerAPI{})
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/login", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	recorder := httptest.NewRecorder()
+	web.Handler().ServeHTTP(recorder, req)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "max-age=31536000", recorder.Header().Get("Strict-Transport-Security"))
+
+	// Without the forwarded scheme, HSTS must not be sent over plain HTTP.
+	req = httptest.NewRequest(http.MethodGet, "http://example.com/login", nil)
+	recorder = httptest.NewRecorder()
+	web.Handler().ServeHTTP(recorder, req)
+	require.Empty(t, recorder.Header().Get("Strict-Transport-Security"))
+}
+
 func TestServerWebSSE(t *testing.T) {
 	api := &fakeServerAPI{
 		overview: view.Overview{OnlineClients: 1, ActiveMappings: 2, TxBytes: 10, RxBytes: 20, Listen: "127.0.0.1:443", Uptime: time.Hour},

@@ -164,7 +164,7 @@ func (h *controlHandler) loop(sess *clientSession) {
 // an older list over a newer one.
 func (h *controlHandler) handleUpdate(sess *clientSession, message *control.Update) {
 	sess.controlMu.Lock()
-	results, accepted := h.server.mappings.update(sess, message.Revision, message.Mappings)
+	results, accepted, resync := h.server.mappings.update(sess, message.Revision, message.Mappings)
 	ack := &control.UpdateAck{
 		Type:     control.TypeUpdateAck,
 		Revision: h.server.mappings.sessionRevision(sess),
@@ -173,6 +173,16 @@ func (h *controlHandler) handleUpdate(sess *clientSession, message *control.Upda
 	// Write the ack before releasing the per-client queue so a push cannot
 	// overtake the update that produced it.
 	err := sess.write(ack)
+	if resync {
+		// The client's full configuration is authoritative. Its reconnect
+		// re-registers every mapping, which closes removed or disabled
+		// listeners that the rejected transaction left untouched.
+		h.log.Warn("closing control stream after rejected update",
+			"client", sess.id,
+			"revision", message.Revision,
+		)
+		sess.abortStream()
+	}
 	sess.controlMu.Unlock()
 
 	if !accepted {
@@ -186,11 +196,15 @@ func (h *controlHandler) handleUpdate(sess *clientSession, message *control.Upda
 	}
 }
 
-// setPushWaiter registers the channel that receives the next PushAck. Only one
-// push may be in flight per session because the caller holds controlMu.
-func (s *clientSession) setPushWaiter(ch chan *control.PushAck) {
+// setPushWaiter registers the channel that receives the next matching PushAck.
+// Only one push may be in flight per session because the caller holds
+// controlMu. The expected push ID and revision filter out late acks from a
+// previous timed-out push before they reach the channel.
+func (s *clientSession) setPushWaiter(ch chan *control.PushAck, pushID string, revision int64) {
 	s.pushWaitMu.Lock()
 	s.pushWait = ch
+	s.pushWaitID = pushID
+	s.pushWaitRev = revision
 	s.pushWaitMu.Unlock()
 }
 
@@ -200,17 +214,22 @@ func (s *clientSession) clearPushWaiter(ch chan *control.PushAck) {
 	s.pushWaitMu.Lock()
 	if s.pushWait == ch {
 		s.pushWait = nil
+		s.pushWaitID = ""
+		s.pushWaitRev = 0
 	}
 	s.pushWaitMu.Unlock()
 }
 
-// deliverPushAck forwards an ack to the waiting push without blocking the
-// control read loop.
+// deliverPushAck forwards a matching ack to the waiting push without blocking
+// the control read loop. Acks for another push are dropped so they cannot fill
+// the waiter's channel and hide the matching ack.
 func (s *clientSession) deliverPushAck(ack *control.PushAck) bool {
 	s.pushWaitMu.Lock()
 	ch := s.pushWait
+	pushID := s.pushWaitID
+	revision := s.pushWaitRev
 	s.pushWaitMu.Unlock()
-	if ch == nil {
+	if ch == nil || !pushAckMatches(ack, pushID, revision) {
 		return false
 	}
 	select {

@@ -235,7 +235,7 @@ func TestDisablingUDPMappingStopsPublicPort(t *testing.T) {
 
 	sess := testSession(t, pair.Server, clientID)
 	revision := testSessionRevision(t, pair.Server, clientID)
-	results, accepted := pair.Server.mappings.update(sess, revision+1, []config.Mapping{
+	results, accepted, _ := pair.Server.mappings.update(sess, revision+1, []config.Mapping{
 		{ID: "udp1", Type: "udp", RemotePort: port, LocalAddr: echoAddr, Enabled: false},
 	})
 	require.True(t, accepted)

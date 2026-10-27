@@ -359,23 +359,29 @@ func TestPushRetryAfterConflictDefersToQueuedUpdate(t *testing.T) {
 		before.mapping,
 		{ID: "m2", Type: "tcp", RemotePort: 0, LocalAddr: "127.0.0.1:9002", Enabled: true},
 	}
-	results, accepted := pair.Server.mappings.update(sess, base+1, local)
+	results, accepted, _ := pair.Server.mappings.update(sess, base+1, local)
 	require.True(t, accepted)
 	require.True(t, findResult(t, results, "m2").OK)
 	require.Equal(t, base+1, testSessionRevision(t, pair.Server, clientID))
 	require.Equal(t, base+1, testSessionAppliedRevision(t, pair.Server, clientID))
 
 	// A non-increasing revision is stale again; there is no resync exception.
-	results, accepted = pair.Server.mappings.update(sess, base+1, local)
+	results, accepted, _ = pair.Server.mappings.update(sess, base+1, local)
 	require.False(t, accepted)
 	require.Equal(t, "stale_revision", results[0].Error)
 }
 
 func TestPushAckCorrelation(t *testing.T) {
-	require.True(t, pushAckMatches(&control.PushAck{OK: true, Revision: 5}, 5))
-	require.False(t, pushAckMatches(&control.PushAck{OK: true, Revision: 4}, 5))
-	require.True(t, pushAckMatches(&control.PushAck{OK: false, Error: "conflict", Revision: 4}, 5))
-	require.False(t, pushAckMatches(nil, 5))
+	const id = "push-1"
+	require.True(t, pushAckMatches(&control.PushAck{ID: id, OK: true, Revision: 5}, id, 5))
+	require.False(t, pushAckMatches(&control.PushAck{ID: id, OK: true, Revision: 4}, id, 5))
+	require.True(t, pushAckMatches(&control.PushAck{ID: id, OK: false, Error: "conflict", Revision: 4}, id, 5))
+	require.False(t, pushAckMatches(&control.PushAck{ID: "stale", OK: true, Revision: 5}, id, 5),
+		"an ack for another push must be ignored even at the same revision")
+	require.False(t, pushAckMatches(&control.PushAck{OK: true, Revision: 5}, id, 5),
+		"an ack without an ID must be ignored")
+	require.False(t, pushAckMatches(nil, id, 5))
+	require.False(t, pushAckMatches(&control.PushAck{ID: id, OK: true, Revision: 5}, "", 5))
 }
 
 func TestClientDeleteMappingClosesActiveConnection(t *testing.T) {
@@ -485,6 +491,7 @@ func TestPushWaitsForSessionReady(t *testing.T) {
 		// loop, so hand it to the waiter directly.
 		sess.deliverPushAck(&control.PushAck{
 			Type:     control.TypePushAck,
+			ID:       push.ID,
 			OK:       true,
 			Revision: push.Revision,
 		})

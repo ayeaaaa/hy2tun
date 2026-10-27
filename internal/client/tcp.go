@@ -165,6 +165,15 @@ func (c *Client) controlStream() net.Conn {
 	return c.controlConn
 }
 
+// forceControlResync closes the control stream so Start reconnects and sends a
+// fresh hello. It is used when a data-plane component can no longer trust its
+// current session.
+func (c *Client) forceControlResync() {
+	if conn := c.controlStream(); conn != nil {
+		_ = conn.Close()
+	}
+}
+
 // hyClient returns the live HY2 client, if any.
 func (c *Client) hyClient() hyclient.Client {
 	c.mu.Lock()

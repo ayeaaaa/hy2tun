@@ -139,8 +139,10 @@ type clientSession struct {
 
 	// pushWaitMu protects the single in-flight push waiter. PushAck frames
 	// arrive on the control read loop while the push caller waits.
-	pushWaitMu sync.Mutex
-	pushWait   chan *control.PushAck
+	pushWaitMu  sync.Mutex
+	pushWait    chan *control.PushAck
+	pushWaitID  string
+	pushWaitRev int64
 
 	// revision is the revision the client currently advertises. appliedRevision
 	// is the revision of the mapping set this server has actually applied. A
@@ -205,6 +207,16 @@ func (s *clientSession) write(msg any) error {
 	return control.WriteMessage(s.conn, msg)
 }
 
+// abortStream closes the control stream so the client reconnects and its hello
+// re-registers the authoritative configuration. It is used when a push or
+// update transaction can no longer trust the server's cached revision.
+func (s *clientSession) abortStream() {
+	if s == nil || s.conn == nil {
+		return
+	}
+	_ = s.conn.Close()
+}
+
 // mappingManager owns all client sessions and serializes port allocation and
 // binding across clients.
 type mappingManager struct {
@@ -217,6 +229,12 @@ type mappingManager struct {
 	data     *dataStreams
 
 	sessions map[string]*clientSession
+
+	// pendingUDP maps a UDP token from a pre-bound push runtime to that
+	// runtime. udpRuntime consults it before the push commits, so the client's
+	// probe cannot arrive before the runtime is visible. Entries are removed
+	// on commit and rollback.
+	pendingUDP map[string]*mappingRuntime
 
 	// serveTCP handles public connections for a newly bound TCP mapping. It is
 	// installed by Server.New before any mapping can be registered.
@@ -231,13 +249,14 @@ func newMappingManager(policy *ports.Policy, store *state.Store, log *slog.Logge
 		reserved = make(map[int]struct{})
 	}
 	return &mappingManager{
-		policy:   policy,
-		store:    store,
-		log:      log,
-		bindHost: bindHost,
-		reserved: reserved,
-		data:     data,
-		sessions: make(map[string]*clientSession),
+		policy:     policy,
+		store:      store,
+		log:        log,
+		bindHost:   bindHost,
+		reserved:   reserved,
+		data:       data,
+		sessions:   make(map[string]*clientSession),
+		pendingUDP: make(map[string]*mappingRuntime),
 	}
 }
 
@@ -278,33 +297,36 @@ func (m *mappingManager) register(sess *clientSession, mappings []config.Mapping
 	return results
 }
 
-// update applies a new mapping list from the client. It reports false when the
-// revision is not newer than the one already recorded or when a new/changed
-// mapping cannot be bound. In the failure case the previous mapping set is left
-// untouched.
-func (m *mappingManager) update(sess *clientSession, revision int64, mappings []config.Mapping) ([]control.Result, bool) {
+// update applies a new mapping list from the client. It reports whether the
+// update was accepted and whether the control stream must be closed so the
+// client reconnects and re-registers its authoritative configuration. A
+// rejected bind or malformed list requires a resync; a stale revision does not,
+// because the client can simply learn the server's revision from the ack.
+func (m *mappingManager) update(sess *clientSession, revision int64, mappings []config.Mapping) ([]control.Result, bool, bool) {
 	now := time.Now()
 
 	m.mu.Lock()
-	results, accepted := m.updateLocked(sess, revision, mappings, now)
+	results, accepted, resync := m.updateLocked(sess, revision, mappings, now)
 	m.mu.Unlock()
 
 	if accepted {
 		m.saveState()
 	}
-	return results, accepted
+	return results, accepted, resync
 }
 
 // updateLocked diffs the new mapping list against the live session. Unchanged
 // mappings keep their listener and UDP token; new or changed mappings are
 // pre-bound while the old set is still running. Any pre-bind failure rolls back
-// the new listeners and leaves the old session untouched.
-func (m *mappingManager) updateLocked(sess *clientSession, revision int64, mappings []config.Mapping, now time.Time) ([]control.Result, bool) {
+// the new listeners and asks the caller to force a control-stream resync: the
+// client's full configuration is authoritative, and its reconnect closes
+// removed or disabled listeners that a wholesale rollback would leave running.
+func (m *mappingManager) updateLocked(sess *clientSession, revision int64, mappings []config.Mapping, now time.Time) ([]control.Result, bool, bool) {
 	if m.sessions[sess.id] != sess {
-		return nil, false
+		return nil, false, false
 	}
 	if revision <= sess.appliedRevision {
-		return []control.Result{{Error: string(control.CodeStaleRevision)}}, false
+		return []control.Result{{Error: string(control.CodeStaleRevision)}}, false, false
 	}
 
 	results := make([]control.Result, len(mappings))
@@ -327,7 +349,7 @@ func (m *mappingManager) updateLocked(sess *clientSession, revision int64, mappi
 	}
 	if malformed {
 		markRolledBack(results)
-		return results, false
+		return results, false, true
 	}
 
 	type updatePlan struct {
@@ -398,7 +420,7 @@ func (m *mappingManager) updateLocked(sess *clientSession, revision int64, mappi
 			rt.close()
 		}
 		markRolledBack(results)
-		return results, false
+		return results, false, true
 	}
 
 	newMappings := make(map[string]*mappingRuntime, len(plans))
@@ -434,7 +456,7 @@ func (m *mappingManager) updateLocked(sess *clientSession, revision int64, mappi
 	sess.appliedRevision = revision
 	sess.lastSeen = now
 	m.persistLocked(sess, now)
-	return results, true
+	return results, true, false
 }
 
 // mappingPortUnchanged reports whether next keeps the port currently bound for

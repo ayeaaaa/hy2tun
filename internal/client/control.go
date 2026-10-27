@@ -359,6 +359,7 @@ func (c *Client) handlePush(conn net.Conn, msg *control.Push) {
 	if msg.BaseRevision != current {
 		c.configMu.Unlock()
 		c.writePushAck(conn, &control.PushAck{
+			ID:       msg.ID,
 			OK:       false,
 			Error:    string(control.CodeConflict),
 			Revision: current,
@@ -368,6 +369,7 @@ func (c *Client) handlePush(conn net.Conn, msg *control.Push) {
 	if msg.Revision <= msg.BaseRevision {
 		c.configMu.Unlock()
 		c.writePushAck(conn, &control.PushAck{
+			ID:       msg.ID,
 			OK:       false,
 			Error:    string(control.CodeBadMessage),
 			Revision: current,
@@ -377,6 +379,7 @@ func (c *Client) handlePush(conn net.Conn, msg *control.Push) {
 	if err := validatePushedMappings(msg.Mappings); err != nil {
 		c.configMu.Unlock()
 		c.writePushAck(conn, &control.PushAck{
+			ID:       msg.ID,
 			OK:       false,
 			Error:    string(control.CodeBadMessage),
 			Revision: current,
@@ -391,6 +394,7 @@ func (c *Client) handlePush(conn net.Conn, msg *control.Push) {
 		c.configMu.Unlock()
 		c.log.Warn("validate server mapping push", "error", err)
 		c.writePushAck(conn, &control.PushAck{
+			ID:       msg.ID,
 			OK:       false,
 			Error:    string(control.CodeBadMessage),
 			Revision: current,
@@ -401,6 +405,7 @@ func (c *Client) handlePush(conn net.Conn, msg *control.Push) {
 		c.configMu.Unlock()
 		c.log.Warn("apply server mapping push", "error", err)
 		c.writePushAck(conn, &control.PushAck{
+			ID:       msg.ID,
 			OK:       false,
 			Error:    "write_failed",
 			Revision: current,
@@ -415,6 +420,7 @@ func (c *Client) handlePush(conn net.Conn, msg *control.Push) {
 	c.configMu.Unlock()
 
 	c.writePushAck(conn, &control.PushAck{
+		ID:       msg.ID,
 		OK:       true,
 		Revision: msg.Revision,
 		Results:  pushResults(next.Mappings, tokens),

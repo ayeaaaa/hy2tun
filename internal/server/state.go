@@ -85,8 +85,9 @@ func (s *Server) Overview() view.Overview {
 }
 
 // pushAckTimeout bounds how long the server waits for a client to acknowledge
-// a mapping push.
-const pushAckTimeout = 10 * time.Second
+// a mapping push. It is a variable so tests can exercise timeout recovery
+// without waiting ten seconds.
+var pushAckTimeout = 10 * time.Second
 
 // pushReadyTimeout bounds how long a push waits for a freshly published
 // session to finish its hello/hello_ack handshake.
@@ -194,6 +195,13 @@ func (m *mappingManager) pushMappings(clientID string, baseRevision int64, mappi
 	m.mu.Unlock()
 
 	rollback := func() {
+		m.mu.Lock()
+		for _, plan := range plans {
+			if plan.fresh != nil {
+				m.dropPendingUDPLocked(plan.fresh)
+			}
+		}
+		m.mu.Unlock()
 		for _, plan := range plans {
 			if plan.fresh != nil {
 				plan.fresh.close()
@@ -201,19 +209,33 @@ func (m *mappingManager) pushMappings(clientID string, baseRevision int64, mappi
 		}
 	}
 
+	pushID, err := newPushID()
+	if err != nil {
+		rollback()
+		return 0, fmt.Errorf("generate push ID: %w", err)
+	}
 	revision := baseRevision + 1
 	ackCh := make(chan *control.PushAck, 1)
-	sess.setPushWaiter(ackCh)
+	sess.setPushWaiter(ackCh, pushID, revision)
 	defer sess.clearPushWaiter(ackCh)
 
 	if err := sess.write(&control.Push{
 		Type:         control.TypePush,
+		ID:           pushID,
 		BaseRevision: baseRevision,
 		Revision:     revision,
 		Mappings:     effective,
 		Results:      results,
 	}); err != nil {
 		rollback()
+		// The client may still be running its old mapping set, but the stream
+		// is unusable. Close it so the reconnect re-registers the
+		// authoritative configuration instead of leaving a revision split.
+		m.log.Warn("closing control stream after push write failure",
+			"client", sess.id,
+			"error", err,
+		)
+		sess.abortStream()
 		return 0, fmt.Errorf("send mapping push: %w", err)
 	}
 
@@ -223,7 +245,7 @@ func (m *mappingManager) pushMappings(clientID string, baseRevision int64, mappi
 	for {
 		select {
 		case ack := <-ackCh:
-			if !pushAckMatches(ack, revision) {
+			if !pushAckMatches(ack, pushID, revision) {
 				// A late ack from an earlier timed-out push must not poison
 				// this transaction. Keep waiting for the matching ack.
 				continue
@@ -234,23 +256,35 @@ func (m *mappingManager) pushMappings(clientID string, baseRevision int64, mappi
 			return 0, control.ErrClientOffline
 		case <-timer.C:
 			rollback()
+			// The client may have applied the push and written its config
+			// before the ack was lost. Closing the stream forces a hello that
+			// makes the client's file authoritative again.
+			m.log.Warn("closing control stream after push timeout", "client", sess.id)
+			sess.abortStream()
 			return 0, control.ErrPushTimeout
 		}
 	}
 }
 
-// pushAckMatches reports whether ack belongs to the push with revision.
-// Successful acks echo the push revision. Conflict and failure acks carry the
-// client's revision instead, so they cannot be correlated by revision; they
-// are accepted because rolling back is always safe.
-func pushAckMatches(ack *control.PushAck, revision int64) bool {
-	if ack == nil {
+// pushAckMatches reports whether ack belongs to the push identified by pushID
+// and revision. Every ack must echo the push ID, so a late ack from an earlier
+// push cannot be mistaken for this one. Successful acks must also echo the push
+// revision. Failure acks carry the client's revision instead, so they are
+// accepted once their ID matches.
+func pushAckMatches(ack *control.PushAck, pushID string, revision int64) bool {
+	if ack == nil || pushID == "" || ack.ID != pushID {
 		return false
 	}
 	if ack.OK {
 		return ack.Revision == revision
 	}
 	return true
+}
+
+// newPushID returns a 128-bit random identifier that correlates a push with
+// its acknowledgement.
+func newPushID() (string, error) {
+	return newDataToken()
 }
 
 // preparePushLocked validates the requested list and pre-binds only new or
@@ -332,9 +366,11 @@ func (m *mappingManager) preparePushLocked(sess *clientSession, mappings []confi
 		}
 		plan.fresh = rt
 		prebound = append(prebound, rt)
+		m.registerPendingUDPLocked(rt)
 	}
 	if failed {
 		for _, rt := range prebound {
+			m.dropPendingUDPLocked(rt)
 			rt.close()
 		}
 		markRolledBack(results)
@@ -381,6 +417,15 @@ func (m *mappingManager) finishPush(sess *clientSession, plans []*pushPlan, revi
 	}
 	if ack.Revision != revision {
 		rollback()
+		// An OK ack for a different revision means the client applied
+		// something the server did not prepare. Reconnect so hello re-syncs
+		// the authoritative configuration.
+		m.log.Warn("closing control stream after push ack mismatch",
+			"client", sess.id,
+			"ack_revision", ack.Revision,
+			"push_revision", revision,
+		)
+		sess.abortStream()
 		return 0, fmt.Errorf("mapping push: client acknowledged revision %d, want %d", ack.Revision, revision)
 	}
 
@@ -419,6 +464,7 @@ func (m *mappingManager) commitPushLocked(sess *clientSession, plans []*pushPlan
 			plan.old.close()
 		}
 		if plan.fresh != nil {
+			m.dropPendingUDPLocked(plan.fresh)
 			next[plan.mapping.ID] = plan.fresh
 			order = append(order, plan.mapping.ID)
 		}

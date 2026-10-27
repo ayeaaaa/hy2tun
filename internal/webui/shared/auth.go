@@ -123,7 +123,7 @@ func (m *SessionManager) Issue(w http.ResponseWriter, r *http.Request, username 
 	m.sessions[sessionID] = now.Add(m.ttl)
 	m.mu.Unlock()
 
-	secure := r != nil && r.TLS != nil
+	secure := RequestScheme(r) == "https"
 	http.SetCookie(w, &http.Cookie{
 		Name:     CookieName,
 		Value:    encoded + "." + signature,
@@ -219,7 +219,7 @@ func (m *SessionManager) Clear(w http.ResponseWriter, r *http.Request) {
 		delete(m.sessions, claims.SessionID)
 		m.mu.Unlock()
 	}
-	secure := r != nil && r.TLS != nil
+	secure := RequestScheme(r) == "https"
 	http.SetCookie(w, &http.Cookie{
 		Name:     CookieName,
 		Value:    "",
@@ -286,7 +286,7 @@ func RequireCSRF(next http.Handler) http.Handler {
 		parsed, err := url.Parse(origin)
 		if err != nil ||
 			parsed.Host == "" ||
-			!strings.EqualFold(parsed.Scheme, requestScheme(r)) ||
+			!strings.EqualFold(parsed.Scheme, RequestScheme(r)) ||
 			!strings.EqualFold(parsed.Host, r.Host) {
 			writeJSONError(w, http.StatusForbidden, "forbidden")
 			return
@@ -301,16 +301,17 @@ func RequireCSRF(next http.Handler) http.Handler {
 	})
 }
 
-func requestScheme(r *http.Request) string {
+// RequestScheme returns the request's effective scheme. A TLS-terminating
+// reverse proxy is a supported deployment, so a valid X-Forwarded-Proto is
+// honored; the custom CSRF header and Host comparison remain the primary
+// defenses for mutations.
+func RequestScheme(r *http.Request) string {
 	if r == nil {
 		return ""
 	}
 	if r.TLS != nil {
 		return "https"
 	}
-	// A TLS-terminating reverse proxy is a supported deployment. Trust the
-	// de facto forwarded scheme only for this comparison; the custom CSRF
-	// header and the Host comparison remain the primary defenses.
 	if forwarded := r.Header.Get("X-Forwarded-Proto"); forwarded != "" {
 		if first, _, ok := strings.Cut(forwarded, ","); ok {
 			forwarded = first
@@ -445,8 +446,11 @@ type LoginHandler struct {
 	Username     string
 	PasswordHash string
 	Log          *slog.Logger
-	OnSuccess    LoginSuccessFunc
-	OnError      LoginErrorFunc
+	// TrustProxy makes the limiter key on X-Forwarded-For / X-Real-IP. Enable
+	// it only when a trusted reverse proxy overwrites those headers.
+	TrustProxy bool
+	OnSuccess  LoginSuccessFunc
+	OnError    LoginErrorFunc
 }
 
 // ServeHTTP implements http.Handler.
@@ -458,7 +462,7 @@ func (h *LoginHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 
-	ip := ClientIP(r)
+	ip := ClientIPWithProxy(r, h.TrustProxy)
 	if h.Limiter != nil && !h.Limiter.Allow(ip) {
 		w.Header().Set("Retry-After", "60")
 		h.log().Debug("web login rate limited", "ip", ip)
@@ -558,6 +562,46 @@ func ClientIP(r *http.Request) string {
 		return host
 	}
 	return r.RemoteAddr
+}
+
+// ClientIPWithProxy returns the key used for login rate limiting. Forwarded
+// headers are consulted only when trustProxy is enabled; without a trusted
+// proxy they are attacker-controlled and would let a client evade the limiter
+// by forging a new IP per request. With a trusted proxy, the first
+// X-Forwarded-For entry is the original client.
+func ClientIPWithProxy(r *http.Request, trustProxy bool) string {
+	if r == nil {
+		return ""
+	}
+	if trustProxy {
+		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+			first, _, _ := strings.Cut(forwarded, ",")
+			if ip := normalizeClientIP(first); ip != "" {
+				return ip
+			}
+		}
+		if ip := normalizeClientIP(r.Header.Get("X-Real-IP")); ip != "" {
+			return ip
+		}
+	}
+	return ClientIP(r)
+}
+
+// normalizeClientIP accepts a bare IP, a bracketed IPv6 address, or host:port
+// and returns the canonical host, or an empty string when it is not an IP.
+func normalizeClientIP(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		value = host
+	}
+	value = strings.Trim(value, "[]")
+	if net.ParseIP(value) == nil {
+		return ""
+	}
+	return value
 }
 
 func writeJSONError(w http.ResponseWriter, status int, message string) {

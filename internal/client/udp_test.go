@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -29,6 +30,7 @@ type testUDPMessage struct {
 type fakeUDPConn struct {
 	incoming  chan testUDPMessage
 	sent      chan testUDPMessage
+	recvErrs  chan error
 	closed    chan struct{}
 	closeOnce sync.Once
 	sendFn    func()
@@ -38,12 +40,15 @@ func newFakeUDPConn() *fakeUDPConn {
 	return &fakeUDPConn{
 		incoming: make(chan testUDPMessage, 32),
 		sent:     make(chan testUDPMessage, 32),
+		recvErrs: make(chan error, 8),
 		closed:   make(chan struct{}),
 	}
 }
 
 func (f *fakeUDPConn) Receive() ([]byte, string, error) {
 	select {
+	case err := <-f.recvErrs:
+		return nil, "", err
 	case msg := <-f.incoming:
 		return msg.data, msg.addr, nil
 	case <-f.closed:
@@ -136,6 +141,49 @@ func TestUDPMappingForwardsRepliesAndClosesPeers(t *testing.T) {
 	u.close()
 	require.Equal(t, 0, u.peerCount())
 	require.True(t, fake.isClosed(), "closing the mapping must close the HY2 UDP session")
+}
+
+// TestUDPMappingReceiveErrorForcesControlResync injects a Receive error and
+// verifies that the dead session closes the control stream, which makes Start
+// reconnect and re-register every mapping instead of leaving a deaf mapping.
+func TestUDPMappingReceiveErrorForcesControlResync(t *testing.T) {
+	echoAddr, stopEcho := testutil.StartUDPEcho(t)
+	defer stopEcho()
+
+	cl, err := New(validTestClientConfig(), nil)
+	require.NoError(t, err)
+	defer cl.Close()
+
+	fake := newFakeUDPConn()
+	controlServer, controlClient := net.Pipe()
+	defer controlClient.Close()
+	cl.mu.Lock()
+	cl.hy = &fakeUDPHY2Client{udp: fake}
+	cl.controlConn = controlServer
+	cl.connected = true
+	cl.mu.Unlock()
+
+	token := strings.Repeat("c", 32)
+	u, err := cl.startUDP(config.Mapping{
+		ID:        "udp1",
+		Type:      "udp",
+		LocalAddr: echoAddr,
+		Enabled:   true,
+	}, token)
+	require.NoError(t, err)
+	defer u.close()
+
+	// Drain the probe.
+	select {
+	case <-fake.sent:
+	case <-time.After(time.Second):
+		t.Fatal("startUDP did not send the probe")
+	}
+
+	fake.recvErrs <- errors.New("receive failed")
+	require.NoError(t, controlClient.SetReadDeadline(time.Now().Add(2*time.Second)))
+	_, err = controlClient.Read(make([]byte, 1))
+	require.Error(t, err, "a Receive error must close the control stream for a resync")
 }
 
 func TestStartUDPMappingsUsesRegistrationTokens(t *testing.T) {

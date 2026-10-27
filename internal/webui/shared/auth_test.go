@@ -111,6 +111,25 @@ func TestSessionManagerSetsSecureCookieOnTLS(t *testing.T) {
 	require.True(t, cookies[0].Secure)
 }
 
+func TestSessionManagerSetsSecureCookieBehindTLSProxy(t *testing.T) {
+	manager, err := NewSessionManager(testSecret(), time.Hour)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	recorder := httptest.NewRecorder()
+	require.NoError(t, manager.Issue(recorder, req, "admin"))
+	cookies := recorder.Result().Cookies()
+	require.Len(t, cookies, 1)
+	require.True(t, cookies[0].Secure, "a proxied HTTPS request must get a Secure cookie")
+
+	clearRecorder := httptest.NewRecorder()
+	manager.Clear(clearRecorder, req)
+	cleared := clearRecorder.Result().Cookies()
+	require.Len(t, cleared, 1)
+	require.True(t, cleared[0].Secure)
+}
+
 func TestSessionManagerRejectsEmptyUsername(t *testing.T) {
 	manager, err := NewSessionManager(testSecret(), time.Hour)
 	require.NoError(t, err)
@@ -305,6 +324,45 @@ func TestRequireCSRFUsesForwardedProtoBehindTLSProxy(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, recorder.Code)
 }
 
+func TestLoginHandlerTrustProxyRateLimit(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("correct"), bcrypt.MinCost)
+	require.NoError(t, err)
+	sessions, err := NewSessionManager(testSecret(), time.Hour)
+	require.NoError(t, err)
+
+	limiter := NewLoginLimiter(1, time.Minute, time.Minute)
+	handler := &LoginHandler{
+		Sessions:     sessions,
+		Limiter:      limiter,
+		Username:     "admin",
+		PasswordHash: string(hash),
+		TrustProxy:   true,
+	}
+
+	attempt := func(forwarded string) int {
+		req := httptest.NewRequest(http.MethodPost, "http://example.com/api/login", strings.NewReader("username=admin&password=wrong"))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.RemoteAddr = "10.0.0.5:1234"
+		req.Header.Set("X-Forwarded-For", forwarded)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, req)
+		return recorder.Code
+	}
+
+	require.Equal(t, http.StatusUnauthorized, attempt("203.0.113.1"))
+	require.Equal(t, http.StatusTooManyRequests, attempt("203.0.113.1"))
+	require.Equal(t, http.StatusUnauthorized, attempt("203.0.113.2"),
+		"a different forwarded client must not share the first client's lockout")
+
+	// Without trust, the same RemoteAddr shares one bucket regardless of the
+	// forwarded header.
+	untrustedLimiter := NewLoginLimiter(1, time.Minute, time.Minute)
+	handler.Limiter = untrustedLimiter
+	handler.TrustProxy = false
+	require.Equal(t, http.StatusUnauthorized, attempt("203.0.113.3"))
+	require.Equal(t, http.StatusTooManyRequests, attempt("203.0.113.4"))
+}
+
 func TestLoginLimiter(t *testing.T) {
 	now := time.Unix(1000, 0)
 	limiter := NewLoginLimiter(5, time.Minute, time.Minute)
@@ -447,4 +505,27 @@ func TestClientIP(t *testing.T) {
 
 	req.RemoteAddr = "203.0.113.9"
 	require.Equal(t, "203.0.113.9", ClientIP(req))
+}
+
+func TestClientIPWithProxy(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	req.RemoteAddr = "10.0.0.5:1234"
+	req.Header.Set("X-Forwarded-For", "203.0.113.7, 10.0.0.5")
+	req.Header.Set("X-Real-IP", "203.0.113.8")
+
+	// Default: forwarded headers are ignored.
+	require.Equal(t, "10.0.0.5", ClientIPWithProxy(req, false))
+	require.Equal(t, "10.0.0.5", ClientIP(req))
+
+	// Trusted proxy: the first X-Forwarded-For entry is the client.
+	require.Equal(t, "203.0.113.7", ClientIPWithProxy(req, true))
+
+	req.Header.Set("X-Forwarded-For", "")
+	require.Equal(t, "203.0.113.8", ClientIPWithProxy(req, true), "X-Real-IP is the fallback")
+
+	req.Header.Set("X-Real-IP", "not-an-ip")
+	require.Equal(t, "10.0.0.5", ClientIPWithProxy(req, true), "invalid forwarded values fall back to RemoteAddr")
+
+	req.Header.Set("X-Forwarded-For", "[2001:db8::1]:4321")
+	require.Equal(t, "2001:db8::1", ClientIPWithProxy(req, true))
 }

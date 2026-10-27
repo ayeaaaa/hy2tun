@@ -3,6 +3,7 @@ package server
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -195,11 +196,28 @@ func newDataToken() (string, error) {
 
 // activeConn is a public connection tracked by its mapping runtime. Closing it
 // removes it from the runtime's active set, so a completed relay does not leave
-// a stale entry behind.
+// a stale entry behind. Read and Write update the mapping's traffic counters:
+// Read is public-to-client (Rx) and Write is client-to-public (Tx).
 type activeConn struct {
 	net.Conn
 	mapping *mappingRuntime
 	once    sync.Once
+}
+
+func (c *activeConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 && c.mapping != nil {
+		c.mapping.rxBytes.Add(uint64(n))
+	}
+	return n, err
+}
+
+func (c *activeConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if n > 0 && c.mapping != nil {
+		c.mapping.txBytes.Add(uint64(n))
+	}
+	return n, err
 }
 
 func (c *activeConn) Close() error {
@@ -212,13 +230,35 @@ func (c *activeConn) Close() error {
 }
 
 // serveTCP accepts public connections for one reverse TCP mapping and asks the
-// owning client to open a data stream for each of them.
+// owning client to open a data stream for each of them. A transient Accept
+// error (for example EMFILE) must not stop the accept loop: the listener stays
+// bound, so returning would leave a "running" mapping that never accepts again.
 func (s *Server) serveTCP(sess *clientSession, m *mappingRuntime, listener net.Listener) {
+	backoff := 5 * time.Millisecond
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			return
+			if errors.Is(err, net.ErrClosed) || (m != nil && m.closed.Load()) {
+				return
+			}
+			mappingID := ""
+			if m != nil {
+				mappingID = m.id
+			}
+			s.log.Warn("public TCP accept failed; retrying",
+				"mapping", mappingID,
+				"error", err,
+				"retry_in", backoff,
+			)
+			timer := time.NewTimer(backoff)
+			<-timer.C
+			backoff *= 2
+			if backoff > time.Second {
+				backoff = time.Second
+			}
+			continue
 		}
+		backoff = 5 * time.Millisecond
 		go s.openPublicConn(sess, m, conn)
 	}
 }

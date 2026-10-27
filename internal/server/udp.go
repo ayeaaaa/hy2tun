@@ -25,6 +25,7 @@ type publicUDPConn struct {
 	*net.UDPConn
 	virtualAddr string
 	mappingID   string
+	runtime     *mappingRuntime
 	log         *slog.Logger
 
 	mu       sync.Mutex
@@ -90,6 +91,9 @@ func (c *publicUDPConn) ReadFrom(b []byte) (int, string, error) {
 				"buffer", len(b),
 			)
 		}
+		if n > 0 && c.runtime != nil {
+			c.runtime.rxBytes.Add(uint64(n))
+		}
 		if addr == nil {
 			return n, "", nil
 		}
@@ -113,7 +117,11 @@ func (c *publicUDPConn) WriteTo(b []byte, addr string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return c.UDPConn.WriteTo(b, udpAddr)
+	n, err := c.UDPConn.WriteTo(b, udpAddr)
+	if n > 0 && c.runtime != nil {
+		c.runtime.txBytes.Add(uint64(n))
+	}
+	return n, err
 }
 
 // Close detaches this HY2 UDP session from the mapping's public socket. The
@@ -162,6 +170,7 @@ func (s *Server) publicUDPConn(m *mappingRuntime) *publicUDPConn {
 		UDPConn:     m.udpConn,
 		virtualAddr: udpVirtualAddress(m.udpToken),
 		mappingID:   m.id,
+		runtime:     m,
 		log:         s.log,
 	}
 
@@ -180,7 +189,9 @@ func (s *Server) publicUDPConn(m *mappingRuntime) *publicUDPConn {
 }
 
 // udpRuntime returns the running UDP mapping registered under token. The token
-// itself is never included in an error or log message.
+// itself is never included in an error or log message. Pre-bound push runtimes
+// are visible before the push commits so a client probe sent immediately after
+// its push_ack is not lost.
 func (m *mappingManager) udpRuntime(token string) (*mappingRuntime, error) {
 	if m == nil || token == "" {
 		return nil, fmt.Errorf("hy2tun UDP mapping is not available")
@@ -188,6 +199,12 @@ func (m *mappingManager) udpRuntime(token string) (*mappingRuntime, error) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if rt := m.pendingUDP[token]; rt != nil &&
+		rt.mapping.Type == "udp" &&
+		rt.status == mappingStatusRunning &&
+		!rt.closed.Load() {
+		return rt, nil
+	}
 	for _, sess := range m.sessions {
 		for _, rt := range sess.mappings {
 			if rt.udpToken == token &&
@@ -199,6 +216,29 @@ func (m *mappingManager) udpRuntime(token string) (*mappingRuntime, error) {
 		}
 	}
 	return nil, fmt.Errorf("hy2tun UDP mapping is not registered")
+}
+
+// registerPendingUDPLocked publishes a pre-bound UDP runtime to udpRuntime
+// before the push transaction commits. The caller must hold m.mu.
+func (m *mappingManager) registerPendingUDPLocked(rt *mappingRuntime) {
+	if rt == nil || rt.udpToken == "" {
+		return
+	}
+	if m.pendingUDP == nil {
+		m.pendingUDP = make(map[string]*mappingRuntime)
+	}
+	m.pendingUDP[rt.udpToken] = rt
+}
+
+// dropPendingUDPLocked removes rt from the pending token map. The caller must
+// hold m.mu.
+func (m *mappingManager) dropPendingUDPLocked(rt *mappingRuntime) {
+	if rt == nil || rt.udpToken == "" {
+		return
+	}
+	if m.pendingUDP[rt.udpToken] == rt {
+		delete(m.pendingUDP, rt.udpToken)
+	}
 }
 
 // udpConn adapts *net.UDPConn to hyserver.UDPConn for normal proxy traffic.

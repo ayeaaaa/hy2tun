@@ -127,6 +127,10 @@ type WebConfig struct {
 	Username     string       `yaml:"username" json:"username"`
 	PasswordHash string       `yaml:"password_hash" json:"-"`
 	TLS          WebTLSConfig `yaml:"tls" json:"tls"`
+	// TrustProxy enables X-Forwarded-For client-IP extraction for the login
+	// rate limiter. It must only be enabled when a trusted reverse proxy
+	// overwrites the header; otherwise clients can spoof their IP.
+	TrustProxy bool `yaml:"trust_proxy" json:"trust_proxy"`
 }
 
 // LogConfig configures structured logging.

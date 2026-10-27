@@ -353,6 +353,7 @@ Task Scheduler instructions and firewall notes.
 | `web.listen` | Management address. The example uses `127.0.0.1:7500`. |
 | `web.username` | Console username. Default `admin` when `web.listen` is set. |
 | `web.password_hash` | bcrypt hash. Empty generates a password on first start. |
+| `web.trust_proxy` | Trust `X-Forwarded-For`/`X-Real-IP` for login rate limiting. Enable only behind a proxy that overwrites them. Default `false`. |
 | `web.tls.cert`, `web.tls.key` | Optional HTTPS certificate pair for the console. |
 | `state_file` | Persistent state JSON. Empty keeps state in memory. |
 | `log.level` | `debug`, `info`, `warn`, or `error`. |
@@ -377,6 +378,7 @@ Task Scheduler instructions and firewall notes.
 | `mappings` | List of reverse mappings (see below). |
 | `web.listen` | Client console address. The example uses `0.0.0.0:7501`. |
 | `web.username`, `web.password_hash` | Console login. Empty hash generates a password. |
+| `web.trust_proxy` | Trust `X-Forwarded-For`/`X-Real-IP` for login rate limiting. Default `false`. |
 | `web.tls.cert`, `web.tls.key` | Optional HTTPS for the client console. |
 | `proxy.socks5` | Optional local SOCKS5 listen address, for example `127.0.0.1:1080`. |
 | `proxy.socks5_auth` | Optional `user:password` for SOCKS5. |
@@ -509,12 +511,21 @@ The example server console binds to `127.0.0.1:7500`. Prefer one of:
            proxy_pass http://127.0.0.1:7500;
            proxy_set_header Host $host;
            proxy_set_header X-Forwarded-Proto $scheme;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
            proxy_set_header X-Real-IP $remote_addr;
            proxy_buffering off;
            proxy_read_timeout 1h;
        }
    }
    ```
+
+   The console uses `X-Forwarded-Proto` to mark the session cookie `Secure` and
+   to send HSTS, so proxied HTTPS deployments get both. Set
+   `web.trust_proxy: true` only when this proxy overwrites `X-Forwarded-For` or
+   `X-Real-IP`; then the login limiter keys on the real client IP instead of
+   the proxy's single address. Leave it `false` when clients can reach the
+   console directly, because forwarded headers are otherwise spoofable and
+   would let an attacker evade the limiter.
 
 Do not expose the console directly on a public interface over plain HTTP. The
 console has its own login, rate limiting, and CSRF protection, but TLS protects
@@ -530,8 +541,13 @@ the password and session cookie in transit.
   mapping IDs, and are never logged.
 - The server enforces the port whitelist; a client cannot bypass it.
 - Web passwords are stored as bcrypt hashes. Session cookies are HMAC-signed,
-  `HttpOnly`, and `SameSite=Lax`; mutating APIs require
-  `X-Requested-With: hy2tun` and a matching `Origin`.
+  `HttpOnly`, and `SameSite=Lax`, and are marked `Secure` (with HSTS) when the
+  request is HTTPS directly or through a TLS reverse proxy; mutating APIs
+  require `X-Requested-With: hy2tun` and a matching `Origin`.
+- Login rate limiting keys on the direct peer by default. Set
+  `web.trust_proxy: true` only behind a proxy that overwrites
+  `X-Forwarded-For`/`X-Real-IP`; otherwise forwarded headers are ignored so a
+  client cannot forge a fresh IP per attempt.
 - Configuration and state files are written with mode `0600` and atomic
   rename. Previous contents are kept as `.bak`.
 - Passwords, tokens, and private keys are never logged.
@@ -607,7 +623,10 @@ with a smaller MTU can drop large datagrams before they arrive.
 - If no password was printed, `web.password_hash` was already set. Use that
   password or replace the hash with a new one and restart.
 - Five failed logins from one IP trigger a one-minute lockout. Wait and retry,
-  or restart the process (the limiter is in memory).
+  or restart the process (the limiter is in memory). Behind a TLS reverse
+  proxy, all users otherwise share the proxy's IP; set `web.trust_proxy: true`
+  when the proxy overwrites `X-Forwarded-For` or `X-Real-IP` so each client is
+  limited separately.
 - If the console is reachable but pages redirect to `/login`, the session
   cookie is missing or expired. Log in again; restarting the process
   invalidates sessions but not the persisted signing key.
@@ -675,6 +694,49 @@ Acceptance is comparative, not a fixed number: TCP reverse-mapping throughput
 should be close to the native HY2 proxy on the same path, and UDP at 100 Mbps
 should not show sustained loss or obvious jitter. Record the client, server,
 kernel, HY2 version, MTU, and time of day with the results.
+
+## Manual acceptance checklist (OpenWrt and Windows)
+
+The Go tests run on Linux only. OpenWrt and Windows real-hardware execution is
+external acceptance and is **not** performed by CI or claimed by the test
+suite. Run this checklist on real devices before declaring a platform
+supported, and record the device, firmware/OS build, architecture, binary
+version, and date with the result.
+
+### OpenWrt
+
+1. Install the archive matching `uname -m` (`mipsle`/`mips` are softfloat;
+   `arm` is GOARM=7). Confirm `hy2tun` starts without extra shared libraries.
+2. Copy `examples/client.yaml` to `/etc/hy2tun/client.yaml`, set the server,
+   credentials, and at least one TCP and one UDP mapping, then `chmod 600`.
+3. Install `scripts/openwrt/hy2tun.init`, enable it, and start the service.
+   Confirm `logread` shows a completed control handshake and no crash loop.
+4. Log in to the client console from the LAN, add a mapping, and verify it
+   appears in the server console.
+5. From outside the LAN, connect through the mapped TCP port and send a UDP
+   datagram through the mapped UDP port; verify both replies.
+6. Restart the service and reboot the router. Confirm the client reconnects,
+   mappings return, and the config file (including server-assigned ports)
+   survives.
+7. Delete and disable a mapping from the console. Confirm the public listener
+   closes and active connections drop.
+
+### Windows
+
+1. Extract the `windows/amd64` archive and run `hy2tun.exe -c client.yaml` from
+   PowerShell. Confirm the firewall prompt appears and allow private networks
+   only.
+2. Configure a TCP and a UDP mapping, then verify both public ports from
+   outside the client network.
+3. Log in to the client console at `http://<lan-ip>:7501/`, add/update/delete a
+   mapping, and confirm the YAML file changes.
+4. Register the client with Task Scheduler (see
+   [`scripts/windows/README.md`](scripts/windows/README.md)), reboot Windows,
+   and confirm it reconnects without an interactive login.
+5. Stop and restart the task. Confirm mappings return and the config file is
+   unchanged except for expected assigned ports/revisions.
+6. Confirm passwords, control tokens, UDP tokens, and session keys do not
+   appear in the console log file or Windows event output.
 
 ## Development
 
