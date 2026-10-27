@@ -40,7 +40,7 @@ func TestControlRoundTripAllMessageTypes(t *testing.T) {
 		{"hello_ack error", &HelloAck{Type: TypeHelloAck, OK: false, Error: string(CodeUnauthorized)}},
 		{"update", &Update{Type: TypeUpdate, Revision: 8, Mappings: mappings}},
 		{"update_ack", &UpdateAck{Type: TypeUpdateAck, Revision: 8, Results: results}},
-		{"push", &Push{Type: TypePush, BaseRevision: 8, Revision: 9, Mappings: mappings}},
+		{"push", &Push{Type: TypePush, BaseRevision: 8, Revision: 9, Mappings: mappings, Results: results}},
 		{"push_ack", &PushAck{Type: TypePushAck, OK: true, Revision: 9, Results: results}},
 		{"push_ack conflict", &PushAck{Type: TypePushAck, OK: false, Revision: 8, Error: string(CodeConflict)}},
 		{"open", &Open{Type: TypeOpen, Token: "a1b2", MappingID: "m1"}},

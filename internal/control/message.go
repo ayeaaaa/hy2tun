@@ -66,12 +66,15 @@ type UpdateAck struct {
 }
 
 // Push is sent by the server to apply an authoritative mapping list. The
-// client must still hold BaseRevision for the push to succeed.
+// client must still hold BaseRevision for the push to succeed. Results carries
+// the server's per-mapping outcome, including the UDP token for reverse UDP
+// mappings that were pre-bound for this push.
 type Push struct {
 	Type         string           `json:"type"`
 	BaseRevision int64            `json:"base_revision"`
 	Revision     int64            `json:"revision"`
 	Mappings     []config.Mapping `json:"mappings"`
+	Results      []Result         `json:"results,omitempty"`
 }
 
 // PushAck is the client's reply to Push. On conflict OK is false, Error is

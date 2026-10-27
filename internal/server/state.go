@@ -161,11 +161,15 @@ func (m *mappingManager) pushMappings(clientID string, baseRevision int64, mappi
 		m.mu.Unlock()
 		return 0, control.ErrClientOffline
 	}
-	if baseRevision != sess.revision {
+	// The client's advertised revision and the revision of the mapping set the
+	// server actually applied must agree. After a conflict ack the client may
+	// advertise a newer revision while its queued update has not been applied;
+	// a retry must wait for that update instead of pushing over it.
+	if baseRevision != sess.revision || baseRevision != sess.appliedRevision {
 		m.mu.Unlock()
 		return 0, control.ErrConflict
 	}
-	plans, err := m.preparePushLocked(sess, mappings)
+	plans, results, err := m.preparePushLocked(sess, mappings)
 	if err != nil {
 		m.mu.Unlock()
 		return 0, err
@@ -191,6 +195,7 @@ func (m *mappingManager) pushMappings(clientID string, baseRevision int64, mappi
 		BaseRevision: baseRevision,
 		Revision:     revision,
 		Mappings:     effective,
+		Results:      results,
 	}); err != nil {
 		rollback()
 		return 0, fmt.Errorf("send mapping push: %w", err)
@@ -199,22 +204,43 @@ func (m *mappingManager) pushMappings(clientID string, baseRevision int64, mappi
 	timer := time.NewTimer(pushAckTimeout)
 	defer timer.Stop()
 
-	select {
-	case ack := <-ackCh:
-		return m.finishPush(sess, plans, revision, ack, rollback)
-	case <-sess.done:
-		rollback()
-		return 0, control.ErrClientOffline
-	case <-timer.C:
-		rollback()
-		return 0, control.ErrPushTimeout
+	for {
+		select {
+		case ack := <-ackCh:
+			if !pushAckMatches(ack, revision) {
+				// A late ack from an earlier timed-out push must not poison
+				// this transaction. Keep waiting for the matching ack.
+				continue
+			}
+			return m.finishPush(sess, plans, revision, ack, rollback)
+		case <-sess.done:
+			rollback()
+			return 0, control.ErrClientOffline
+		case <-timer.C:
+			rollback()
+			return 0, control.ErrPushTimeout
+		}
 	}
+}
+
+// pushAckMatches reports whether ack belongs to the push with revision.
+// Successful acks echo the push revision. Conflict and failure acks carry the
+// client's revision instead, so they cannot be correlated by revision; they
+// are accepted because rolling back is always safe.
+func pushAckMatches(ack *control.PushAck, revision int64) bool {
+	if ack == nil {
+		return false
+	}
+	if ack.OK {
+		return ack.Revision == revision
+	}
+	return true
 }
 
 // preparePushLocked validates the requested list and pre-binds only new or
 // retargeted mappings while the old set is still serving traffic. Any failure
 // closes the new listeners and leaves the session untouched.
-func (m *mappingManager) preparePushLocked(sess *clientSession, mappings []config.Mapping) ([]*pushPlan, error) {
+func (m *mappingManager) preparePushLocked(sess *clientSession, mappings []config.Mapping) ([]*pushPlan, []control.Result, error) {
 	results := make([]control.Result, len(mappings))
 	next := make(map[string]config.Mapping, len(mappings))
 	malformed := false
@@ -234,7 +260,7 @@ func (m *mappingManager) preparePushLocked(sess *clientSession, mappings []confi
 	}
 	if malformed {
 		markRolledBack(results)
-		return nil, &PushError{Results: results}
+		return nil, results, &PushError{Results: results}
 	}
 
 	plans := make([]*pushPlan, len(mappings))
@@ -296,9 +322,9 @@ func (m *mappingManager) preparePushLocked(sess *clientSession, mappings []confi
 			rt.close()
 		}
 		markRolledBack(results)
-		return nil, &PushError{Results: results}
+		return nil, results, &PushError{Results: results}
 	}
-	return plans, nil
+	return plans, results, nil
 }
 
 // effectivePushMappings fills in assigned ports so the client persists the
@@ -390,14 +416,15 @@ func (m *mappingManager) commitPushLocked(sess *clientSession, plans []*pushPlan
 	sess.mappings = next
 	sess.order = order
 	sess.revision = revision
-	sess.resyncRevision = 0
+	sess.appliedRevision = revision
 	sess.lastSeen = now
 	m.persistLocked(sess, now)
 }
 
 // adoptClientRevision records the revision reported by a conflicting push ack.
-// The pending update with that revision is accepted once so the mapping cache
-// catches up with the authoritative client config.
+// appliedRevision is deliberately left unchanged: the server still has the old
+// mapping set until the client's queued update arrives, and a push retry must
+// not use the adopted revision as its base.
 func (m *mappingManager) adoptClientRevision(sess *clientSession, revision int64) {
 	if revision < 0 {
 		return
@@ -406,9 +433,6 @@ func (m *mappingManager) adoptClientRevision(sess *clientSession, revision int64
 
 	m.mu.Lock()
 	if m.sessions[sess.id] == sess {
-		if revision != sess.revision {
-			sess.resyncRevision = revision
-		}
 		sess.revision = revision
 		sess.lastSeen = now
 		m.persistLocked(sess, now)

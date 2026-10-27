@@ -141,10 +141,13 @@ type clientSession struct {
 	// arrive on the control read loop while the push caller waits.
 	pushWaitMu sync.Mutex
 	pushWait   chan *control.PushAck
-	// resyncRevision records a revision learned from a conflicting push ack.
-	// The pending update with that exact revision is accepted once so the
-	// server can replace its stale mapping cache. Guarded by mappingManager.mu.
-	resyncRevision int64
+
+	// revision is the revision the client currently advertises. appliedRevision
+	// is the revision of the mapping set this server has actually applied. A
+	// push may only use a base where both agree; a conflict ack can advance
+	// revision ahead of appliedRevision until the client's queued update lands.
+	// Both are guarded by mappingManager.mu.
+	appliedRevision int64
 
 	// ready is closed once the HelloAck has been written, so data-plane opens
 	// cannot overtake the handshake. done is closed when the session is
@@ -300,12 +303,7 @@ func (m *mappingManager) updateLocked(sess *clientSession, revision int64, mappi
 	if m.sessions[sess.id] != sess {
 		return nil, false
 	}
-	if sess.resyncRevision != 0 && revision == sess.resyncRevision {
-		// A push conflict recorded the client's revision before its pending
-		// update arrived. Accept that exact revision once so the mapping cache
-		// catches up; every other non-increasing revision is stale.
-		sess.resyncRevision = 0
-	} else if revision <= sess.revision {
+	if revision <= sess.appliedRevision {
 		return []control.Result{{Error: string(control.CodeStaleRevision)}}, false
 	}
 
@@ -433,7 +431,7 @@ func (m *mappingManager) updateLocked(sess *clientSession, revision int64, mappi
 	sess.mappings = newMappings
 	sess.order = newOrder
 	sess.revision = revision
-	sess.resyncRevision = 0
+	sess.appliedRevision = revision
 	sess.lastSeen = now
 	m.persistLocked(sess, now)
 	return results, true

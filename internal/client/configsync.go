@@ -122,16 +122,22 @@ func (c *Client) afterLocalEdit() {
 	c.sendUpdate()
 }
 
-// sendUpdate announces the current revision and complete mapping list. A write
-// failure is left to the reconnect loop; the local file remains authoritative.
+// sendUpdate announces the current revision and complete mapping list. It is
+// gated on a completed handshake: the control connection is installed before
+// hello_ack, but an Update sent before Hello would be a protocol violation. A
+// write failure is left to the reconnect loop; the local file remains
+// authoritative.
 func (c *Client) sendUpdate() {
 	c.configMu.Lock()
 	revision := c.cfg.Client.Revision
 	mappings := append([]config.Mapping(nil), c.cfg.Mappings...)
 	c.configMu.Unlock()
 
-	conn := c.controlStream()
-	if conn == nil {
+	c.mu.Lock()
+	conn := c.controlConn
+	connected := c.connected
+	c.mu.Unlock()
+	if !connected || conn == nil {
 		return
 	}
 	if err := c.writeControl(conn, &control.Update{
@@ -279,6 +285,99 @@ func retainTokensForPush(old, next []config.Mapping, tokens map[string]string, o
 		}
 	}
 	return out
+}
+
+// mergeHelloTokens keeps the UDP tokens from a HelloAck only for mappings that
+// still match the snapshot sent in Hello. A mapping added or retargeted by a
+// concurrent local edit waits for the update ack instead.
+func mergeHelloTokens(snapshot, current []config.Mapping, results []control.Result) map[string]string {
+	byID := resultMap(results)
+	snapshotByID := mappingConfigMap(snapshot)
+	tokens := make(map[string]string)
+	for _, mapping := range current {
+		if !mapping.Enabled || mapping.Type != "udp" {
+			continue
+		}
+		previous, ok := snapshotByID[mapping.ID]
+		if !ok || previous.Type != mapping.Type || previous.Enabled != mapping.Enabled {
+			continue
+		}
+		result, ok := byID[mapping.ID]
+		if !ok || !result.OK || result.UDPToken == "" {
+			continue
+		}
+		oldPort := previous.RemotePort
+		if oldPort == 0 {
+			oldPort = result.AssignedPort
+		}
+		if oldPort != 0 && mapping.RemotePort != 0 && oldPort != mapping.RemotePort {
+			continue
+		}
+		tokens[mapping.ID] = result.UDPToken
+	}
+	return tokens
+}
+
+// helloViews builds read models for the current config using the HelloAck
+// results for mappings that still match the hello snapshot. Concurrent local
+// edits stay pending instead of being overwritten or marked failed.
+func helloViews(snapshot, current []config.Mapping, results []control.Result) []view.MappingView {
+	byID := resultMap(results)
+	snapshotByID := mappingConfigMap(snapshot)
+	views := make([]view.MappingView, 0, len(current))
+	for _, mapping := range current {
+		mappingView := view.MappingView{Mapping: mapping, Status: "pending"}
+		switch {
+		case !mapping.Enabled:
+			mappingView.Status = "disabled"
+		default:
+			previous, ok := snapshotByID[mapping.ID]
+			if !ok || previous.Type != mapping.Type || previous.Enabled != mapping.Enabled {
+				break
+			}
+			result, ok := byID[mapping.ID]
+			if !ok {
+				break
+			}
+			oldPort := previous.RemotePort
+			if oldPort == 0 {
+				oldPort = result.AssignedPort
+			}
+			if oldPort != 0 && mapping.RemotePort != 0 && oldPort != mapping.RemotePort {
+				break
+			}
+			if result.OK {
+				mappingView.Status = "running"
+				mappingView.AssignedPort = result.AssignedPort
+			} else {
+				mappingView.Status = "failed"
+				mappingView.Error = result.Error
+			}
+		}
+		views = append(views, mappingView)
+	}
+	return views
+}
+
+// applyPushTokens overlays the server's per-mapping push results on the
+// retained token map. A result with no token removes any stale token for that
+// mapping, for example after a protocol or port change.
+func applyPushTokens(tokens map[string]string, mappings []config.Mapping, results []control.Result) {
+	if len(results) == 0 {
+		return
+	}
+	byID := resultMap(results)
+	for _, mapping := range mappings {
+		result, ok := byID[mapping.ID]
+		if !ok {
+			continue
+		}
+		if result.OK && result.UDPToken != "" && mapping.Enabled && mapping.Type == "udp" {
+			tokens[mapping.ID] = result.UDPToken
+			continue
+		}
+		delete(tokens, mapping.ID)
+	}
 }
 
 // pushViews builds the read models for a pushed mapping list. A UDP mapping

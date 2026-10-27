@@ -100,6 +100,13 @@ func TestServerPushAppliesAndPersists(t *testing.T) {
 	require.Equal(t, before.Mappings[0].AssignedPort, views[0].Mappings[0].AssignedPort)
 	require.Equal(t, "running", views[0].Mappings[1].Status)
 	require.Equal(t, saved.Mappings[1].RemotePort, views[0].Mappings[1].AssignedPort)
+
+	// The push results carry the pre-bound UDP token, so the client can start
+	// the reverse UDP session immediately instead of waiting for a reconnect.
+	clientViews := pair.Client.Mappings()
+	require.Len(t, clientViews, 2)
+	require.Equal(t, "running", clientViews[1].Status)
+	require.Equal(t, saved.Mappings[1].RemotePort, clientViews[1].AssignedPort)
 }
 
 func TestPushRejectsStaleBaseRevision(t *testing.T) {
@@ -319,7 +326,7 @@ func TestPushLocalAddrChangeKeepsListenerAndClosesActive(t *testing.T) {
 	require.Equal(t, "127.0.0.1:9999", after.mapping.LocalAddr)
 }
 
-func TestUpdateAcceptsResyncRevisionAfterPushConflict(t *testing.T) {
+func TestPushRetryAfterConflictDefersToQueuedUpdate(t *testing.T) {
 	pair := startTestPair(t, []config.Mapping{
 		{ID: "m1", Type: "tcp", RemotePort: 0, LocalAddr: "127.0.0.1:9001", Enabled: true},
 	})
@@ -329,24 +336,46 @@ func TestUpdateAcceptsResyncRevisionAfterPushConflict(t *testing.T) {
 	sess := testSession(t, pair.Server, clientID)
 	before := snapshotTestRuntime(t, pair.Server, clientID, "m1")
 
-	// Simulate a push conflict ack that reported the client's newer revision
-	// while the client's update is still queued.
+	// Simulate a conflict ack that reported the client's newer revision while
+	// the local edit's update is still queued.
 	pair.Server.mappings.adoptClientRevision(sess, base+1)
 	require.Equal(t, base+1, testSessionRevision(t, pair.Server, clientID))
+	require.Equal(t, base, testSessionAppliedRevision(t, pair.Server, clientID))
 
-	next := []config.Mapping{
+	pushed := []config.Mapping{before.mapping}
+	pushed[0].Note = "pushed"
+	_, err := pair.Server.PushMappings(clientID, base+1, pushed)
+	require.ErrorIs(t, err, control.ErrConflict)
+
+	// The rejected retry must not touch the client's local edit.
+	saved, err := config.LoadClient(pair.ClientConfigPath)
+	require.NoError(t, err)
+	require.Len(t, saved.Mappings, 1)
+	require.NotEqual(t, "pushed", saved.Mappings[0].Note)
+
+	// The queued local edit is greater than appliedRevision, so it applies and
+	// brings both revisions back in sync.
+	local := []config.Mapping{
 		before.mapping,
 		{ID: "m2", Type: "tcp", RemotePort: 0, LocalAddr: "127.0.0.1:9002", Enabled: true},
 	}
-	results, accepted := pair.Server.mappings.update(sess, base+1, next)
+	results, accepted := pair.Server.mappings.update(sess, base+1, local)
 	require.True(t, accepted)
 	require.True(t, findResult(t, results, "m2").OK)
 	require.Equal(t, base+1, testSessionRevision(t, pair.Server, clientID))
+	require.Equal(t, base+1, testSessionAppliedRevision(t, pair.Server, clientID))
 
-	// The resync allowance is one-shot: the same revision is stale again.
-	results, accepted = pair.Server.mappings.update(sess, base+1, next)
+	// A non-increasing revision is stale again; there is no resync exception.
+	results, accepted = pair.Server.mappings.update(sess, base+1, local)
 	require.False(t, accepted)
 	require.Equal(t, "stale_revision", results[0].Error)
+}
+
+func TestPushAckCorrelation(t *testing.T) {
+	require.True(t, pushAckMatches(&control.PushAck{OK: true, Revision: 5}, 5))
+	require.False(t, pushAckMatches(&control.PushAck{OK: true, Revision: 4}, 5))
+	require.True(t, pushAckMatches(&control.PushAck{OK: false, Error: "conflict", Revision: 4}, 5))
+	require.False(t, pushAckMatches(nil, 5))
 }
 
 func TestClientDeleteMappingClosesActiveConnection(t *testing.T) {

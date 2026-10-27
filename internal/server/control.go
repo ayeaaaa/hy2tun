@@ -72,13 +72,14 @@ func (h *controlHandler) Serve(conn net.Conn) {
 	_ = conn.SetReadDeadline(time.Time{})
 
 	sess := &clientSession{
-		id:       hello.ClientID,
-		name:     hello.Name,
-		version:  hello.Version,
-		revision: hello.Revision,
-		conn:     conn,
-		ready:    make(chan struct{}),
-		done:     make(chan struct{}),
+		id:              hello.ClientID,
+		name:            hello.Name,
+		version:         hello.Version,
+		revision:        hello.Revision,
+		appliedRevision: hello.Revision,
+		conn:            conn,
+		ready:           make(chan struct{}),
+		done:            make(chan struct{}),
 	}
 	results := h.server.mappings.register(sess, hello.Mappings)
 

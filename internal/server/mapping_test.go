@@ -64,6 +64,16 @@ func testSessionRevision(t *testing.T, srv *Server, clientID string) int64 {
 	return sess.revision
 }
 
+func testSessionAppliedRevision(t *testing.T, srv *Server, clientID string) int64 {
+	t.Helper()
+
+	srv.mappings.mu.Lock()
+	defer srv.mappings.mu.Unlock()
+	sess := srv.mappings.sessions[clientID]
+	require.NotNil(t, sess)
+	return sess.appliedRevision
+}
+
 func testSessionOrder(t *testing.T, srv *Server, clientID string) []string {
 	t.Helper()
 

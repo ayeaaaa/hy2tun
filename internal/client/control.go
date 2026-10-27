@@ -252,10 +252,13 @@ func (c *Client) handshake(conn net.Conn) error {
 		return fmt.Errorf("control handshake rejected: %s", ack.Error)
 	}
 
-	if err := c.applyHelloAck(conn, cfg, ack); err != nil {
+	// Mark the handshake complete before applying the ack. Local edits that
+	// arrive after this point may send updates, while applyHelloAck still
+	// serializes the write-back under configMu.
+	c.markConnected()
+	if err := c.applyHelloAck(cfg, ack); err != nil {
 		return err
 	}
-	c.markConnected()
 	c.log.Info("control handshake complete",
 		"client", cfg.Client.ID,
 		"server_version", ack.ServerVersion,
@@ -264,40 +267,48 @@ func (c *Client) handshake(conn net.Conn) error {
 }
 
 // applyHelloAck records server-assigned ports. The first assignment bumps the
-// revision and is announced immediately with an update, so the server's
-// last-known revision matches the file that was just written.
-func (c *Client) applyHelloAck(conn net.Conn, cfg *config.ClientConfig, ack *control.HelloAck) error {
-	next := cloneClientConfig(cfg)
-	mappings, changed := applyAssignedPorts(cfg.Mappings, ack.Results)
-	if changed {
+// revision and is announced immediately with an update. The write-back is done
+// under configMu and only when the snapshot revision is still current, so a
+// concurrent local edit can never be overwritten by the stale hello snapshot.
+func (c *Client) applyHelloAck(snapshot *config.ClientConfig, ack *control.HelloAck) error {
+	c.configMu.Lock()
+	current := c.cfg
+	revisionChanged := current.Client.Revision != snapshot.Client.Revision
+	next := cloneClientConfig(current)
+	wrote := false
+
+	// Only write the hello snapshot's assigned ports when no local edit
+	// advanced the revision. If it did, the current config wins; the update
+	// sent below lets the server return the assigned ports in update_ack, and
+	// handleUpdateAck persists them without another bump.
+	if !revisionChanged {
+		mappings, portsChanged := applyAssignedPorts(next.Mappings, ack.Results)
 		next.Mappings = mappings
-		next.Client.Revision = cfg.Client.Revision + 1
-		if err := next.Validate(); err != nil {
-			c.log.Warn("write server-assigned ports", "error", err)
-			changed = false
-		} else if err := writeConfigAtomic(c.configPath, next); err != nil {
-			c.log.Warn("write server-assigned ports", "error", err)
-			changed = false
+		if portsChanged {
+			next.Client.Revision = current.Client.Revision + 1
+			if err := next.Validate(); err != nil {
+				c.log.Warn("write server-assigned ports", "error", err)
+				next = cloneClientConfig(current)
+			} else if err := writeConfigAtomic(c.configPath, next); err != nil {
+				c.log.Warn("write server-assigned ports", "error", err)
+				next = cloneClientConfig(current)
+			} else {
+				wrote = true
+			}
 		}
 	}
 
-	if !changed {
-		c.setMappingResults(cfg.Mappings, ack.Results)
-		return nil
-	}
-
-	tokens := tokensFromResults(ack.Results)
-	views := mappingViews(next.Mappings, resultMap(ack.Results))
-	c.configMu.Lock()
+	tokens := mergeHelloTokens(snapshot.Mappings, next.Mappings, ack.Results)
+	views := helloViews(snapshot.Mappings, next.Mappings, ack.Results)
 	c.storeConfigLocked(next, tokens, views)
 	c.configMu.Unlock()
 
-	if err := c.writeControl(conn, &control.Update{
-		Type:     control.TypeUpdate,
-		Revision: next.Client.Revision,
-		Mappings: next.Mappings,
-	}); err != nil {
-		return fmt.Errorf("send assigned-port update: %w", err)
+	// If the hello write-back changed the file, or a local edit happened while
+	// hello was in flight, announce the current config. A local edit that
+	// arrives after this point sends its own update because the handshake is
+	// already marked connected.
+	if wrote || revisionChanged {
+		c.sendUpdate()
 	}
 	return nil
 }
@@ -398,6 +409,7 @@ func (c *Client) handlePush(conn net.Conn, msg *control.Push) {
 	}
 
 	tokens := retainTokensForPush(c.cfg.Mappings, next.Mappings, c.udpTokenSnapshot(), c.mappingSnapshot())
+	applyPushTokens(tokens, next.Mappings, msg.Results)
 	views := pushViews(next.Mappings, tokens)
 	c.storeConfigLocked(next, tokens, views)
 	c.configMu.Unlock()
