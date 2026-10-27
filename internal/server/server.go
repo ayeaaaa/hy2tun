@@ -35,6 +35,7 @@ type Server struct {
 	store    *state.Store
 	mappings *mappingManager
 	control  *controlHandler
+	data     *dataStreams
 
 	startedAt time.Time
 	started   atomic.Bool
@@ -79,6 +80,7 @@ func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 		packetConn: packetConn,
 		listenAddr: packetConn.LocalAddr(),
 		startedAt:  time.Now(),
+		data:       newDataStreams(),
 	}
 
 	policy, err := ports.NewPolicy(cfg.Ports.Allow, cfg.Ports.Deny, cfg.Ports.AutoRange)
@@ -90,7 +92,8 @@ func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 		_ = packetConn.Close()
 		return nil, err
 	}
-	s.mappings = newMappingManager(policy, s.store, log, cfg.ListenHost, s.reservedPorts())
+	s.mappings = newMappingManager(policy, s.store, log, cfg.ListenHost, s.reservedPorts(), s.data)
+	s.mappings.serveTCP = s.serveTCP
 	s.control = newControlHandler(s, log)
 
 	conn := packetConn
@@ -135,6 +138,7 @@ func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 		return nil, fmt.Errorf("create HY2 server: %w", err)
 	}
 	s.hyServer = hyServer
+	go s.data.janitor()
 
 	log.Debug("HY2 server initialized", "listen", s.listenAddr.String())
 	return s, nil
@@ -207,6 +211,9 @@ func (s *Server) Close() error {
 		}
 		if s.mappings != nil {
 			s.mappings.closeAll()
+		}
+		if s.data != nil {
+			s.data.closeAll()
 		}
 		if s.store != nil {
 			if err := s.store.Close(); err != nil {

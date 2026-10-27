@@ -60,17 +60,25 @@ func isVirtualHost(addr string) bool {
 }
 
 // virtualTCP handles a reserved virtual address. The control plane is served
-// over an in-memory pipe; reverse data routing is added by later tasks.
+// over an in-memory pipe; data streams claim the public connection registered
+// under their one-time token.
 func (o *outbound) virtualTCP(kind, token string) (net.Conn, error) {
-	if kind == virtualKindControl {
+	switch kind {
+	case virtualKindControl:
 		if o.server == nil || o.server.control == nil {
 			return nil, fmt.Errorf("hy2tun control plane is not available")
 		}
 		clientEnd, serverEnd := net.Pipe()
 		go o.server.control.Serve(serverEnd)
 		return clientEnd, nil
+	case virtualKindData:
+		if o.server == nil || o.server.data == nil {
+			return nil, fmt.Errorf("hy2tun data plane is not available")
+		}
+		return o.server.data.take(token)
+	default:
+		return nil, fmt.Errorf("hy2tun virtual %q address is not supported", kind)
 	}
-	return nil, fmt.Errorf("hy2tun virtual %q address is not supported", kind)
 }
 
 // virtualUDP handles a reserved virtual address on the UDP path. Reverse UDP

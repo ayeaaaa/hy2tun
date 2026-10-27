@@ -41,6 +41,8 @@ type mappingRuntime struct {
 
 	tcpListener net.Listener
 	udpConn     *net.UDPConn
+	data        *dataStreams
+	closed      atomic.Bool
 
 	activeMu sync.Mutex
 	active   map[net.Conn]struct{}
@@ -85,9 +87,10 @@ func (m *mappingRuntime) closeActive() {
 	}
 }
 
-// close releases the listener, UDP socket, and active connections owned by the
-// runtime.
+// close releases the listener, UDP socket, pending data streams, and active
+// connections owned by the runtime.
 func (m *mappingRuntime) close() {
+	m.closed.Store(true)
 	if m.tcpListener != nil {
 		_ = m.tcpListener.Close()
 	}
@@ -95,6 +98,9 @@ func (m *mappingRuntime) close() {
 		_ = m.udpConn.Close()
 	}
 	m.closeActive()
+	if m.data != nil {
+		m.data.dropMapping(m)
+	}
 }
 
 // clientSession is one live control stream and its registered mappings.
@@ -115,6 +121,48 @@ type clientSession struct {
 	controlMu sync.Mutex
 	// writeMu serializes frames written to the control stream.
 	writeMu sync.Mutex
+
+	// ready is closed once the HelloAck has been written, so data-plane opens
+	// cannot overtake the handshake. done is closed when the session is
+	// detached.
+	ready     chan struct{}
+	done      chan struct{}
+	readyOnce sync.Once
+	doneOnce  sync.Once
+}
+
+// markReady allows data-plane opens to be sent on this session.
+func (s *clientSession) markReady() {
+	if s.ready == nil {
+		return
+	}
+	s.readyOnce.Do(func() { close(s.ready) })
+}
+
+// markDone reports that the session is no longer usable.
+func (s *clientSession) markDone() {
+	if s.done == nil {
+		return
+	}
+	s.doneOnce.Do(func() { close(s.done) })
+}
+
+// waitReady blocks until the handshake response has been written, the session
+// ends, or timeout elapses.
+func (s *clientSession) waitReady(timeout time.Duration) error {
+	if s.ready == nil {
+		return nil
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-s.ready:
+		return nil
+	case <-s.done:
+		return fmt.Errorf("control session is closed")
+	case <-timer.C:
+		return fmt.Errorf("control session is not ready")
+	}
 }
 
 // write sends one control frame with a bounded write deadline.
@@ -139,11 +187,16 @@ type mappingManager struct {
 	log      *slog.Logger
 	bindHost string
 	reserved map[int]struct{}
+	data     *dataStreams
 
 	sessions map[string]*clientSession
+
+	// serveTCP handles public connections for a newly bound TCP mapping. It is
+	// installed by Server.New before any mapping can be registered.
+	serveTCP func(*clientSession, *mappingRuntime, net.Listener)
 }
 
-func newMappingManager(policy *ports.Policy, store *state.Store, log *slog.Logger, bindHost string, reserved map[int]struct{}) *mappingManager {
+func newMappingManager(policy *ports.Policy, store *state.Store, log *slog.Logger, bindHost string, reserved map[int]struct{}, data *dataStreams) *mappingManager {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -156,7 +209,18 @@ func newMappingManager(policy *ports.Policy, store *state.Store, log *slog.Logge
 		log:      log,
 		bindHost: bindHost,
 		reserved: reserved,
+		data:     data,
 		sessions: make(map[string]*clientSession),
+	}
+}
+
+// newRuntime creates a mapping runtime attached to this manager's data-plane
+// token registry.
+func (m *mappingManager) newRuntime(mapping config.Mapping, status string) *mappingRuntime {
+	return &mappingRuntime{
+		mapping: mapping,
+		status:  status,
+		data:    m.data,
 	}
 }
 
@@ -286,15 +350,12 @@ func (m *mappingManager) updateLocked(sess *clientSession, revision int64, mappi
 			continue
 		}
 		if !plan.mapping.Enabled {
-			plan.fresh = &mappingRuntime{
-				mapping: plan.mapping,
-				status:  mappingStatusDisabled,
-			}
+			plan.fresh = m.newRuntime(plan.mapping, mappingStatusDisabled)
 			results[i] = control.Result{ID: plan.mapping.ID, OK: true}
 			continue
 		}
 
-		rt := &mappingRuntime{mapping: plan.mapping, status: mappingStatusPending}
+		rt := m.newRuntime(plan.mapping, mappingStatusPending)
 		result := m.bindLocked(sess, rt, ignored, prebound)
 		results[i] = result
 		if !result.OK {
@@ -399,6 +460,39 @@ func (m *mappingManager) detach(sess *clientSession) {
 	m.saveState()
 }
 
+// removeMapping removes one mapping from a live session, closing its listener
+// and any traffic it is carrying. The change is persisted for offline
+// reservations.
+func (m *mappingManager) removeMapping(clientID, mappingID string) error {
+	now := time.Now()
+
+	m.mu.Lock()
+	sess := m.sessions[clientID]
+	if sess == nil {
+		m.mu.Unlock()
+		return control.ErrClientOffline
+	}
+	rt := sess.mappings[mappingID]
+	if rt == nil {
+		m.mu.Unlock()
+		return fmt.Errorf("mapping %q not found", mappingID)
+	}
+
+	delete(sess.mappings, mappingID)
+	for i, id := range sess.order {
+		if id == mappingID {
+			sess.order = append(sess.order[:i], sess.order[i+1:]...)
+			break
+		}
+	}
+	rt.close()
+	m.persistLocked(sess, now)
+	m.mu.Unlock()
+
+	m.saveState()
+	return nil
+}
+
 // closeAll closes every live session and marks it offline. It is used during
 // server shutdown.
 func (m *mappingManager) closeAll() {
@@ -423,6 +517,7 @@ func (m *mappingManager) closeAll() {
 }
 
 func (m *mappingManager) closeSessionLocked(sess *clientSession) {
+	sess.markDone()
 	m.closeMappingsLocked(sess)
 }
 
@@ -451,10 +546,7 @@ func (m *mappingManager) applyLocked(sess *clientSession, mappings []config.Mapp
 		}
 		seen[mapping.ID] = struct{}{}
 
-		rt := &mappingRuntime{
-			mapping: mapping,
-			status:  mappingStatusPending,
-		}
+		rt := m.newRuntime(mapping, mappingStatusPending)
 		sess.mappings[mapping.ID] = rt
 		sess.order = append(sess.order, mapping.ID)
 
@@ -526,7 +618,11 @@ func (m *mappingManager) bindLocked(sess *clientSession, rt *mappingRuntime, ign
 			rt.tcpListener = listener
 			rt.assignedPort = addrPort(listener.Addr())
 			rt.status = mappingStatusRunning
-			go m.acceptTCP(listener)
+			if m.serveTCP != nil {
+				go m.serveTCP(sess, rt, listener)
+			} else {
+				go acceptAndCloseTCP(listener)
+			}
 			return control.Result{ID: mapping.ID, OK: true, AssignedPort: rt.assignedPort}
 		}
 
@@ -566,9 +662,9 @@ func (m *mappingManager) fail(rt *mappingRuntime, code control.ErrorCode) contro
 	return control.Result{ID: rt.mapping.ID, Error: string(code)}
 }
 
-// acceptTCP accepts public TCP connections. Task 6 only proves the listener is
-// live; the reverse data plane attaches in a later task.
-func (m *mappingManager) acceptTCP(listener net.Listener) {
+// acceptAndCloseTCP keeps a listener live but refuses traffic. It is only used
+// when no data-plane handler has been installed.
+func acceptAndCloseTCP(listener net.Listener) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {

@@ -73,6 +73,8 @@ func (h *controlHandler) Serve(conn net.Conn) {
 		version:  hello.Version,
 		revision: hello.Revision,
 		conn:     conn,
+		ready:    make(chan struct{}),
+		done:     make(chan struct{}),
 	}
 	results := h.server.mappings.register(sess, hello.Mappings)
 
@@ -86,6 +88,7 @@ func (h *controlHandler) Serve(conn net.Conn) {
 		h.server.mappings.detach(sess)
 		return
 	}
+	sess.markReady()
 
 	h.log.Info("hy2tun client registered",
 		"client", hello.ClientID,
@@ -145,6 +148,9 @@ func (h *controlHandler) loop(sess *clientSession) {
 				return
 			}
 		case *control.OpenResult:
+			if !message.OK && h.server.data != nil {
+				h.server.data.fail(message.Token)
+			}
 			h.log.Debug("received control open result",
 				"client", sess.id,
 				"ok", message.OK,

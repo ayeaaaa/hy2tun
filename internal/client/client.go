@@ -45,13 +45,17 @@ type Client struct {
 	newHY2      func(*hyclient.Config) (hyclient.Client, *hyclient.HandshakeInfo, error)
 	startedAt   time.Time
 
-	mu          sync.Mutex
-	hy          hyclient.Client
-	controlConn net.Conn
-	connected   bool
-	mappings    []view.MappingView
-	udpTokens   map[string]string
-	writeMu     sync.Mutex
+	mu             sync.Mutex
+	hy             hyclient.Client
+	controlConn    net.Conn
+	connected      bool
+	mappings       []view.MappingView
+	mappingConfigs map[string]config.Mapping
+	udpTokens      map[string]string
+	// dataConns maps a live data-plane connection to the control stream that
+	// owns it, so a dropped stream cannot leak local dials.
+	dataConns map[net.Conn]net.Conn
+	writeMu   sync.Mutex
 
 	ready     chan struct{}
 	readyOnce sync.Once
@@ -94,17 +98,19 @@ func New(cfg *config.ClientConfig, log *slog.Logger) (*Client, error) {
 	}
 
 	return &Client{
-		cfg:         cfg,
-		log:         log,
-		serverAddr:  serverAddr,
-		tlsConfig:   tlsConfig,
-		connFactory: connFactory,
-		newHY2:      hyclient.NewClient,
-		startedAt:   time.Now(),
-		mappings:    mappingViews(cfg.Mappings, nil),
-		udpTokens:   make(map[string]string),
-		ready:       make(chan struct{}),
-		closed:      make(chan struct{}),
+		cfg:            cfg,
+		log:            log,
+		serverAddr:     serverAddr,
+		tlsConfig:      tlsConfig,
+		connFactory:    connFactory,
+		newHY2:         hyclient.NewClient,
+		startedAt:      time.Now(),
+		mappings:       mappingViews(cfg.Mappings, nil),
+		mappingConfigs: mappingConfigMap(cfg.Mappings),
+		udpTokens:      make(map[string]string),
+		dataConns:      make(map[net.Conn]net.Conn),
+		ready:          make(chan struct{}),
+		closed:         make(chan struct{}),
 	}, nil
 }
 
@@ -166,8 +172,16 @@ func (c *Client) Close() error {
 		c.controlConn = nil
 		c.hy = nil
 		c.connected = false
+		dataConns := make([]net.Conn, 0, len(c.dataConns))
+		for dataConn := range c.dataConns {
+			dataConns = append(dataConns, dataConn)
+		}
+		c.dataConns = make(map[net.Conn]net.Conn)
 		c.mu.Unlock()
 
+		for _, dataConn := range dataConns {
+			_ = dataConn.Close()
+		}
 		if conn != nil {
 			_ = conn.Close()
 		}
@@ -268,11 +282,22 @@ func (c *Client) setMappingResults(mappings []config.Mapping, results []control.
 			tokens[result.ID] = result.UDPToken
 		}
 	}
+	configs := mappingConfigMap(mappings)
 
 	c.mu.Lock()
 	c.mappings = views
+	c.mappingConfigs = configs
 	c.udpTokens = tokens
 	c.mu.Unlock()
+}
+
+// mappingConfigMap indexes mapping definitions by ID for data-plane lookups.
+func mappingConfigMap(mappings []config.Mapping) map[string]config.Mapping {
+	out := make(map[string]config.Mapping, len(mappings))
+	for _, mapping := range mappings {
+		out[mapping.ID] = mapping
+	}
+	return out
 }
 
 // mappingViews merges mapping definitions with server results. A nil results

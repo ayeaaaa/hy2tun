@@ -87,6 +87,7 @@ func (c *Client) runOnce(ctx context.Context) (bool, error) {
 	}
 	defer func() {
 		c.clearCurrent(hy, conn)
+		c.closeDataFor(conn)
 		closeBoth()
 	}()
 
@@ -261,6 +262,7 @@ func (c *Client) serveControl(conn net.Conn) error {
 		switch message := msg.(type) {
 		case *control.Open:
 			c.log.Debug("received control open", "mapping", message.MappingID)
+			go c.handleOpen(message)
 		case *control.Push:
 			c.log.Warn("ignoring server mapping push",
 				"base_revision", message.BaseRevision,
