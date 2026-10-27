@@ -231,7 +231,7 @@ func (s *Server) openPublicConn(sess *clientSession, m *mappingRuntime, conn net
 
 	if err := s.openDataStream(sess, m, public); err != nil {
 		s.log.Debug("reverse TCP open failed",
-			"mapping", m.mapping.ID,
+			"mapping", m.id,
 			"error", err,
 		)
 		_ = public.Close()
@@ -265,7 +265,7 @@ func (s *Server) openDataStream(sess *clientSession, m *mappingRuntime, public n
 	if err := sess.write(&control.Open{
 		Type:      control.TypeOpen,
 		Token:     token,
-		MappingID: m.mapping.ID,
+		MappingID: m.id,
 	}); err != nil {
 		s.data.remove(token)
 		return fmt.Errorf("send control open: %w", err)

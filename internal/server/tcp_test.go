@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -107,6 +108,72 @@ func TestReverseTCPDialFailureClosesPublicConnection(t *testing.T) {
 func isTimeout(err error) bool {
 	var netErr net.Error
 	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// TestMappingUpdateDuringPublicAccept exercises the data path while the manager
+// rewrites the mutable mapping definition of a kept runtime. The accept and
+// open goroutines must only read immutable fields; otherwise the struct
+// assignment races with them.
+func TestMappingUpdateDuringPublicAccept(t *testing.T) {
+	echoAddr, stopEcho := testutil.StartTCPEcho(t)
+	defer stopEcho()
+
+	pair := startTestPair(t, []config.Mapping{
+		{ID: "tcp1", Type: "tcp", RemotePort: 0, LocalAddr: echoAddr, Enabled: true},
+	})
+	defer pair.Stop()
+
+	require.NoError(t, waitFor(t, 5*time.Second, func() bool {
+		v := pair.Server.Clients()
+		return len(v) == 1 && len(v[0].Mappings) == 1 && v[0].Mappings[0].Status == "running"
+	}))
+	views := pair.Server.Clients()
+	clientID := views[0].ID
+	port := views[0].Mappings[0].AssignedPort
+	sess := testSession(t, pair.Server, clientID)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			addr := fmt.Sprintf("127.0.0.1:%d", port)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				conn, err := net.DialTimeout("tcp", addr, time.Second)
+				if err != nil {
+					continue
+				}
+				_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+				_, _ = conn.Write([]byte("x"))
+				_, _ = conn.Read(make([]byte, 1))
+				_ = conn.Close()
+			}
+		}()
+	}
+
+	for i := 0; i < 50; i++ {
+		revision := testSessionRevision(t, pair.Server, clientID)
+		next := []config.Mapping{{
+			ID:         "tcp1",
+			Type:       "tcp",
+			RemotePort: 0,
+			LocalAddr:  echoAddr,
+			Note:       fmt.Sprintf("update-%d", i),
+			Enabled:    true,
+		}}
+		results, accepted := pair.Server.mappings.update(sess, revision+1, next)
+		require.True(t, accepted)
+		require.True(t, findResult(t, results, "tcp1").OK)
+	}
+
+	close(stop)
+	wg.Wait()
 }
 
 func TestDataStreamTokenSingleUseAndExpiry(t *testing.T) {

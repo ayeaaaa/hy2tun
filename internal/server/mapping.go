@@ -33,6 +33,11 @@ const (
 // counters are atomic because the data-plane goroutines added by later tasks
 // update them concurrently with read models.
 type mappingRuntime struct {
+	// id is the immutable mapping identifier. Data-plane goroutines may read it
+	// without the manager lock; mapping itself is mutable and must stay under
+	// that lock.
+	id string
+
 	mapping      config.Mapping
 	status       string
 	errCode      string
@@ -218,6 +223,7 @@ func newMappingManager(policy *ports.Policy, store *state.Store, log *slog.Logge
 // token registry.
 func (m *mappingManager) newRuntime(mapping config.Mapping, status string) *mappingRuntime {
 	return &mappingRuntime{
+		id:      mapping.ID,
 		mapping: mapping,
 		status:  status,
 		data:    m.data,
