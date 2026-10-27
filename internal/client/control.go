@@ -107,7 +107,15 @@ func (c *Client) runOnce(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	c.markReady()
-	return true, c.serveControl(conn)
+	c.startUDPMappings()
+	defer c.stopUDPMappings()
+
+	serveErr := c.serveControl(conn)
+	// Close the HY2 connection before waiting for UDP goroutines: a datagram
+	// send may be blocked on a full QUIC send queue and only unblocks when the
+	// connection closes.
+	closeBoth()
+	return true, serveErr
 }
 
 // connect runs hyclient.NewClient in a goroutine so cancellation and Close can
@@ -250,8 +258,9 @@ func (c *Client) handshake(conn net.Conn) error {
 	return nil
 }
 
-// serveControl processes control messages until the stream fails. Reverse TCP
-// data streams are attached in a later task.
+// serveControl processes control messages until the stream fails. Reverse UDP
+// sessions are started separately after the handshake and closed when this
+// stream ends.
 func (c *Client) serveControl(conn net.Conn) error {
 	for {
 		msg, err := control.ReadMessage(conn)

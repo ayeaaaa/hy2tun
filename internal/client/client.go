@@ -52,6 +52,7 @@ type Client struct {
 	mappings       []view.MappingView
 	mappingConfigs map[string]config.Mapping
 	udpTokens      map[string]string
+	udpMappings    map[string]*udpMapping
 	// dataConns maps a live data-plane connection to the control stream that
 	// owns it, so a dropped stream cannot leak local dials.
 	dataConns map[net.Conn]net.Conn
@@ -108,6 +109,7 @@ func New(cfg *config.ClientConfig, log *slog.Logger) (*Client, error) {
 		mappings:       mappingViews(cfg.Mappings, nil),
 		mappingConfigs: mappingConfigMap(cfg.Mappings),
 		udpTokens:      make(map[string]string),
+		udpMappings:    make(map[string]*udpMapping),
 		dataConns:      make(map[net.Conn]net.Conn),
 		ready:          make(chan struct{}),
 		closed:         make(chan struct{}),
@@ -188,6 +190,9 @@ func (c *Client) Close() error {
 		if hy != nil {
 			_ = hy.Close()
 		}
+		// The HY2 client is closed first so any blocked UDP send is released
+		// before the mapping waits for its goroutines.
+		c.stopUDPMappings()
 	})
 	return nil
 }

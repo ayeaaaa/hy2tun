@@ -12,8 +12,8 @@ import (
 var outboundDialer = net.Dialer{Timeout: 10 * time.Second}
 
 // outbound implements hyserver.Outbound. Normal addresses are dialed directly,
-// giving standard Hysteria proxy behavior. The server field is used by later
-// tasks to route reserved hy2tun virtual addresses.
+// giving standard Hysteria proxy behavior. Reserved hy2tun virtual addresses
+// are routed to the control, data, or UDP mapping plane.
 type outbound struct {
 	server *Server
 }
@@ -31,7 +31,8 @@ func (o *outbound) TCP(reqAddr string) (net.Conn, error) {
 }
 
 // UDP opens a full-cone UDP socket. Hysteria sends all destinations of one
-// client session through it. Reserved hy2tun virtual addresses are rejected.
+// client session through it. Reserved hy2tun UDP addresses are routed to the
+// owning mapping's public socket; other virtual addresses are rejected.
 func (o *outbound) UDP(reqAddr string) (hyserver.UDPConn, error) {
 	if kind, token, ok := parseVirtualAddr(reqAddr); ok {
 		return o.virtualUDP(kind, token)
@@ -50,25 +51,4 @@ func (o *outbound) UDP(reqAddr string) (hyserver.UDPConn, error) {
 // task.
 func (o *outbound) CheckUDP(reqAddr string) error {
 	return nil
-}
-
-// udpConn adapts *net.UDPConn to hyserver.UDPConn, which uses string addresses.
-type udpConn struct {
-	*net.UDPConn
-}
-
-func (c *udpConn) ReadFrom(b []byte) (int, string, error) {
-	n, addr, err := c.UDPConn.ReadFrom(b)
-	if addr == nil {
-		return n, "", err
-	}
-	return n, addr.String(), err
-}
-
-func (c *udpConn) WriteTo(b []byte, addr string) (int, error) {
-	udpAddr, err := net.ResolveUDPAddr("udp", addr)
-	if err != nil {
-		return 0, err
-	}
-	return c.UDPConn.WriteTo(b, udpAddr)
 }

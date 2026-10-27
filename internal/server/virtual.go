@@ -81,8 +81,23 @@ func (o *outbound) virtualTCP(kind, token string) (net.Conn, error) {
 	}
 }
 
-// virtualUDP handles a reserved virtual address on the UDP path. Reverse UDP
-// routing is added by a later task.
+// virtualUDP handles a reserved virtual address on the UDP path. The UDP kind
+// maps to the public socket of the mapping identified by token. No other
+// virtual kind is accepted here.
 func (o *outbound) virtualUDP(kind, token string) (hyserver.UDPConn, error) {
-	return nil, fmt.Errorf("hy2tun virtual %q address is not supported", kind)
+	if kind != virtualKindUDP {
+		return nil, fmt.Errorf("hy2tun virtual %q address is not supported", kind)
+	}
+	if o.server == nil || o.server.mappings == nil {
+		return nil, fmt.Errorf("hy2tun UDP data plane is not available")
+	}
+	m, err := o.server.mappings.udpRuntime(token)
+	if err != nil {
+		return nil, err
+	}
+	conn := o.server.publicUDPConn(m)
+	if conn == nil {
+		return nil, fmt.Errorf("hy2tun UDP mapping has no public socket")
+	}
+	return conn, nil
 }
