@@ -35,6 +35,20 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if cfg.WebEnabled() {
+		password, generated, err := config.EnsureWebPassword(&cfg.Web)
+		if err != nil {
+			return err
+		}
+		if generated {
+			if err := config.SaveClient(*configPath, cfg); err != nil {
+				return fmt.Errorf("save generated web password: %w", err)
+			}
+			// The plaintext is shown exactly once and is never logged through
+			// the structured logger.
+			fmt.Fprintf(os.Stderr, "hy2tun: web console password for %q: %s (shown once)\n", cfg.Web.Username, password)
+		}
+	}
 	hadClientID := cfg.Client.ID != ""
 	log, closer, err := logging.New(cfg.Log.Level, cfg.Log.File)
 	if err != nil {
@@ -56,7 +70,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	log.Info("hy2tun starting", "config", *configPath, "server", cfg.Server)
+	log.Info("hy2tun starting", "config", *configPath, "server", cfg.Server, "web", cl.WebAddr())
 	if err := cl.Start(ctx); err != nil {
 		_ = cl.Close()
 		return err

@@ -23,7 +23,9 @@ import (
 
 	"hy2tun/internal/config"
 	"hy2tun/internal/control"
+	"hy2tun/internal/version"
 	"hy2tun/internal/view"
+	"hy2tun/internal/webui/clientui"
 )
 
 const (
@@ -32,6 +34,13 @@ const (
 	initialBackoff = time.Second
 	maxBackoff     = 30 * time.Second
 )
+
+// mappingTraffic holds the byte counters for one mapping. Tx is client-to-server
+// (up) and Rx is server-to-client (down).
+type mappingTraffic struct {
+	tx atomic.Uint64
+	rx atomic.Uint64
+}
 
 // Client is a hy2tun client. Start connects to the server and maintains the
 // control stream until Close or context cancellation.
@@ -53,10 +62,16 @@ type Client struct {
 	mappingConfigs map[string]config.Mapping
 	udpTokens      map[string]string
 	udpMappings    map[string]*udpMapping
+	traffic        map[string]*mappingTraffic
 	// dataConns maps a live data-plane connection to the control stream that
 	// owns it, so a dropped stream cannot leak local dials.
 	dataConns map[net.Conn]net.Conn
 	writeMu   sync.Mutex
+
+	// logs is the bounded ring that backs the client web console. web is nil
+	// when web.listen is empty.
+	logs *logBuffer
+	web  *clientui.Server
 
 	// configMu serializes local configuration edits, server pushes, and the
 	// assigned-port write-backs that follow a handshake. The client config is
@@ -74,6 +89,11 @@ type Client struct {
 	started   atomic.Bool
 }
 
+var (
+	_ clientui.API              = (*Client)(nil)
+	_ clientui.SettingsProvider = (*Client)(nil)
+)
+
 // New validates cfg and prepares the HY2 client configuration. It does not
 // connect; call Start for that.
 func New(cfg *config.ClientConfig, log *slog.Logger) (*Client, error) {
@@ -83,6 +103,11 @@ func New(cfg *config.ClientConfig, log *slog.Logger) (*Client, error) {
 	if log == nil {
 		log = slog.Default()
 	}
+	logs := newLogBuffer(logBufferSize)
+	log = slog.New(teeHandler{
+		primary:   log.Handler(),
+		secondary: slog.NewJSONHandler(logs, nil),
+	})
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
@@ -107,7 +132,7 @@ func New(cfg *config.ClientConfig, log *slog.Logger) (*Client, error) {
 		return nil, err
 	}
 
-	return &Client{
+	cl := &Client{
 		cfg:            cfg,
 		log:            log,
 		serverAddr:     serverAddr,
@@ -120,10 +145,43 @@ func New(cfg *config.ClientConfig, log *slog.Logger) (*Client, error) {
 		mappingConfigs: mappingConfigMap(cfg.Mappings),
 		udpTokens:      make(map[string]string),
 		udpMappings:    make(map[string]*udpMapping),
+		traffic:        make(map[string]*mappingTraffic),
 		dataConns:      make(map[net.Conn]net.Conn),
+		logs:           logs,
 		ready:          make(chan struct{}),
 		closed:         make(chan struct{}),
-	}, nil
+	}
+	if cfg.WebEnabled() {
+		sessionKey, err := loadClientWebSessionKey(cfg, log)
+		if err != nil {
+			return nil, err
+		}
+		web, err := clientui.New(cl, cfg.Web, sessionKey, log)
+		if err != nil {
+			return nil, fmt.Errorf("create client web console: %w", err)
+		}
+		cl.web = web
+	}
+	return cl, nil
+}
+
+// loadClientWebSessionKey loads the persisted web session signing key next to
+// the client configuration. A configuration without a path gets an ephemeral
+// key, which is safe but invalidates sessions on restart.
+func loadClientWebSessionKey(cfg *config.ClientConfig, log *slog.Logger) ([]byte, error) {
+	if cfg.ConfigPath == "" {
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			return nil, fmt.Errorf("generate web session key: %w", err)
+		}
+		log.Warn("client web session key is ephemeral because the config path is unknown")
+		return key, nil
+	}
+	key, err := config.LoadOrCreateWebSecret(config.WebSecretPath(cfg.ConfigPath))
+	if err != nil {
+		return nil, fmt.Errorf("load client web session key: %w", err)
+	}
+	return key, nil
 }
 
 // Start connects to the server, performs the control handshake, and serves the
@@ -135,6 +193,11 @@ func (c *Client) Start(ctx context.Context) error {
 	}
 	if !c.started.CompareAndSwap(false, true) {
 		return fmt.Errorf("client already started")
+	}
+	if c.web != nil {
+		if err := c.web.Start(); err != nil {
+			return fmt.Errorf("start client web console: %w", err)
+		}
 	}
 
 	backoff := initialBackoff
@@ -181,6 +244,11 @@ func (c *Client) Start(ctx context.Context) error {
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.closed)
+		if c.web != nil {
+			if err := c.web.Close(); err != nil {
+				c.log.Warn("close client web console", "error", err)
+			}
+		}
 
 		c.mu.Lock()
 		conn := c.controlConn
@@ -233,11 +301,107 @@ func (c *Client) WaitReady(ctx context.Context) error {
 	}
 }
 
-// Mappings returns a snapshot of the mapping read models.
+// Mappings returns a snapshot of the mapping read models with the latest
+// per-mapping traffic counters.
 func (c *Client) Mappings() []view.MappingView {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return append([]view.MappingView(nil), c.mappings...)
+	views := append([]view.MappingView(nil), c.mappings...)
+	for i := range views {
+		if traffic := c.traffic[views[i].ID]; traffic != nil {
+			views[i].TxBytes = traffic.tx.Load()
+			views[i].RxBytes = traffic.rx.Load()
+		}
+	}
+	return views
+}
+
+// Status returns the local connection status and aggregate traffic.
+func (c *Client) Status() view.ClientStatus {
+	c.configMu.Lock()
+	name := c.cfg.Client.Name
+	server := c.cfg.Server
+	c.configMu.Unlock()
+
+	c.mu.Lock()
+	connected := c.connected
+	c.mu.Unlock()
+
+	mappings := c.Mappings()
+	var txBytes, rxBytes uint64
+	for _, mapping := range mappings {
+		txBytes += mapping.TxBytes
+		rxBytes += mapping.RxBytes
+	}
+	return view.ClientStatus{
+		Name:      name,
+		Server:    server,
+		Version:   version.Version,
+		Connected: connected,
+		Uptime:    time.Since(c.startedAt),
+		TxBytes:   txBytes,
+		RxBytes:   rxBytes,
+	}
+}
+
+// Logs returns recent client log entries at or above level.
+func (c *Client) Logs(level string, limit int) []view.LogEntry {
+	if c.logs == nil {
+		return nil
+	}
+	return c.logs.Entries(level, limit)
+}
+
+// Settings returns the read-only client connection summary for the web console.
+// The control token is masked here; the plaintext never leaves the client.
+func (c *Client) Settings() clientui.Settings {
+	c.configMu.Lock()
+	cfg := c.cfg
+	configPath := c.configPath
+	c.configMu.Unlock()
+
+	settings := clientui.Settings{
+		Server:      cfg.Server,
+		TLS:         true,
+		TLSInsecure: cfg.TLS.Insecure,
+		TLSSNI:      cfg.TLS.SNI,
+		Obfs:        cfg.Obfs.Type,
+		ConfigPath:  configPath,
+	}
+	if cfg.Control.Token != "" {
+		settings.ControlToken = "••••••••"
+	}
+	return settings
+}
+
+// WebAddr returns the bound client web address, or the configured address when
+// the web console is disabled or has not started yet.
+func (c *Client) WebAddr() string {
+	if c.web != nil {
+		return c.web.Addr()
+	}
+	c.configMu.Lock()
+	defer c.configMu.Unlock()
+	return c.cfg.Web.Listen
+}
+
+// trafficFor returns the shared counters for a mapping, creating them on first
+// use. An empty mapping ID has no counters.
+func (c *Client) trafficFor(id string) *mappingTraffic {
+	if id == "" {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.traffic == nil {
+		c.traffic = make(map[string]*mappingTraffic)
+	}
+	traffic := c.traffic[id]
+	if traffic == nil {
+		traffic = &mappingTraffic{}
+		c.traffic[id] = traffic
+	}
+	return traffic
 }
 
 func (c *Client) markReady() {

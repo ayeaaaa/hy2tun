@@ -61,6 +61,7 @@ type udpMapping struct {
 	conn        hyclient.HyUDPConn
 	hy          hyclient.Client
 	log         *slog.Logger
+	traffic     *mappingTraffic
 
 	cancel context.CancelFunc
 
@@ -140,6 +141,7 @@ func (c *Client) startUDP(m config.Mapping, token string) (*udpMapping, error) {
 		conn:              conn,
 		hy:                hy,
 		log:               c.log,
+		traffic:           c.trafficFor(m.ID),
 		cancel:            cancel,
 		peers:             make(map[string]*udpPeer),
 		target:            target,
@@ -333,6 +335,9 @@ func (u *udpMapping) receiveLoop(ctx context.Context) {
 			u.removePeer(peer)
 			continue
 		}
+		if u.traffic != nil {
+			u.traffic.rx.Add(uint64(len(data)))
+		}
 		peer.touch()
 	}
 }
@@ -415,6 +420,9 @@ func (u *udpMapping) replyLoop(peer *udpPeer) {
 			}
 			u.removePeer(peer)
 			return
+		}
+		if u.traffic != nil {
+			u.traffic.tx.Add(uint64(n))
 		}
 	}
 }

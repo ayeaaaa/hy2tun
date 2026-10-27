@@ -91,7 +91,7 @@ func (c *Client) handleOpen(msg *control.Open) {
 		return
 	}
 	go func() {
-		c.pipe(local, remote)
+		c.pipeMapping(msg.MappingID, local, remote)
 		c.untrackData(local, remote)
 	}()
 
@@ -102,6 +102,15 @@ func (c *Client) handleOpen(msg *control.Open) {
 // connections and waits for the other copy to finish. Half-close is
 // intentionally not used: the reverse stream ends as soon as either peer does.
 func (c *Client) pipe(local, remote net.Conn) {
+	c.pipeMapping("", local, remote)
+}
+
+// pipeMapping is pipe with per-mapping traffic accounting. Bytes from the
+// server to the local target count as down (Rx); bytes from the local target
+// back to the server count as up (Tx).
+func (c *Client) pipeMapping(mappingID string, local, remote net.Conn) {
+	traffic := c.trafficFor(mappingID)
+
 	var closeOnce sync.Once
 	closeBoth := func() {
 		closeOnce.Do(func() {
@@ -113,11 +122,17 @@ func (c *Client) pipe(local, remote net.Conn) {
 	done := make(chan struct{}, 2)
 	go func() {
 		defer func() { done <- struct{}{} }()
-		_, _ = io.Copy(local, remote)
+		n, _ := io.Copy(local, remote)
+		if traffic != nil {
+			traffic.rx.Add(uint64(n))
+		}
 	}()
 	go func() {
 		defer func() { done <- struct{}{} }()
-		_, _ = io.Copy(remote, local)
+		n, _ := io.Copy(remote, local)
+		if traffic != nil {
+			traffic.tx.Add(uint64(n))
+		}
 	}()
 
 	<-done

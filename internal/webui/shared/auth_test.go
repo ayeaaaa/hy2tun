@@ -248,6 +248,41 @@ func TestRequireCSRF(t *testing.T) {
 	}
 }
 
+func TestRequireCSRFAllowMissingOrigin(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := RequireCSRFAllowMissingOrigin(next)
+
+	newRequest := func(headers map[string]string) *http.Request {
+		req := httptest.NewRequest(http.MethodPut, "http://example.com/api/mappings", nil)
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+		return req
+	}
+
+	cases := []struct {
+		name    string
+		headers map[string]string
+		want    int
+	}{
+		{"missing header", nil, http.StatusForbidden},
+		{"custom header only", map[string]string{"X-Requested-With": "hy2tun"}, http.StatusNoContent},
+		{"cross-site fetch metadata", map[string]string{"X-Requested-With": "hy2tun", "Sec-Fetch-Site": "cross-site"}, http.StatusForbidden},
+		{"evil origin", map[string]string{"X-Requested-With": "hy2tun", "Origin": "http://evil.example"}, http.StatusForbidden},
+		{"matching origin", map[string]string{"X-Requested-With": "hy2tun", "Origin": "http://example.com"}, http.StatusNoContent},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, newRequest(tc.headers))
+			require.Equal(t, tc.want, recorder.Code)
+		})
+	}
+}
+
 func TestRequireCSRFRequiresMatchingScheme(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)

@@ -1,0 +1,197 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1>{{if .Status.Name}}{{.Status.Name}}{{else}}未命名客户端{{end}}</h1>
+    <div class="status-line">
+      <span class="connection-pill {{if .Status.Connected}}is-online{{else}}is-offline{{end}}" data-connection data-connected="{{.Status.Connected}}">
+        <span class="status-dot {{if .Status.Connected}}is-online{{else}}is-offline{{end}}" aria-hidden="true"></span>
+        <span data-connection-text>{{if .Status.Connected}}已连接{{else}}未连接{{end}}</span>
+      </span>
+      <span class="muted mono">{{if .Status.Server}}{{.Status.Server}}{{else}}—{{end}}</span>
+      <span class="muted mono">v{{if .Status.Version}}{{.Status.Version}}{{else}}{{.Version}}{{end}}</span>
+    </div>
+  </div>
+  <div class="page-head-meta">
+    <span class="pill {{if .ActiveMappings}}pill-ok{{else}}pill-muted{{end}}">
+      <span class="dot {{if .ActiveMappings}}dot-ok{{end}}" aria-hidden="true"></span>
+      <span data-stat="active-pill">{{.ActiveMappings}}</span> 条映射运行中
+    </span>
+  </div>
+</div>
+
+<section class="stat-grid" aria-label="客户端统计">
+  <article class="stat-card">
+    <div class="stat-label">运行时长</div>
+    <div class="stat-value" data-stat="uptime">{{duration .Status.Uptime}}</div>
+    <div class="stat-foot">客户端进程已运行</div>
+  </article>
+  <article class="stat-card">
+    <div class="stat-label">活跃映射</div>
+    <div class="stat-value" data-stat="active">{{.ActiveMappings}}</div>
+    <div class="stat-foot">共 <span data-stat="total">{{len .Mappings}}</span> 条映射</div>
+  </article>
+  <article class="stat-card">
+    <div class="stat-label">上行</div>
+    <div class="stat-value" data-stat="tx">{{bytes .Status.TxBytes}}</div>
+    <div class="stat-foot">客户端 → 服务端</div>
+  </article>
+  <article class="stat-card">
+    <div class="stat-label">下行</div>
+    <div class="stat-value" data-stat="rx">{{bytes .Status.RxBytes}}</div>
+    <div class="stat-foot">服务端 → 客户端</div>
+  </article>
+</section>
+
+<div class="tabs" role="tablist" aria-label="客户端视图">
+  <button type="button" class="tab is-active" role="tab" id="tab-mappings" aria-selected="true" aria-controls="panel-mappings" data-tab="mappings">端口映射</button>
+  <button type="button" class="tab" role="tab" id="tab-logs" aria-selected="false" aria-controls="panel-logs" data-tab="logs">日志</button>
+  <button type="button" class="tab" role="tab" id="tab-settings" aria-selected="false" aria-controls="panel-settings" data-tab="settings">设置</button>
+</div>
+
+<section class="panel tab-panel" id="panel-mappings" role="tabpanel" aria-labelledby="tab-mappings" data-panel="mappings">
+  <div class="panel-head">
+    <div>
+      <h2>端口映射</h2>
+      <span class="muted small" data-mapping-count>{{len .Mappings}} 条映射</span>
+    </div>
+    <div class="panel-head-actions">
+      <button type="button" class="btn btn-primary btn-sm" data-action="add-mapping">新增映射</button>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table class="table mapping-table" id="mappings-table">
+      <thead>
+        <tr>
+          <th>类型</th>
+          <th>服务器:端口</th>
+          <th>内网目标</th>
+          <th>备注</th>
+          <th>状态</th>
+          <th>流量</th>
+          <th class="col-actions">操作</th>
+        </tr>
+      </thead>
+      <tbody id="mapping-rows">
+        {{range .Mappings}}
+        <tr data-mapping-row data-mapping-id="{{.ID}}" data-mapping-type="{{.Type}}" data-mapping-port="{{.RemotePort}}" data-mapping-local="{{.LocalAddr}}" data-mapping-note="{{.Note}}" data-mapping-enabled="{{.Enabled}}" data-mapping-assigned="{{.AssignedPort}}" data-mapping-status="{{.Status}}">
+          <td><span class="type-tag type-{{.Type}}">{{upper .Type}}</span></td>
+          <td class="mono">
+            <span class="server-endpoint">{{$.Status.Server}}</span><br>
+            <span class="mapping-port">:{{if .AssignedPort}}{{.AssignedPort}}{{else if .RemotePort}}{{.RemotePort}}{{else}}<span class="muted">自动</span>{{end}}</span>
+          </td>
+          <td class="mono">{{.LocalAddr}}</td>
+          <td class="note">{{if .Note}}{{.Note}}{{else}}<span class="muted">—</span>{{end}}</td>
+          <td>
+            <span class="status status-{{statusClass .Status}}"><span class="status-dot" aria-hidden="true"></span>{{statusLabel .Status}}</span>
+            {{if .Error}}<span class="error-code mono">{{.Error}}</span>{{end}}
+          </td>
+          <td class="mono nowrap">{{bytes .TxBytes}} ↑<br><span class="muted">{{bytes .RxBytes}} ↓</span></td>
+          <td class="col-actions">
+            <button type="button" class="btn btn-quiet btn-xs" data-action="edit-mapping" data-mapping-id="{{.ID}}">编辑</button>
+          </td>
+        </tr>
+        {{end}}
+        <tr data-empty-row {{if .Mappings}}hidden{{end}}>
+          <td colspan="7"><div class="empty-inline">还没有任何映射。点击“新增映射”创建第一条。</div></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel tab-panel" id="panel-logs" role="tabpanel" aria-labelledby="tab-logs" data-panel="logs" hidden>
+  <div class="panel-head">
+    <div>
+      <h2>日志</h2>
+      <span class="muted small">最近 500 条客户端日志</span>
+    </div>
+    <div class="log-tools">
+      <select class="input select" id="log-level" aria-label="日志级别">
+        <option value="">全部级别</option>
+        <option value="debug">DEBUG</option>
+        <option value="info">INFO</option>
+        <option value="warn">WARN</option>
+        <option value="error">ERROR</option>
+      </select>
+      <button type="button" class="btn btn-sm" id="log-refresh">刷新</button>
+    </div>
+  </div>
+  <div class="log-list" id="log-list">
+    {{range .Logs}}
+    <div class="log-row" data-level="{{.Level}}">
+      <span class="log-time">{{time .Time}}</span>
+      <span class="log-level">{{.Level}}</span>
+      <span class="log-msg">{{.Message}}</span>
+    </div>
+    {{end}}
+  </div>
+  <div class="empty-inline log-empty" id="log-empty" {{if .Logs}}hidden{{end}}>暂无日志。</div>
+</section>
+
+<section class="panel tab-panel" id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" data-panel="settings" hidden>
+  <div class="panel-head">
+    <h2>连接设置</h2>
+    <span class="badge badge-muted">只读</span>
+  </div>
+  <dl class="kv">
+    <div><dt>服务器地址</dt><dd class="mono">{{if .Settings.Server}}{{.Settings.Server}}{{else}}—{{end}}</dd></div>
+    <div><dt>TLS</dt><dd>{{if .Settings.TLS}}已启用{{if .Settings.TLSInsecure}}（跳过证书校验）{{end}}{{else}}未启用{{end}}{{if .Settings.TLSSNI}} · SNI <span class="mono">{{.Settings.TLSSNI}}</span>{{end}}</dd></div>
+    <div><dt>Obfs</dt><dd class="mono">{{if .Settings.Obfs}}{{.Settings.Obfs}}{{else}}未启用{{end}}</dd></div>
+    <div><dt>控制令牌</dt><dd>{{if .Settings.ControlToken}}<span class="mono">{{.Settings.ControlToken}}</span>{{else}}<span class="muted">未配置</span>{{end}}</dd></div>
+    <div><dt>配置文件</dt><dd class="mono">{{if .Settings.ConfigPath}}{{.Settings.ConfigPath}}{{else}}—{{end}}</dd></div>
+  </dl>
+  <div class="notice">客户端设置为只读。修改配置文件后重启 hy2tun 生效。</div>
+</section>
+
+<dialog class="drawer" id="mapping-drawer" aria-labelledby="drawer-title">
+  <form class="drawer-form" id="mapping-form">
+    <div class="drawer-head">
+      <div>
+        <h2 id="drawer-title">新增映射</h2>
+        <p class="muted small" id="drawer-sub">配置公网端口到本机内网目标的转发</p>
+      </div>
+      <button type="button" class="icon-btn" data-close-drawer aria-label="关闭">×</button>
+    </div>
+    <div class="drawer-body">
+      <div class="alert alert-bad" id="drawer-error" role="alert" hidden></div>
+      <input type="hidden" id="mapping-id">
+      <label class="field">
+        <span class="field-label">类型</span>
+        <select class="input select" id="mapping-type">
+          <option value="tcp">TCP</option>
+          <option value="udp">UDP</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label">服务器</span>
+        <input class="input mono" type="text" id="mapping-server" value="{{.Status.Server}}" readonly>
+        <span class="field-hint">当前连接的服务端，不可在此修改。</span>
+      </label>
+      <label class="field">
+        <span class="field-label">服务端端口</span>
+        <input class="input mono" type="number" id="mapping-port" min="0" max="65535" step="1" value="0" inputmode="numeric">
+        <span class="field-hint">0 表示由服务端自动分配。</span>
+      </label>
+      <label class="field">
+        <span class="field-label">内网目标</span>
+        <input class="input mono" type="text" id="mapping-local" placeholder="127.0.0.1:22" autocomplete="off" required>
+        <span class="field-hint">本机可访问的 host:port。</span>
+      </label>
+      <label class="field">
+        <span class="field-label">备注</span>
+        <input class="input" type="text" id="mapping-note" maxlength="128" autocomplete="off" placeholder="例如 NAS SSH">
+      </label>
+      <label class="check">
+        <input type="checkbox" id="mapping-enabled" checked>
+        启用此映射
+      </label>
+    </div>
+    <div class="drawer-foot">
+      <button type="button" class="btn btn-danger" id="mapping-delete" hidden>删除</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn" data-close-drawer>取消</button>
+      <button type="submit" class="btn btn-primary" id="mapping-save">保存</button>
+    </div>
+  </form>
+</dialog>
+{{end}}

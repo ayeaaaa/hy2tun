@@ -10,6 +10,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// DefaultClientWebListen is the conventional LAN management address for the
+// client console. An empty web.listen keeps the console disabled; deployments
+// that want LAN management should set this value explicitly.
+const DefaultClientWebListen = "0.0.0.0:7501"
+
 // ClientConfig is the hy2tun configuration.
 type ClientConfig struct {
 	Server    string          `yaml:"server" json:"server"`
@@ -27,6 +32,12 @@ type ClientConfig struct {
 	// ConfigPath is the file this configuration was loaded from or saved to.
 	// It is runtime metadata and is never serialized.
 	ConfigPath string `yaml:"-" json:"-"`
+}
+
+// WebEnabled reports whether the client web console is configured. The console
+// is optional and stays disabled when web.listen is empty.
+func (c *ClientConfig) WebEnabled() bool {
+	return c != nil && c.Web.Listen != ""
 }
 
 // LoadClient reads, parses, and validates a client config file.
