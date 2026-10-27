@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -21,6 +22,8 @@ import (
 	"hy2tun/internal/config"
 	"hy2tun/internal/ports"
 	"hy2tun/internal/state"
+	"hy2tun/internal/version"
+	"hy2tun/internal/webui/serverui"
 )
 
 // Server is a running hy2tund HY2 server.
@@ -36,6 +39,7 @@ type Server struct {
 	mappings *mappingManager
 	control  *controlHandler
 	data     *dataStreams
+	web      *serverui.Server
 
 	startedAt time.Time
 	started   atomic.Bool
@@ -138,6 +142,27 @@ func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 		return nil, fmt.Errorf("create HY2 server: %w", err)
 	}
 	s.hyServer = hyServer
+	if cfg.Web.Listen != "" {
+		sessionKey, err := loadWebSessionKey(cfg, log)
+		if err != nil {
+			_ = hyServer.Close()
+			_ = packetConn.Close()
+			if s.store != nil {
+				_ = s.store.Close()
+			}
+			return nil, err
+		}
+		web, err := serverui.New(s, cfg.Web, sessionKey, log)
+		if err != nil {
+			_ = hyServer.Close()
+			_ = packetConn.Close()
+			if s.store != nil {
+				_ = s.store.Close()
+			}
+			return nil, fmt.Errorf("create web console: %w", err)
+		}
+		s.web = web
+	}
 	go s.data.janitor()
 
 	log.Debug("HY2 server initialized", "listen", s.listenAddr.String())
@@ -173,6 +198,12 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("server is not initialized")
 	}
 
+	if s.web != nil {
+		if err := s.web.Start(); err != nil {
+			return fmt.Errorf("start web console: %w", err)
+		}
+	}
+
 	s.log.Info("HY2 server listening", "listen", s.listenAddr.String())
 
 	serveErr := make(chan error, 1)
@@ -197,6 +228,11 @@ func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
 		s.closed.Store(true)
 		var errs []error
+		if s.web != nil {
+			if err := s.web.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close web console: %w", err))
+			}
+		}
 		if s.hyServer != nil {
 			if err := s.hyServer.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("close HY2 server: %w", err))
@@ -230,8 +266,58 @@ func (s *Server) ListenAddr() net.Addr {
 	return s.listenAddr
 }
 
-// WebAddr returns the configured web listener address. The web server itself
-// is started by a later task.
+// WebAddr returns the bound web listener address, or the configured address
+// when the web console is disabled or has not started yet.
 func (s *Server) WebAddr() string {
+	if s.web != nil {
+		return s.web.Addr()
+	}
 	return s.cfg.Web.Listen
+}
+
+// ConfigSummary returns a secret-free configuration summary for the web
+// console's read-only settings page.
+func (s *Server) ConfigSummary() serverui.ConfigSummary {
+	webListen := s.cfg.Web.Listen
+	if s.web != nil {
+		webListen = s.web.Addr()
+	}
+	return serverui.ConfigSummary{
+		ConfigPath:             s.cfg.ConfigPath,
+		Listen:                 s.listenAddr.String(),
+		ListenHost:             s.cfg.ListenHost,
+		WebListen:              webListen,
+		WebUsername:            s.cfg.Web.Username,
+		WebTLS:                 s.cfg.Web.TLS.Cert != "",
+		TLS:                    s.cfg.TLS.Cert != "",
+		StateFile:              s.cfg.StateFile,
+		PortsAllow:             append([]string(nil), s.cfg.Ports.Allow...),
+		PortsDeny:              append([]string(nil), s.cfg.Ports.Deny...),
+		PortsAutoRange:         s.cfg.Ports.AutoRange,
+		OfflineReserve:         time.Duration(s.cfg.Ports.OfflineReserve),
+		OfflineReserveSeconds:  int64(time.Duration(s.cfg.Ports.OfflineReserve) / time.Second),
+		LogLevel:               s.cfg.Log.Level,
+		Version:                version.Version,
+		ControlTokenConfigured: s.cfg.Control.Token != "",
+		WebPasswordConfigured:  s.cfg.Web.PasswordHash != "",
+	}
+}
+
+// loadWebSessionKey loads the persisted web session signing key next to the
+// configuration file. Configurations created programmatically without a path
+// get an ephemeral key, which is safe but invalidates sessions on restart.
+func loadWebSessionKey(cfg *config.ServerConfig, log *slog.Logger) ([]byte, error) {
+	if cfg.ConfigPath == "" {
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			return nil, fmt.Errorf("generate web session key: %w", err)
+		}
+		log.Warn("web session key is ephemeral because the config path is unknown")
+		return key, nil
+	}
+	key, err := config.LoadOrCreateWebSecret(config.WebSecretPath(cfg.ConfigPath))
+	if err != nil {
+		return nil, fmt.Errorf("load web session key: %w", err)
+	}
+	return key, nil
 }

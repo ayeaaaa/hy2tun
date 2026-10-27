@@ -1,0 +1,43 @@
+{{define "layout"}}
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{{.Title}} · hy2tun 服务端</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="/" aria-label="hy2tun 服务端首页">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-name">hy2tun</span>
+        <span class="brand-sub">服务端</span>
+      </a>
+      <nav class="nav" aria-label="主导航">
+        <a href="/" class="{{if eq .Active "overview"}}is-active{{end}}" {{if eq .Active "overview"}}aria-current="page"{{end}}>概览</a>
+        <a href="/clients" class="{{if eq .Active "clients"}}is-active{{end}}" {{if eq .Active "clients"}}aria-current="page"{{end}}>客户端</a>
+        <a href="/mappings" class="{{if eq .Active "mappings"}}is-active{{end}}" {{if eq .Active "mappings"}}aria-current="page"{{end}}>全部映射</a>
+        <a href="/settings" class="{{if eq .Active "settings"}}is-active{{end}}" {{if eq .Active "settings"}}aria-current="page"{{end}}>设置</a>
+      </nav>
+      <div class="topbar-actions">
+        <span class="live" data-live="connecting" title="实时数据连接状态">
+          <span class="live-dot" aria-hidden="true"></span>
+          <span class="live-text">连接中</span>
+        </span>
+        <span class="user">{{.Username}}</span>
+        <button type="button" class="btn btn-quiet btn-sm" data-logout>退出</button>
+      </div>
+    </div>
+  </header>
+  <main class="page">
+    {{template "content" .}}
+  </main>
+  <div class="toast-stack" id="toast-stack" aria-live="polite" aria-atomic="true"></div>
+  <script src="/static/htmx.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
+{{end}}

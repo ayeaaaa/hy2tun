@@ -1,0 +1,38 @@
+{{define "login"}}
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>登录 · hy2tun 服务端</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="login-body">
+  <main class="login-shell">
+    <section class="login-card">
+      <div class="login-brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>hy2tun</span>
+        <span class="brand-sub">服务端</span>
+      </div>
+      <h1>登录管理控制台</h1>
+      <p class="login-intro muted">使用管理员账号访问服务端 Web 控制台。</p>
+      {{if .Error}}<div class="alert alert-bad" role="alert">{{.Error}}</div>{{end}}
+      <form class="login-form" method="post" action="/api/login" autocomplete="on">
+        <label class="field">
+          <span class="field-label">用户名</span>
+          <input class="input" type="text" name="username" value="{{.Username}}" autocomplete="username" required autofocus>
+        </label>
+        <label class="field">
+          <span class="field-label">密码</span>
+          <input class="input" type="password" name="password" autocomplete="current-password" required>
+        </label>
+        <button class="btn btn-primary btn-block" type="submit">登录</button>
+      </form>
+      <p class="login-foot muted">首次启动的管理员密码会在服务端启动时输出一次。</p>
+    </section>
+  </main>
+</body>
+</html>
+{{end}}

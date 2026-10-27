@@ -37,6 +37,9 @@ var (
 	// ErrClientOffline reports that the target client has no live control
 	// stream.
 	ErrClientOffline = errors.New("control: client offline")
+	// ErrClientNotReady reports that the client has not completed its control
+	// handshake yet. The caller may retry shortly.
+	ErrClientNotReady = errors.New("control: client not ready")
 	// ErrPushTimeout reports that the client did not acknowledge a push in
 	// time.
 	ErrPushTimeout = errors.New("control: push timed out")

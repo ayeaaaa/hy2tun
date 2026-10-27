@@ -1,0 +1,76 @@
+{{define "client-detail"}}
+<article class="client-detail" data-client-id="{{.Client.ID}}" data-revision="{{.Client.Revision}}" data-online="{{.Client.Online}}">
+  <header class="detail-head">
+    <a class="btn btn-quiet btn-sm back-btn" href="/clients" aria-label="返回客户端列表">← 返回</a>
+    <div class="detail-title">
+      <h2>{{if .Client.Name}}{{.Client.Name}}{{else}}{{.Client.ID}}{{end}}</h2>
+      <div class="detail-sub mono">{{.Client.ID}}</div>
+    </div>
+    <div class="detail-actions">
+      <span class="badge {{if .Client.Online}}badge-ok{{else}}badge-muted{{end}}">{{if .Client.Online}}在线{{else}}离线{{end}}</span>
+      {{if .Client.Online}}
+      <button type="button" class="btn btn-primary btn-sm" data-action="add-mapping" data-client-id="{{.Client.ID}}" data-revision="{{.Client.Revision}}">新增映射</button>
+      {{end}}
+      <button type="button" class="btn btn-sm" hx-get="/clients/{{.Client.ID}}/detail" hx-target="#client-detail" hx-swap="innerHTML" data-refresh-detail="{{.Client.ID}}">刷新</button>
+    </div>
+  </header>
+
+  <dl class="kv kv-inline">
+    <div><dt>版本</dt><dd class="mono">{{if .Client.Version}}{{.Client.Version}}{{else}}—{{end}}</dd></div>
+    <div><dt>配置版本</dt><dd class="mono">r{{.Client.Revision}}</dd></div>
+    <div><dt>最后在线</dt><dd>{{time .Client.LastSeen}}</dd></div>
+    <div><dt>映射</dt><dd><span data-client-stat="active">{{.ActiveCount}}</span> 运行 / {{len .Client.Mappings}} 总计</dd></div>
+  </dl>
+
+  <div class="mini-stats">
+    <div><span class="mini-stat-label">上行</span><span class="mini-stat-value" data-client-stat="tx">{{bytes .TxBytes}}</span></div>
+    <div><span class="mini-stat-label">下行</span><span class="mini-stat-value" data-client-stat="rx">{{bytes .RxBytes}}</span></div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="table mapping-table">
+      <thead>
+        <tr>
+          <th>类型</th>
+          <th>公网端口</th>
+          <th>内网目标</th>
+          <th>备注</th>
+          <th>状态</th>
+          <th>流量</th>
+          <th class="col-actions">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{if .Client.Mappings}}
+        {{range .Client.Mappings}}
+        <tr data-mapping-id="{{.ID}}" data-mapping-type="{{.Type}}" data-mapping-port="{{if .RemotePort}}{{.RemotePort}}{{else}}{{.AssignedPort}}{{end}}" data-mapping-local="{{.LocalAddr}}" data-mapping-note="{{.Note}}" data-mapping-enabled="{{.Enabled}}" data-mapping-assigned="{{.AssignedPort}}">
+          <td><span class="type-tag type-{{.Type}}">{{upper .Type}}</span></td>
+          <td class="mono">{{if .AssignedPort}}{{.AssignedPort}}{{else if .RemotePort}}{{.RemotePort}}{{else}}<span class="muted">自动</span>{{end}}</td>
+          <td class="mono">{{.LocalAddr}}</td>
+          <td class="note">{{if .Note}}{{.Note}}{{else}}<span class="muted">—</span>{{end}}</td>
+          <td>
+            <span class="status status-{{statusClass .Status}}"><span class="status-dot" aria-hidden="true"></span>{{statusLabel .Status}}</span>
+            {{if .Error}}<span class="error-code mono">{{.Error}}</span>{{end}}
+          </td>
+          <td class="mono nowrap">{{bytes .TxBytes}} ↑<br><span class="muted">{{bytes .RxBytes}} ↓</span></td>
+          <td class="col-actions">
+            {{if $.Client.Online}}
+            <button type="button" class="btn btn-quiet btn-xs" data-action="edit-mapping" data-client-id="{{$.Client.ID}}" data-mapping-id="{{.ID}}">编辑</button>
+            {{else}}
+            <span class="muted small">只读</span>
+            {{end}}
+          </td>
+        </tr>
+        {{end}}
+        {{else}}
+        <tr><td colspan="7"><div class="empty-inline">该客户端还没有映射。</div></td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+
+  {{if not .Client.Online}}
+  <div class="notice">客户端离线，配置只读。重新连接后可在线编辑。</div>
+  {{end}}
+</article>
+{{end}}

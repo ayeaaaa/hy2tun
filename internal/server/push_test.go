@@ -444,3 +444,82 @@ func TestClientLocalEditUpdatesServerAndWritesAssignedPort(t *testing.T) {
 	require.Equal(t, views[0].Mappings[1].AssignedPort, saved.Mappings[1].RemotePort)
 	require.Equal(t, "running", views[0].Mappings[1].Status)
 }
+
+// TestPushWaitsForSessionReady verifies that a web push cannot overtake the
+// hello_ack on a freshly published session. The session is visible in the
+// mapping manager before markReady closes the ready channel, so a push must
+// wait for the handshake to finish (or return a retryable conflict).
+func TestPushWaitsForSessionReady(t *testing.T) {
+	manager := newMappingManager(nil, nil, slog.Default(), "", nil, nil)
+	srv := &Server{mappings: manager, log: slog.Default()}
+
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	sess := &clientSession{
+		id:              "c1",
+		online:          true,
+		revision:        1,
+		appliedRevision: 1,
+		conn:            serverConn,
+		ready:           make(chan struct{}),
+		done:            make(chan struct{}),
+		mappings:        make(map[string]*mappingRuntime),
+	}
+	defer sess.markDone()
+	manager.sessions["c1"] = sess
+
+	pushed := make(chan *control.Push, 1)
+	go func() {
+		msg, err := control.ReadMessage(clientConn)
+		if err != nil {
+			return
+		}
+		push, ok := msg.(*control.Push)
+		if !ok {
+			return
+		}
+		pushed <- push
+		// The control read loop normally delivers the ack. This test has no
+		// loop, so hand it to the waiter directly.
+		sess.deliverPushAck(&control.PushAck{
+			Type:     control.TypePushAck,
+			OK:       true,
+			Revision: push.Revision,
+		})
+	}()
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := srv.PushMappings("c1", 1, nil)
+		result <- err
+	}()
+
+	select {
+	case push := <-pushed:
+		sess.markDone()
+		t.Fatalf("push was sent before the session was ready: %+v", push)
+	case err := <-result:
+		sess.markDone()
+		t.Fatalf("push returned before the session was ready: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	sess.markReady()
+
+	select {
+	case push := <-pushed:
+		require.Equal(t, int64(1), push.BaseRevision)
+		require.Equal(t, int64(2), push.Revision)
+	case <-time.After(2 * time.Second):
+		t.Fatal("push was not sent after the session became ready")
+	}
+
+	select {
+	case err := <-result:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("push did not complete after the session became ready")
+	}
+}

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
 
@@ -331,4 +333,91 @@ func TestSaveClientRoundTrip(t *testing.T) {
 	require.Equal(t, cfg.Client.ID, loaded.Client.ID)
 	require.Equal(t, cfg.Mappings, loaded.Mappings)
 	require.Equal(t, "info", loaded.Log.Level)
+}
+
+func TestEnsureWebPassword(t *testing.T) {
+	web := &WebConfig{}
+	pw, generated, err := EnsureWebPassword(web)
+	require.NoError(t, err)
+	require.True(t, generated)
+	require.Len(t, pw, 20)
+	require.Equal(t, "admin", web.Username)
+	require.NoError(t, bcrypt.CompareHashAndPassword([]byte(web.PasswordHash), []byte(pw)))
+}
+
+func TestEnsureWebPasswordKeepsExistingHash(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("known"), bcrypt.MinCost)
+	require.NoError(t, err)
+	web := &WebConfig{Username: "operator", PasswordHash: string(hash)}
+
+	pw, generated, err := EnsureWebPassword(web)
+	require.NoError(t, err)
+	require.False(t, generated)
+	require.Empty(t, pw)
+	require.Equal(t, string(hash), web.PasswordHash)
+	require.Equal(t, "operator", web.Username)
+}
+
+func TestEnsureWebPasswordRejectsInvalidHash(t *testing.T) {
+	web := &WebConfig{PasswordHash: "not-a-bcrypt-hash"}
+	_, _, err := EnsureWebPassword(web)
+	require.Error(t, err)
+}
+
+func TestLoadOrCreateWebSecret(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, WebSecretFileName)
+
+	first, err := LoadOrCreateWebSecret(path)
+	require.NoError(t, err)
+	require.Len(t, first, 32)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0600), info.Mode().Perm())
+
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, hex.EncodeToString(first), strings.TrimSpace(string(raw)))
+
+	second, err := LoadOrCreateWebSecret(path)
+	require.NoError(t, err)
+	require.Equal(t, first, second)
+}
+
+func TestLoadOrCreateWebSecretRejectsCorruptFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, WebSecretFileName)
+
+	require.NoError(t, os.WriteFile(path, []byte("not-hex\n"), 0600))
+	_, err := LoadOrCreateWebSecret(path)
+	require.Error(t, err)
+
+	require.NoError(t, os.WriteFile(path, []byte("abcd\n"), 0600))
+	_, err = LoadOrCreateWebSecret(path)
+	require.Error(t, err)
+}
+
+func TestServerConfigRecordsPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+listen: ":443"
+auth:
+  type: password
+  password: "pw"
+tls:
+  cert: "cert.pem"
+  key: "key.pem"
+control:
+  token: "0123456789abcdef0123456789abcdef"
+`), 0600))
+
+	cfg, err := LoadServer(path)
+	require.NoError(t, err)
+	require.Equal(t, path, cfg.ConfigPath)
+
+	other := filepath.Join(dir, "other.yaml")
+	require.NoError(t, SaveServer(other, cfg))
+	require.Equal(t, other, cfg.ConfigPath)
 }

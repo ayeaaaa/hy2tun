@@ -1,0 +1,104 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1>客户端</h1>
+    <p class="page-sub">选择客户端查看映射、端口与流量</p>
+  </div>
+  <div class="page-head-meta">
+    <span class="pill"><span class="dot dot-ok" aria-hidden="true"></span><span data-stat="online-clients">{{.OnlineCount}}</span> 在线</span>
+    <span class="pill pill-muted">共 <span data-stat="total-clients">{{len .Clients}}</span> 个</span>
+  </div>
+</div>
+
+{{if .Notice}}<div class="alert alert-warn" role="alert">{{.Notice}}</div>{{end}}
+
+<div class="master-detail{{if .Selected}} has-selection{{end}}">
+  <aside class="client-list panel" aria-label="客户端列表">
+    <div class="panel-head">
+      <h2>全部客户端</h2>
+      <span class="muted small">{{len .Clients}}</span>
+    </div>
+    {{if .Clients}}
+    <ul class="client-list-items">
+      {{range .Clients}}
+      <li>
+        <a class="client-row{{if and $.Selected (eq $.Selected.ID .ID)}} is-active{{end}}" href="/clients?id={{.ID}}" data-client-row="{{.ID}}" data-online="{{.Online}}">
+          <span class="status-dot {{if .Online}}is-online{{else}}is-offline{{end}}" aria-hidden="true"></span>
+          <span class="client-row-main">
+            <span class="client-row-name">{{if .Name}}{{.Name}}{{else}}{{.ID}}{{end}}</span>
+            <span class="client-row-sub mono">{{.ID}}</span>
+          </span>
+          <span class="client-row-meta">
+            <span class="badge {{if .Online}}badge-ok{{else}}badge-muted{{end}}">{{if .Online}}在线{{else}}离线{{end}}</span>
+            <span class="client-row-count" data-mapping-count="{{.ID}}">{{len .Mappings}} 映射</span>
+          </span>
+        </a>
+      </li>
+      {{end}}
+    </ul>
+    {{else}}
+    <div class="empty-inline">还没有客户端连接。</div>
+    {{end}}
+  </aside>
+
+  <section class="client-detail-pane" aria-live="polite">
+    {{if .Detail}}
+    <div id="client-detail">{{template "client-detail" .Detail}}</div>
+    {{else}}
+    <div class="empty-state panel">
+      <div class="empty-state-icon" aria-hidden="true">⌁</div>
+      <h2>选择一个客户端</h2>
+      <p>从左侧列表选择客户端，查看映射详情并在线编辑。</p>
+    </div>
+    {{end}}
+  </section>
+</div>
+
+<dialog class="drawer" id="mapping-drawer" aria-labelledby="drawer-title">
+  <form class="drawer-form" id="mapping-form" method="dialog" novalidate>
+    <header class="drawer-head">
+      <div>
+        <h2 id="drawer-title">编辑映射</h2>
+        <p class="muted small" id="drawer-sub"></p>
+      </div>
+      <button type="button" class="icon-btn" data-close-drawer aria-label="关闭">×</button>
+    </header>
+    <div class="drawer-body">
+      <div class="alert alert-bad" id="drawer-error" hidden role="alert"></div>
+      <input type="hidden" id="mapping-id">
+      <label class="field">
+        <span class="field-label">类型</span>
+        <select class="input select" id="mapping-type">
+          <option value="tcp">TCP</option>
+          <option value="udp">UDP</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label">服务端端口</span>
+        <input class="input" type="number" id="mapping-port" min="0" max="65535" step="1" inputmode="numeric" value="0">
+        <span class="field-hint">0 = 自动分配；当前 <span id="mapping-assigned">—</span></span>
+      </label>
+      <label class="field">
+        <span class="field-label">内网目标</span>
+        <input class="input mono" type="text" id="mapping-local" placeholder="127.0.0.1:22" required>
+        <span class="field-hint">客户端可访问的 host:port</span>
+      </label>
+      <label class="field">
+        <span class="field-label">备注</span>
+        <input class="input" type="text" id="mapping-note" maxlength="128" placeholder="可选">
+        <span class="field-hint">最多 128 个字符</span>
+      </label>
+      <label class="check">
+        <input type="checkbox" id="mapping-enabled" checked>
+        <span>启用此映射</span>
+      </label>
+    </div>
+    <footer class="drawer-foot">
+      <button type="button" class="btn btn-danger btn-quiet" id="mapping-delete" hidden>删除</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn" data-close-drawer>取消</button>
+      <button type="submit" class="btn btn-primary" id="mapping-save">保存</button>
+    </footer>
+  </form>
+</dialog>
+{{end}}

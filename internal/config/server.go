@@ -21,6 +21,10 @@ type ServerConfig struct {
 	Web        WebConfig       `yaml:"web" json:"web"`
 	StateFile  string          `yaml:"state_file" json:"state_file"`
 	Log        LogConfig       `yaml:"log" json:"log"`
+
+	// ConfigPath is the file this configuration was loaded from or saved to.
+	// It is runtime metadata and is never serialized.
+	ConfigPath string `yaml:"-" json:"-"`
 }
 
 // LoadServer reads, parses, and validates a server config file.
@@ -36,6 +40,7 @@ func LoadServer(path string) (*ServerConfig, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate server config %s: %w", path, err)
 	}
+	cfg.ConfigPath = path
 	return &cfg, nil
 }
 
@@ -49,6 +54,7 @@ func SaveServer(path string, cfg *ServerConfig) error {
 	if err := saveAtomic(path, cfg); err != nil {
 		return fmt.Errorf("save server config %s: %w", path, err)
 	}
+	cfg.ConfigPath = path
 	return nil
 }
 

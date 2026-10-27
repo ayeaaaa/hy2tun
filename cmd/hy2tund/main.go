@@ -35,6 +35,20 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if cfg.Web.Listen != "" {
+		password, generated, err := config.EnsureWebPassword(&cfg.Web)
+		if err != nil {
+			return err
+		}
+		if generated {
+			if err := config.SaveServer(*configPath, cfg); err != nil {
+				return fmt.Errorf("save generated web password: %w", err)
+			}
+			// The plaintext is shown exactly once and is never logged through
+			// the structured logger.
+			fmt.Fprintf(os.Stderr, "hy2tund: web console password for %q: %s (shown once)\n", cfg.Web.Username, password)
+		}
+	}
 	log, closer, err := logging.New(cfg.Log.Level, cfg.Log.File)
 	if err != nil {
 		return err

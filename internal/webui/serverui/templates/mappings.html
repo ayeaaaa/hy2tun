@@ -1,0 +1,84 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1>全部映射</h1>
+    <p class="page-sub">跨客户端查看公网端口与运行状态</p>
+  </div>
+  <div class="page-head-meta">
+    <span class="pill pill-muted" id="mapping-result-count">{{len .Rows}} 条映射</span>
+  </div>
+</div>
+
+<section class="panel filter-panel">
+  <div class="filters">
+    <label class="field">
+      <span class="field-label">搜索</span>
+      <input class="input" type="search" placeholder="客户端、内网目标、备注" data-filter="search">
+    </label>
+    <label class="field">
+      <span class="field-label">类型</span>
+      <select class="input select" data-filter="type">
+        <option value="">全部</option>
+        <option value="tcp">TCP</option>
+        <option value="udp">UDP</option>
+      </select>
+    </label>
+    <label class="field">
+      <span class="field-label">状态</span>
+      <select class="input select" data-filter="status">
+        <option value="">全部</option>
+        <option value="running">运行中</option>
+        <option value="pending">待启动</option>
+        <option value="failed">失败</option>
+        <option value="disabled">已禁用</option>
+        <option value="offline">离线</option>
+      </select>
+    </label>
+    <label class="field">
+      <span class="field-label">端口</span>
+      <input class="input" type="text" inputmode="numeric" placeholder="例如 2222" data-filter="port">
+    </label>
+  </div>
+</section>
+
+<section class="panel table-panel">
+  <div class="table-wrap">
+    <table class="table" id="mappings-table">
+      <thead>
+        <tr>
+          <th>客户端</th>
+          <th>类型</th>
+          <th>公网端口</th>
+          <th>内网目标</th>
+          <th>备注</th>
+          <th>状态</th>
+          <th>流量</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Rows}}
+        <tr data-mapping-row data-client="{{.ClientID}}" data-client-name="{{.ClientName}}" data-type="{{.Mapping.Type}}" data-status="{{.Mapping.Status}}" data-port="{{if .Mapping.AssignedPort}}{{.Mapping.AssignedPort}}{{else}}{{.Mapping.RemotePort}}{{end}}" data-search="{{.ClientName}} {{.ClientID}} {{.Mapping.LocalAddr}} {{.Mapping.Note}}">
+          <td>
+            <a class="link" href="/clients?id={{.ClientID}}">
+              <span class="status-dot {{if .Online}}is-online{{else}}is-offline{{end}}" aria-hidden="true"></span>
+              {{if .ClientName}}{{.ClientName}}{{else}}{{.ClientID}}{{end}}
+            </a>
+          </td>
+          <td><span class="type-tag type-{{.Mapping.Type}}">{{upper .Mapping.Type}}</span></td>
+          <td class="mono">{{if .Mapping.AssignedPort}}{{.Mapping.AssignedPort}}{{else if .Mapping.RemotePort}}{{.Mapping.RemotePort}}{{else}}<span class="muted">自动</span>{{end}}</td>
+          <td class="mono">{{.Mapping.LocalAddr}}</td>
+          <td class="note">{{if .Mapping.Note}}{{.Mapping.Note}}{{else}}<span class="muted">—</span>{{end}}</td>
+          <td>
+            <span class="status status-{{statusClass .Mapping.Status}}"><span class="status-dot" aria-hidden="true"></span>{{statusLabel .Mapping.Status}}</span>
+            {{if .Mapping.Error}}<span class="error-code mono">{{.Mapping.Error}}</span>{{end}}
+          </td>
+          <td class="mono nowrap">{{bytes .Mapping.TxBytes}} ↑<br><span class="muted">{{bytes .Mapping.RxBytes}} ↓</span></td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{if not .Rows}}<div class="empty-inline">还没有任何映射。</div>{{end}}
+  <div class="empty-inline" id="mapping-filter-empty" hidden>没有符合筛选条件的映射。</div>
+</section>
+{{end}}

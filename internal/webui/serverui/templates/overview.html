@@ -1,0 +1,75 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1>概览</h1>
+    <p class="page-sub">服务端运行状态与实时流量</p>
+  </div>
+  <div class="page-head-meta">
+    <span class="pill {{if .Overview.OnlineClients}}pill-ok{{else}}pill-muted{{end}}">
+      <span class="dot {{if .Overview.OnlineClients}}dot-ok{{end}}" aria-hidden="true"></span>
+      <span data-stat="online-clients">{{.Overview.OnlineClients}}</span> 个客户端在线
+    </span>
+  </div>
+</div>
+
+<section class="stat-grid" aria-label="服务端统计">
+  <article class="stat-card">
+    <div class="stat-label">在线客户端</div>
+    <div class="stat-value" data-stat="online-clients">{{.Overview.OnlineClients}}</div>
+    <div class="stat-foot">共 <span data-stat="total-clients">{{len .Clients}}</span> 个已登记客户端</div>
+  </article>
+  <article class="stat-card">
+    <div class="stat-label">活跃映射</div>
+    <div class="stat-value" data-stat="active-mappings">{{.Overview.ActiveMappings}}</div>
+    <div class="stat-foot">正在监听的公网端口</div>
+  </article>
+  <article class="stat-card">
+    <div class="stat-label">总上行</div>
+    <div class="stat-value" data-stat="tx-bytes">{{bytes .Overview.TxBytes}}</div>
+    <div class="stat-foot">公网 → 客户端</div>
+  </article>
+  <article class="stat-card">
+    <div class="stat-label">总下行</div>
+    <div class="stat-value" data-stat="rx-bytes">{{bytes .Overview.RxBytes}}</div>
+    <div class="stat-foot">客户端 → 公网</div>
+  </article>
+</section>
+
+<div class="grid-2">
+  <section class="panel">
+    <div class="panel-head">
+      <h2>服务端</h2>
+      <span class="muted small">实时</span>
+    </div>
+    <dl class="kv">
+      <div><dt>HY2 监听</dt><dd class="mono">{{.Overview.Listen}}</dd></div>
+      <div><dt>Web 监听</dt><dd class="mono">{{if .Summary.WebListen}}{{.Summary.WebListen}}{{else}}未启用{{end}}</dd></div>
+      <div><dt>运行时长</dt><dd data-stat="uptime">{{duration .Overview.Uptime}}</dd></div>
+      <div><dt>版本</dt><dd class="mono">{{.Version}}</dd></div>
+    </dl>
+  </section>
+  <section class="panel">
+    <div class="panel-head">
+      <h2>客户端</h2>
+      <a class="link" href="/clients">查看全部</a>
+    </div>
+    {{if .Clients}}
+    <ul class="client-mini-list">
+      {{range .Clients}}
+      <li>
+        <a class="client-mini" href="/clients?id={{.ID}}" data-client-row="{{.ID}}" data-online="{{.Online}}">
+          <span class="status-dot {{if .Online}}is-online{{else}}is-offline{{end}}" aria-hidden="true"></span>
+          <span class="client-mini-name">{{if .Name}}{{.Name}}{{else}}{{.ID}}{{end}}</span>
+          <span class="client-mini-id mono">{{.ID}}</span>
+          <span class="client-mini-meta" data-mapping-count="{{.ID}}">{{len .Mappings}} 映射</span>
+          <span class="badge {{if .Online}}badge-ok{{else}}badge-muted{{end}}">{{if .Online}}在线{{else}}离线{{end}}</span>
+        </a>
+      </li>
+      {{end}}
+    </ul>
+    {{else}}
+    <div class="empty-inline">还没有客户端连接。客户端启动后会出现在这里。</div>
+    {{end}}
+  </section>
+</div>
+{{end}}

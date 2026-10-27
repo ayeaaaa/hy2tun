@@ -425,6 +425,9 @@ func TestServerWebAddr(t *testing.T) {
 	require.NoError(t, err)
 	cfg := validServerConfig(cert)
 	cfg.Web.Listen = "127.0.0.1:7500"
+	cfg.ConfigPath = filepath.Join(t.TempDir(), "server.yaml")
+	_, _, err = config.EnsureWebPassword(&cfg.Web)
+	require.NoError(t, err)
 
 	srv, err := New(cfg, slog.Default())
 	require.NoError(t, err)

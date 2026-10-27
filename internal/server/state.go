@@ -88,6 +88,10 @@ func (s *Server) Overview() view.Overview {
 // a mapping push.
 const pushAckTimeout = 10 * time.Second
 
+// pushReadyTimeout bounds how long a push waits for a freshly published
+// session to finish its hello/hello_ack handshake.
+const pushReadyTimeout = 5 * time.Second
+
 // PushError reports a push rejected before the client changed anything. It
 // carries one result per requested mapping so a caller can show which port or
 // address failed.
@@ -150,6 +154,18 @@ func (m *mappingManager) pushMappings(clientID string, baseRevision int64, mappi
 		return 0, control.ErrClientOffline
 	}
 	m.mu.Unlock()
+
+	// The session is published before hello_ack is written. A web push must
+	// not overtake that handshake, so wait for the session to become ready.
+	// A session that ends while waiting is offline; a timeout is retryable.
+	if err := sess.waitReady(pushReadyTimeout); err != nil {
+		select {
+		case <-sess.done:
+			return 0, control.ErrClientOffline
+		default:
+			return 0, control.ErrClientNotReady
+		}
+	}
 
 	// Serialize this push with client updates and other pushes for the same
 	// session, then re-check that the session is still the live one.
