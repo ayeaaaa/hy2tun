@@ -107,6 +107,7 @@ func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 		Outbound:              &outbound{server: s},
 		DisableUDP:            false,
 		Authenticator:         authenticator,
+		EventLogger:           newEventLogger(log),
 	}
 	hyServer, err := hyserver.NewServer(hyConfig)
 	if err != nil {
