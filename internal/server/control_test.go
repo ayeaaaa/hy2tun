@@ -1,0 +1,350 @@
+package server
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"hy2tun/internal/client"
+	"hy2tun/internal/config"
+	"hy2tun/internal/control"
+	"hy2tun/internal/state"
+	"hy2tun/internal/testutil"
+)
+
+// testPair is a running server and client used by the control-plane tests.
+type testPair struct {
+	Server           *Server
+	Client           *client.Client
+	ClientConfigPath string
+	Stop             func()
+}
+
+// startTestPair starts a server and a client configured with mappings, waits
+// for the client's control handshake to complete, and returns both. The caller
+// must call Stop.
+func startTestPair(t *testing.T, mappings []config.Mapping) *testPair {
+	t.Helper()
+
+	srv, stopServer := startTestServer(t)
+
+	cfg := testClientConfig(srv.ListenAddr().String(), mappings)
+	dir, err := os.MkdirTemp("", "hy2tun-client-test-*")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	configPath := filepath.Join(dir, "client.yaml")
+	require.NoError(t, config.SaveClient(configPath, cfg))
+
+	cl, err := client.New(cfg, slog.Default())
+	require.NoError(t, err)
+	go func() { _ = cl.Start(context.Background()) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, cl.WaitReady(ctx))
+
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			_ = cl.Close()
+			stopServer()
+			_ = os.RemoveAll(dir)
+		})
+	}
+	t.Cleanup(stop)
+
+	return &testPair{
+		Server:           srv,
+		Client:           cl,
+		ClientConfigPath: configPath,
+		Stop:             stop,
+	}
+}
+
+// testClientConfig builds a valid client configuration for the given server
+// and mappings. Every call gets a unique client ID.
+func testClientConfig(serverAddr string, mappings []config.Mapping) *config.ClientConfig {
+	var idBytes [8]byte
+	if _, err := rand.Read(idBytes[:]); err != nil {
+		panic(fmt.Sprintf("generate client ID: %v", err))
+	}
+	return &config.ClientConfig{
+		Server: serverAddr,
+		Auth:   "pw",
+		TLS:    config.ClientTLSConfig{Insecure: true},
+		Control: config.ControlConfig{
+			Token: "0123456789abcdef0123456789abcdef",
+		},
+		Client: config.ClientIdentity{
+			ID:   "test-" + hex.EncodeToString(idBytes[:]),
+			Name: "test-client",
+		},
+		Mappings: append([]config.Mapping(nil), mappings...),
+		Web:      config.WebConfig{Listen: ""},
+		Log:      config.LogConfig{Level: "info"},
+	}
+}
+
+// waitFor polls cond every 20ms until it returns true or d elapses.
+func waitFor(t *testing.T, d time.Duration, cond func() bool) error {
+	t.Helper()
+
+	deadline := time.Now().Add(d)
+	for {
+		if cond() {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("condition not met within %s", d)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestClientRegistersTCPAndUDPMappings(t *testing.T) {
+	pair := startTestPair(t, []config.Mapping{
+		{ID: "tcp1", Type: "tcp", RemotePort: 0, LocalAddr: "127.0.0.1:9001", Enabled: true},
+		{ID: "udp1", Type: "udp", RemotePort: 0, LocalAddr: "127.0.0.1:9002", Enabled: true},
+	})
+	defer pair.Stop()
+
+	require.NoError(t, waitFor(t, 5*time.Second, func() bool {
+		views := pair.Server.Clients()
+		return len(views) == 1 && len(views[0].Mappings) == 2
+	}))
+
+	views := pair.Server.Clients()
+	require.Equal(t, "running", views[0].Mappings[0].Status)
+	require.NotZero(t, views[0].Mappings[0].AssignedPort)
+	require.Equal(t, "running", views[0].Mappings[1].Status)
+	require.NotZero(t, views[0].Mappings[1].AssignedPort)
+
+	clientViews := pair.Client.Mappings()
+	require.Len(t, clientViews, 2)
+	require.Equal(t, "running", clientViews[0].Status)
+	require.Equal(t, views[0].Mappings[0].AssignedPort, clientViews[0].AssignedPort)
+	require.Equal(t, "running", clientViews[1].Status)
+	require.Equal(t, views[0].Mappings[1].AssignedPort, clientViews[1].AssignedPort)
+}
+
+func TestServerViewsAndPushStub(t *testing.T) {
+	pair := startTestPair(t, []config.Mapping{
+		{ID: "tcp1", Type: "tcp", RemotePort: 0, LocalAddr: "127.0.0.1:9001", Enabled: true},
+	})
+	defer pair.Stop()
+
+	require.NoError(t, waitFor(t, 5*time.Second, func() bool {
+		return len(pair.Server.Clients()) == 1
+	}))
+
+	views := pair.Server.Clients()
+	id := views[0].ID
+	view, ok := pair.Server.Client(id)
+	require.True(t, ok)
+	require.Equal(t, id, view.ID)
+	require.True(t, view.Online)
+
+	_, ok = pair.Server.Client("missing")
+	require.False(t, ok)
+
+	overview := pair.Server.Overview()
+	require.Equal(t, 1, overview.OnlineClients)
+	require.Equal(t, 1, overview.ActiveMappings)
+	require.NotEmpty(t, overview.Listen)
+	require.Positive(t, overview.Uptime)
+
+	_, err := pair.Server.PushMappings(id, 0, nil)
+	require.ErrorIs(t, err, control.ErrClientOffline)
+}
+
+func TestClientRejectsWrongControlToken(t *testing.T) {
+	srv, stop := startTestServer(t)
+	defer stop()
+
+	cfg := testClientConfig(srv.ListenAddr().String(), []config.Mapping{
+		{ID: "tcp1", Type: "tcp", RemotePort: 0, LocalAddr: "127.0.0.1:9001", Enabled: true},
+	})
+	cfg.Control.Token = strings.Repeat("f", 32)
+	cl, err := client.New(cfg, slog.Default())
+	require.NoError(t, err)
+	defer cl.Close()
+
+	go func() { _ = cl.Start(context.Background()) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	require.Error(t, cl.WaitReady(ctx))
+	require.Empty(t, srv.Clients())
+}
+
+func TestControlRejectsNonHelloFirstMessage(t *testing.T) {
+	srv, stop := startTestServer(t)
+	defer stop()
+
+	hy := newHY2Client(t, srv, "pw", nil)
+	conn, err := hy.TCP("_hy2tun_control_:0")
+	require.NoError(t, err)
+	defer conn.Close()
+
+	require.NoError(t, control.WriteMessage(conn, &control.Ping{
+		Type: control.TypePing,
+		TS:   1,
+	}))
+	msg, err := control.ReadMessage(conn)
+	require.NoError(t, err)
+	ack, ok := msg.(*control.HelloAck)
+	require.True(t, ok)
+	require.False(t, ack.OK)
+	require.Equal(t, "bad_message", ack.Error)
+	require.Empty(t, srv.Clients())
+}
+
+func TestClientRegistersThroughSalamanderObfs(t *testing.T) {
+	cert, err := testutil.SelfSignedCert("localhost")
+	require.NoError(t, err)
+	serverCfg := validServerConfig(cert)
+	serverCfg.Obfs = config.ObfsConfig{
+		Type:       "salamander",
+		Salamander: config.SalamanderConfig{Password: "obfs-secret"},
+	}
+	srv, stop := startServer(t, serverCfg)
+	defer stop()
+
+	cfg := testClientConfig(srv.ListenAddr().String(), []config.Mapping{
+		{ID: "tcp1", Type: "tcp", RemotePort: 0, LocalAddr: "127.0.0.1:9001", Enabled: true},
+	})
+	cfg.Obfs = serverCfg.Obfs
+	cl, err := client.New(cfg, slog.Default())
+	require.NoError(t, err)
+	defer cl.Close()
+
+	go func() { _ = cl.Start(context.Background()) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, cl.WaitReady(ctx))
+	require.NoError(t, waitFor(t, 5*time.Second, func() bool {
+		views := srv.Clients()
+		return len(views) == 1 && len(views[0].Mappings) == 1 && views[0].Mappings[0].Status == "running"
+	}))
+}
+
+func TestLoadedOnlineClientBecomesOfflineAndReservesPort(t *testing.T) {
+	const reservedPort = 23457
+	statePath := filepath.Join(t.TempDir(), "state.json")
+
+	store, err := state.Open(statePath, 24*time.Hour)
+	require.NoError(t, err)
+	store.Upsert(state.ClientState{
+		ID:       "saved-client",
+		Name:     "saved",
+		Version:  "test",
+		Revision: 3,
+		Online:   true,
+		LastSeen: time.Now(),
+		Mappings: []config.Mapping{
+			{ID: "m1", Type: "tcp", RemotePort: reservedPort, LocalAddr: "127.0.0.1:9001", Enabled: true},
+		},
+	})
+	require.NoError(t, store.Save())
+	require.NoError(t, store.Close())
+
+	cert, err := testutil.SelfSignedCert("localhost")
+	require.NoError(t, err)
+	serverCfg := validServerConfig(cert)
+	serverCfg.StateFile = statePath
+	serverCfg.Ports.AutoRange = fmt.Sprintf("%d", reservedPort)
+	srv, stop := startServer(t, serverCfg)
+	defer stop()
+
+	views := srv.Clients()
+	require.Len(t, views, 1)
+	require.Equal(t, "saved-client", views[0].ID)
+	require.False(t, views[0].Online)
+
+	cfg := testClientConfig(srv.ListenAddr().String(), []config.Mapping{
+		{ID: "auto", Type: "tcp", RemotePort: 0, LocalAddr: "127.0.0.1:9002", Enabled: true},
+	})
+	cl, err := client.New(cfg, slog.Default())
+	require.NoError(t, err)
+	defer cl.Close()
+
+	go func() { _ = cl.Start(context.Background()) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, cl.WaitReady(ctx))
+
+	require.NoError(t, waitFor(t, 5*time.Second, func() bool {
+		for _, view := range srv.Clients() {
+			if view.ID != cfg.Client.ID {
+				continue
+			}
+			return len(view.Mappings) == 1 &&
+				view.Mappings[0].Status == "failed" &&
+				view.Mappings[0].Error == "no_free_port"
+		}
+		return false
+	}))
+}
+
+func TestTwoClientsRacingForSamePort(t *testing.T) {
+	srv, stop := startTestServer(t)
+	defer stop()
+
+	const port = 23456
+	var (
+		clientsMu sync.Mutex
+		clients   []*client.Client
+	)
+	defer func() {
+		clientsMu.Lock()
+		defer clientsMu.Unlock()
+		for _, cl := range clients {
+			_ = cl.Close()
+		}
+	}()
+	for i := 0; i < 2; i++ {
+		go func(i int) {
+			cfg := testClientConfig(srv.ListenAddr().String(), []config.Mapping{
+				{ID: "same", Type: "tcp", RemotePort: port, LocalAddr: "127.0.0.1:9001", Enabled: true},
+			})
+			cfg.Client.Name = fmt.Sprintf("c%d", i)
+			cl, err := client.New(cfg, slog.Default())
+			if err != nil {
+				return
+			}
+			clientsMu.Lock()
+			clients = append(clients, cl)
+			clientsMu.Unlock()
+			go func() { _ = cl.Start(context.Background()) }()
+			_ = cl.WaitReady(context.Background())
+		}(i)
+	}
+
+	require.NoError(t, waitFor(t, 5*time.Second, func() bool {
+		return len(srv.Clients()) == 2
+	}))
+
+	running, failed := 0, 0
+	for _, c := range srv.Clients() {
+		for _, m := range c.Mappings {
+			switch m.Status {
+			case "running":
+				running++
+			case "failed":
+				failed++
+				require.Equal(t, "port_in_use", m.Error)
+			}
+		}
+	}
+	require.Equal(t, 1, running)
+	require.Equal(t, 1, failed)
+}

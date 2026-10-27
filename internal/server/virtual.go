@@ -59,10 +59,17 @@ func isVirtualHost(addr string) bool {
 	return strings.HasPrefix(host, virtualHostPrefix)
 }
 
-// virtualTCP handles a reserved virtual address. Routing for the control and
-// reverse data planes is added by later tasks; until then every virtual
-// address is rejected instead of being dialed as a real host.
+// virtualTCP handles a reserved virtual address. The control plane is served
+// over an in-memory pipe; reverse data routing is added by later tasks.
 func (o *outbound) virtualTCP(kind, token string) (net.Conn, error) {
+	if kind == virtualKindControl {
+		if o.server == nil || o.server.control == nil {
+			return nil, fmt.Errorf("hy2tun control plane is not available")
+		}
+		clientEnd, serverEnd := net.Pipe()
+		go o.server.control.Serve(serverEnd)
+		return clientEnd, nil
+	}
 	return nil, fmt.Errorf("hy2tun virtual %q address is not supported", kind)
 }
 

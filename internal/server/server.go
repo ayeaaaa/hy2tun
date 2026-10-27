@@ -19,6 +19,8 @@ import (
 	"github.com/apernet/hysteria/extras/v2/obfs"
 
 	"hy2tun/internal/config"
+	"hy2tun/internal/ports"
+	"hy2tun/internal/state"
 )
 
 // Server is a running hy2tund HY2 server.
@@ -30,8 +32,13 @@ type Server struct {
 	packetConn net.PacketConn
 	listenAddr net.Addr
 
-	started atomic.Bool
-	closed  atomic.Bool
+	store    *state.Store
+	mappings *mappingManager
+	control  *controlHandler
+
+	startedAt time.Time
+	started   atomic.Bool
+	closed    atomic.Bool
 
 	closeOnce sync.Once
 	closeErr  error
@@ -71,7 +78,20 @@ func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 		log:        log,
 		packetConn: packetConn,
 		listenAddr: packetConn.LocalAddr(),
+		startedAt:  time.Now(),
 	}
+
+	policy, err := ports.NewPolicy(cfg.Ports.Allow, cfg.Ports.Deny, cfg.Ports.AutoRange)
+	if err != nil {
+		_ = packetConn.Close()
+		return nil, fmt.Errorf("create port policy: %w", err)
+	}
+	if err := s.initState(); err != nil {
+		_ = packetConn.Close()
+		return nil, err
+	}
+	s.mappings = newMappingManager(policy, s.store, log, cfg.ListenHost, s.reservedPorts())
+	s.control = newControlHandler(s, log)
 
 	conn := packetConn
 	if cfg.Obfs.Type != "" {
@@ -183,6 +203,14 @@ func (s *Server) Close() error {
 		if s.packetConn != nil {
 			if err := s.packetConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 				errs = append(errs, fmt.Errorf("close UDP socket: %w", err))
+			}
+		}
+		if s.mappings != nil {
+			s.mappings.closeAll()
+		}
+		if s.store != nil {
+			if err := s.store.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close state: %w", err))
 			}
 		}
 		s.closeErr = errors.Join(errs...)

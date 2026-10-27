@@ -8,12 +8,33 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"hy2tun/internal/testutil"
 )
+
+// lockedBuffer is a goroutine-safe bytes.Buffer for log capture. Hysteria
+// emits events from its own goroutines, so tests must not read an unsynchronized
+// buffer while the server is still logging.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 func testRemoteAddr() net.Addr {
 	return &net.TCPAddr{IP: net.IPv4(203, 0, 113, 7), Port: 4242}
@@ -112,7 +133,7 @@ func TestEventLoggerIsWiredIntoServer(t *testing.T) {
 	echoAddr, stopEcho := testutil.StartTCPEcho(t)
 	defer stopEcho()
 
-	var buf bytes.Buffer
+	var buf lockedBuffer
 	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	cert, err := testutil.SelfSignedCert("localhost")
