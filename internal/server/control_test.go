@@ -53,6 +53,34 @@ func startTestPair(t *testing.T, mappings []config.Mapping) *testPair {
 	defer cancel()
 	require.NoError(t, cl.WaitReady(ctx))
 
+	// A client that receives server-assigned ports writes them back and sends
+	// an update before its revision is stable. Wait for that write-back so
+	// tests do not race a push against the client's own update.
+	needsPortWriteback := false
+	for _, mapping := range mappings {
+		if mapping.Enabled && mapping.RemotePort == 0 {
+			needsPortWriteback = true
+			break
+		}
+	}
+	if needsPortWriteback {
+		require.NoError(t, waitFor(t, 5*time.Second, func() bool {
+			views := srv.Clients()
+			if len(views) != 1 {
+				return false
+			}
+			if views[0].Revision > 0 {
+				return true
+			}
+			for _, mapping := range views[0].Mappings {
+				if mapping.Status == "failed" {
+					return true
+				}
+			}
+			return false
+		}))
+	}
+
 	var once sync.Once
 	stop := func() {
 		once.Do(func() {
@@ -137,7 +165,7 @@ func TestClientRegistersTCPAndUDPMappings(t *testing.T) {
 	require.Equal(t, views[0].Mappings[1].AssignedPort, clientViews[1].AssignedPort)
 }
 
-func TestServerViewsAndPushStub(t *testing.T) {
+func TestServerViews(t *testing.T) {
 	pair := startTestPair(t, []config.Mapping{
 		{ID: "tcp1", Type: "tcp", RemotePort: 0, LocalAddr: "127.0.0.1:9001", Enabled: true},
 	})
@@ -163,7 +191,7 @@ func TestServerViewsAndPushStub(t *testing.T) {
 	require.NotEmpty(t, overview.Listen)
 	require.Positive(t, overview.Uptime)
 
-	_, err := pair.Server.PushMappings(id, 0, nil)
+	_, err := pair.Server.PushMappings("missing", 0, nil)
 	require.ErrorIs(t, err, control.ErrClientOffline)
 }
 

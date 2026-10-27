@@ -10,6 +10,7 @@ import (
 
 	hyclient "github.com/apernet/hysteria/core/v2/client"
 
+	"hy2tun/internal/config"
 	"hy2tun/internal/control"
 	"hy2tun/internal/version"
 )
@@ -23,14 +24,15 @@ var errClientClosed = errors.New("client closed")
 // runOnce establishes one HY2 connection and control stream. It returns
 // whether the control handshake succeeded so Start can reset its backoff.
 func (c *Client) runOnce(ctx context.Context) (bool, error) {
+	cfg := c.snapshotConfig()
 	hyConfig := &hyclient.Config{
 		ServerAddr:  c.serverAddr,
-		Auth:        c.cfg.Auth,
+		Auth:        cfg.Auth,
 		TLSConfig:   c.tlsConfig,
 		ConnFactory: c.connFactory,
 		BandwidthConfig: hyclient.BandwidthConfig{
-			MaxTx: uint64(c.cfg.Bandwidth.Up),
-			MaxRx: uint64(c.cfg.Bandwidth.Down),
+			MaxTx: uint64(cfg.Bandwidth.Up),
+			MaxRx: uint64(cfg.Bandwidth.Down),
 		},
 	}
 
@@ -223,15 +225,16 @@ func (c *Client) handshake(conn net.Conn) error {
 	_ = conn.SetDeadline(time.Now().Add(controlHandshakeTimeout))
 	defer func() { _ = conn.SetDeadline(time.Time{}) }()
 
+	cfg := c.snapshotConfig()
 	hello := &control.Hello{
 		Type:     control.TypeHello,
 		Protocol: control.ProtocolVersion,
-		Token:    c.cfg.Control.Token,
-		ClientID: c.cfg.Client.ID,
-		Name:     c.cfg.Client.Name,
+		Token:    cfg.Control.Token,
+		ClientID: cfg.Client.ID,
+		Name:     cfg.Client.Name,
 		Version:  version.Version,
-		Revision: c.cfg.Client.Revision,
-		Mappings: c.cfg.Mappings,
+		Revision: cfg.Client.Revision,
+		Mappings: cfg.Mappings,
 	}
 	if err := c.writeControl(conn, hello); err != nil {
 		return fmt.Errorf("send control hello: %w", err)
@@ -249,12 +252,53 @@ func (c *Client) handshake(conn net.Conn) error {
 		return fmt.Errorf("control handshake rejected: %s", ack.Error)
 	}
 
-	c.setMappingResults(c.cfg.Mappings, ack.Results)
+	if err := c.applyHelloAck(conn, cfg, ack); err != nil {
+		return err
+	}
 	c.markConnected()
 	c.log.Info("control handshake complete",
-		"client", c.cfg.Client.ID,
+		"client", cfg.Client.ID,
 		"server_version", ack.ServerVersion,
 	)
+	return nil
+}
+
+// applyHelloAck records server-assigned ports. The first assignment bumps the
+// revision and is announced immediately with an update, so the server's
+// last-known revision matches the file that was just written.
+func (c *Client) applyHelloAck(conn net.Conn, cfg *config.ClientConfig, ack *control.HelloAck) error {
+	next := cloneClientConfig(cfg)
+	mappings, changed := applyAssignedPorts(cfg.Mappings, ack.Results)
+	if changed {
+		next.Mappings = mappings
+		next.Client.Revision = cfg.Client.Revision + 1
+		if err := next.Validate(); err != nil {
+			c.log.Warn("write server-assigned ports", "error", err)
+			changed = false
+		} else if err := writeConfigAtomic(c.configPath, next); err != nil {
+			c.log.Warn("write server-assigned ports", "error", err)
+			changed = false
+		}
+	}
+
+	if !changed {
+		c.setMappingResults(cfg.Mappings, ack.Results)
+		return nil
+	}
+
+	tokens := tokensFromResults(ack.Results)
+	views := mappingViews(next.Mappings, resultMap(ack.Results))
+	c.configMu.Lock()
+	c.storeConfigLocked(next, tokens, views)
+	c.configMu.Unlock()
+
+	if err := c.writeControl(conn, &control.Update{
+		Type:     control.TypeUpdate,
+		Revision: next.Client.Revision,
+		Mappings: next.Mappings,
+	}); err != nil {
+		return fmt.Errorf("send assigned-port update: %w", err)
+	}
 	return nil
 }
 
@@ -273,10 +317,9 @@ func (c *Client) serveControl(conn net.Conn) error {
 			c.log.Debug("received control open", "mapping", message.MappingID)
 			go c.handleOpen(message)
 		case *control.Push:
-			c.log.Warn("ignoring server mapping push",
-				"base_revision", message.BaseRevision,
-				"revision", message.Revision,
-			)
+			c.handlePush(conn, message)
+		case *control.UpdateAck:
+			c.handleUpdateAck(message)
 		case *control.Ping:
 			if err := c.writeControl(conn, &control.Pong{
 				Type: control.TypePong,
@@ -284,11 +327,175 @@ func (c *Client) serveControl(conn net.Conn) error {
 			}); err != nil {
 				return err
 			}
-		case *control.PushAck, *control.Pong, *control.OpenResult, *control.UpdateAck:
-			// No action is required for these messages in this task.
+		case *control.PushAck, *control.Pong, *control.OpenResult, *control.HelloAck:
+			// No action is required for these messages.
 		default:
 			c.log.Debug("ignoring unexpected control message")
 		}
+	}
+}
+
+// handlePush applies an authoritative mapping list from the server. The client
+// revision is authoritative: the push only applies when its base revision
+// still matches, and the applied revision is exactly the push revision.
+func (c *Client) handlePush(conn net.Conn, msg *control.Push) {
+	if conn == nil || msg == nil {
+		return
+	}
+
+	c.configMu.Lock()
+	current := c.cfg.Client.Revision
+	if msg.BaseRevision != current {
+		c.configMu.Unlock()
+		c.writePushAck(conn, &control.PushAck{
+			OK:       false,
+			Error:    string(control.CodeConflict),
+			Revision: current,
+		})
+		return
+	}
+	if msg.Revision <= msg.BaseRevision {
+		c.configMu.Unlock()
+		c.writePushAck(conn, &control.PushAck{
+			OK:       false,
+			Error:    string(control.CodeBadMessage),
+			Revision: current,
+		})
+		return
+	}
+	if err := validatePushedMappings(msg.Mappings); err != nil {
+		c.configMu.Unlock()
+		c.writePushAck(conn, &control.PushAck{
+			OK:       false,
+			Error:    string(control.CodeBadMessage),
+			Revision: current,
+		})
+		return
+	}
+
+	next := cloneClientConfig(c.cfg)
+	next.Mappings = append([]config.Mapping(nil), msg.Mappings...)
+	next.Client.Revision = msg.Revision
+	if err := next.Validate(); err != nil {
+		c.configMu.Unlock()
+		c.log.Warn("validate server mapping push", "error", err)
+		c.writePushAck(conn, &control.PushAck{
+			OK:       false,
+			Error:    string(control.CodeBadMessage),
+			Revision: current,
+		})
+		return
+	}
+	if err := writeConfigAtomic(c.configPath, next); err != nil {
+		c.configMu.Unlock()
+		c.log.Warn("apply server mapping push", "error", err)
+		c.writePushAck(conn, &control.PushAck{
+			OK:       false,
+			Error:    "write_failed",
+			Revision: current,
+		})
+		return
+	}
+
+	tokens := retainTokensForPush(c.cfg.Mappings, next.Mappings, c.udpTokenSnapshot(), c.mappingSnapshot())
+	views := pushViews(next.Mappings, tokens)
+	c.storeConfigLocked(next, tokens, views)
+	c.configMu.Unlock()
+
+	c.writePushAck(conn, &control.PushAck{
+		OK:       true,
+		Revision: msg.Revision,
+		Results:  pushResults(next.Mappings, tokens),
+	})
+	c.reconcileUDPMappings()
+}
+
+func (c *Client) writePushAck(conn net.Conn, ack *control.PushAck) {
+	ack.Type = control.TypePushAck
+	if err := c.writeControl(conn, ack); err != nil {
+		c.log.Warn("send push ack", "error", err)
+	}
+}
+
+// handleUpdateAck writes assigned ports back to the configuration without
+// bumping the revision: the assignment belongs to the update that is already
+// in flight.
+func (c *Client) handleUpdateAck(ack *control.UpdateAck) {
+	if ack == nil || len(ack.Results) == 0 {
+		return
+	}
+	if len(ack.Results) == 1 && ack.Results[0].ID == "" {
+		c.log.Debug("control update rejected",
+			"revision", ack.Revision,
+			"error", ack.Results[0].Error,
+		)
+		return
+	}
+
+	c.configMu.Lock()
+	current := c.cfg.Client.Revision
+	c.configMu.Unlock()
+	switch {
+	case ack.Revision < current:
+		// The server rolled the whole update back. Keep running mappings and
+		// their UDP tokens; only mappings that are not already running can be
+		// marked failed.
+		c.log.Debug("control update rolled back",
+			"ack_revision", ack.Revision,
+			"revision", current,
+		)
+		c.applyRejectedUpdateResults(ack.Results)
+		return
+	case ack.Revision > current:
+		c.log.Debug("ignoring update ack for a different revision",
+			"ack_revision", ack.Revision,
+			"revision", current,
+		)
+		return
+	}
+
+	c.configMu.Lock()
+	next := cloneClientConfig(c.cfg)
+	mappings, changed := applyAssignedPorts(next.Mappings, ack.Results)
+	effective := next.Mappings
+	applied := false
+	if changed {
+		next.Mappings = mappings
+		if err := next.Validate(); err != nil {
+			c.log.Warn("write update-assigned ports", "error", err)
+		} else if err := writeConfigAtomic(c.configPath, next); err != nil {
+			c.log.Warn("write update-assigned ports", "error", err)
+		} else {
+			views := mappingViews(next.Mappings, resultMap(ack.Results))
+			c.storeConfigLocked(next, tokensFromResults(ack.Results), views)
+			effective = next.Mappings
+			applied = true
+		}
+	}
+	c.configMu.Unlock()
+
+	if !applied {
+		c.setMappingResults(effective, ack.Results)
+	}
+	c.reconcileUDPMappings()
+}
+
+// applyRejectedUpdateResults marks mappings that are not already running as
+// failed after the server rolled an update back. Running mappings keep their
+// status and UDP token because the server left the previous mapping set in
+// place.
+func (c *Client) applyRejectedUpdateResults(results []control.Result) {
+	byID := resultMap(results)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range c.mappings {
+		result, ok := byID[c.mappings[i].ID]
+		if !ok || result.Error == "" || c.mappings[i].Status == "running" {
+			continue
+		}
+		c.mappings[i].Status = "failed"
+		c.mappings[i].Error = result.Error
 	}
 }
 

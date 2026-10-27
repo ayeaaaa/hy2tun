@@ -59,6 +59,7 @@ type udpMapping struct {
 	id          string
 	virtualAddr string
 	conn        hyclient.HyUDPConn
+	hy          hyclient.Client
 	log         *slog.Logger
 
 	cancel context.CancelFunc
@@ -72,6 +73,7 @@ type udpMapping struct {
 	sendMu sync.Mutex
 
 	target            *net.UDPAddr
+	targetAddr        string
 	maxPeers          int
 	idleTimeout       time.Duration
 	keepaliveInterval time.Duration
@@ -136,10 +138,12 @@ func (c *Client) startUDP(m config.Mapping, token string) (*udpMapping, error) {
 		id:                m.ID,
 		virtualAddr:       udpVirtualAddress(token),
 		conn:              conn,
+		hy:                hy,
 		log:               c.log,
 		cancel:            cancel,
 		peers:             make(map[string]*udpPeer),
 		target:            target,
+		targetAddr:        m.LocalAddr,
 		maxPeers:          udpMaxPeers,
 		idleTimeout:       udpPeerIdleTimeout,
 		keepaliveInterval: udpKeepaliveInterval,
@@ -173,30 +177,78 @@ func (c *Client) startUDP(m config.Mapping, token string) (*udpMapping, error) {
 	return u, nil
 }
 
-// startUDPMappings starts one HY2 UDP session per enabled UDP mapping that the
-// server registered successfully. Failures are logged and do not prevent other
-// mappings from starting.
+// startUDPMappings reconciles UDP sessions with the current configuration.
 func (c *Client) startUDPMappings() {
-	c.mu.Lock()
+	c.reconcileUDPMappings()
+}
+
+// reconcileUDPMappings starts, stops, and restarts reverse UDP sessions so
+// they match the current configuration and server tokens. A mapping keeps its
+// session when its target and token are unchanged; a token or local_addr
+// change replaces it.
+func (c *Client) reconcileUDPMappings() {
+	c.udpReconcileMu.Lock()
+	defer c.udpReconcileMu.Unlock()
+
+	c.configMu.Lock()
 	mappings := append([]config.Mapping(nil), c.cfg.Mappings...)
+	c.configMu.Unlock()
+
+	c.mu.Lock()
 	tokens := make(map[string]string, len(c.udpTokens))
 	for id, token := range c.udpTokens {
 		tokens[id] = token
 	}
+	current := make(map[string]*udpMapping, len(c.udpMappings))
+	for id, mapping := range c.udpMappings {
+		current[id] = mapping
+	}
 	c.mu.Unlock()
 
+	desired := make(map[string]config.Mapping, len(mappings))
 	for _, mapping := range mappings {
-		if c.isClosed() {
-			return
+		if mapping.Enabled && mapping.Type == "udp" {
+			desired[mapping.ID] = mapping
 		}
+	}
+
+	for id, existing := range current {
+		mapping, ok := desired[id]
+		token := tokens[id]
+		if ok &&
+			token != "" &&
+			existing.virtualAddr == udpVirtualAddress(token) &&
+			existing.targetAddr == mapping.LocalAddr {
+			continue
+		}
+		existing.close()
+		c.mu.Lock()
+		if c.udpMappings[id] == existing {
+			delete(c.udpMappings, id)
+		}
+		c.mu.Unlock()
+	}
+
+	for _, mapping := range mappings {
 		if mapping.Type != "udp" || !mapping.Enabled {
 			continue
 		}
 		token := tokens[mapping.ID]
 		if token == "" {
-			c.log.Warn("reverse UDP mapping has no server token", "mapping", mapping.ID)
+			c.log.Debug("reverse UDP mapping is waiting for a server token", "mapping", mapping.ID)
 			continue
 		}
+
+		c.mu.Lock()
+		existing := c.udpMappings[mapping.ID]
+		c.mu.Unlock()
+		if existing != nil {
+			continue
+		}
+		if c.isClosed() {
+			return
+		}
+
 		u, err := c.startUDP(mapping, token)
 		if err != nil {
 			c.log.Warn("start reverse UDP mapping", "mapping", mapping.ID, "error", err)
@@ -204,15 +256,12 @@ func (c *Client) startUDPMappings() {
 		}
 
 		c.mu.Lock()
-		if c.isClosed() {
+		if c.isClosed() || c.hy != u.hy {
 			c.mu.Unlock()
 			u.close()
 			continue
 		}
 		old := c.udpMappings[mapping.ID]
-		if c.udpMappings == nil {
-			c.udpMappings = make(map[string]*udpMapping)
-		}
 		c.udpMappings[mapping.ID] = u
 		c.mu.Unlock()
 		if old != nil {

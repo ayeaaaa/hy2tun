@@ -58,6 +58,15 @@ type Client struct {
 	dataConns map[net.Conn]net.Conn
 	writeMu   sync.Mutex
 
+	// configMu serializes local configuration edits, server pushes, and the
+	// assigned-port write-backs that follow a handshake. The client config is
+	// the single source of truth, so every revision decision is made under it.
+	configMu   sync.Mutex
+	configPath string
+	// udpReconcileMu serializes UDP session reconciliation so a push and an
+	// update ack cannot start duplicate sessions for one mapping.
+	udpReconcileMu sync.Mutex
+
 	ready     chan struct{}
 	readyOnce sync.Once
 	closed    chan struct{}
@@ -106,6 +115,7 @@ func New(cfg *config.ClientConfig, log *slog.Logger) (*Client, error) {
 		connFactory:    connFactory,
 		newHY2:         hyclient.NewClient,
 		startedAt:      time.Now(),
+		configPath:     cfg.ConfigPath,
 		mappings:       mappingViews(cfg.Mappings, nil),
 		mappingConfigs: mappingConfigMap(cfg.Mappings),
 		udpTokens:      make(map[string]string),
@@ -133,11 +143,15 @@ func (c *Client) Start(ctx context.Context) error {
 			return nil
 		}
 
+		attemptedAt := time.Now()
 		connected, err := c.runOnce(ctx)
 		if c.isClosed() || ctx.Err() != nil {
 			return nil
 		}
-		if connected {
+		// Reset the backoff only after a connection that stayed healthy for a
+		// full cap interval. A server that accepts and immediately drops the
+		// stream must not be retried every second forever.
+		if connected && time.Since(attemptedAt) >= maxBackoff {
 			backoff = initialBackoff
 		}
 		if err != nil {
@@ -275,18 +289,8 @@ func (c *Client) clearCurrent(hy hyclient.Client, conn net.Conn) {
 
 // setMappingResults stores per-mapping status from a HelloAck or UpdateAck.
 func (c *Client) setMappingResults(mappings []config.Mapping, results []control.Result) {
-	byID := make(map[string]control.Result, len(results))
-	for _, result := range results {
-		byID[result.ID] = result
-	}
-
-	views := mappingViews(mappings, byID)
-	tokens := make(map[string]string)
-	for _, result := range results {
-		if result.UDPToken != "" {
-			tokens[result.ID] = result.UDPToken
-		}
-	}
+	views := mappingViews(mappings, resultMap(results))
+	tokens := tokensFromResults(results)
 	configs := mappingConfigMap(mappings)
 
 	c.mu.Lock()
@@ -294,6 +298,27 @@ func (c *Client) setMappingResults(mappings []config.Mapping, results []control.
 	c.mappingConfigs = configs
 	c.udpTokens = tokens
 	c.mu.Unlock()
+}
+
+// resultMap indexes server results by mapping ID.
+func resultMap(results []control.Result) map[string]control.Result {
+	byID := make(map[string]control.Result, len(results))
+	for _, result := range results {
+		byID[result.ID] = result
+	}
+	return byID
+}
+
+// tokensFromResults extracts UDP tokens from server results. Tokens are never
+// logged or persisted.
+func tokensFromResults(results []control.Result) map[string]string {
+	tokens := make(map[string]string)
+	for _, result := range results {
+		if result.UDPToken != "" {
+			tokens[result.ID] = result.UDPToken
+		}
+	}
+	return tokens
 }
 
 // mappingConfigMap indexes mapping definitions by ID for data-plane lookups.

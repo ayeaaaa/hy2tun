@@ -137,6 +137,15 @@ type clientSession struct {
 	// writeMu serializes frames written to the control stream.
 	writeMu sync.Mutex
 
+	// pushWaitMu protects the single in-flight push waiter. PushAck frames
+	// arrive on the control read loop while the push caller waits.
+	pushWaitMu sync.Mutex
+	pushWait   chan *control.PushAck
+	// resyncRevision records a revision learned from a conflicting push ack.
+	// The pending update with that exact revision is accepted once so the
+	// server can replace its stale mapping cache. Guarded by mappingManager.mu.
+	resyncRevision int64
+
 	// ready is closed once the HelloAck has been written, so data-plane opens
 	// cannot overtake the handshake. done is closed when the session is
 	// detached.
@@ -291,7 +300,12 @@ func (m *mappingManager) updateLocked(sess *clientSession, revision int64, mappi
 	if m.sessions[sess.id] != sess {
 		return nil, false
 	}
-	if revision <= sess.revision {
+	if sess.resyncRevision != 0 && revision == sess.resyncRevision {
+		// A push conflict recorded the client's revision before its pending
+		// update arrived. Accept that exact revision once so the mapping cache
+		// catches up; every other non-increasing revision is stale.
+		sess.resyncRevision = 0
+	} else if revision <= sess.revision {
 		return []control.Result{{Error: string(control.CodeStaleRevision)}}, false
 	}
 
@@ -419,6 +433,7 @@ func (m *mappingManager) updateLocked(sess *clientSession, revision int64, mappi
 	sess.mappings = newMappings
 	sess.order = newOrder
 	sess.revision = revision
+	sess.resyncRevision = 0
 	sess.lastSeen = now
 	m.persistLocked(sess, now)
 	return results, true
@@ -478,13 +493,22 @@ func (m *mappingManager) detach(sess *clientSession) {
 
 // removeMapping removes one mapping from a live session, closing its listener
 // and any traffic it is carrying. The change is persisted for offline
-// reservations.
+// reservations. It serializes with pushes and client updates through the
+// per-client control queue.
 func (m *mappingManager) removeMapping(clientID, mappingID string) error {
-	now := time.Now()
-
 	m.mu.Lock()
 	sess := m.sessions[clientID]
+	m.mu.Unlock()
 	if sess == nil {
+		return control.ErrClientOffline
+	}
+
+	sess.controlMu.Lock()
+	defer sess.controlMu.Unlock()
+
+	now := time.Now()
+	m.mu.Lock()
+	if m.sessions[clientID] != sess {
 		m.mu.Unlock()
 		return control.ErrClientOffline
 	}

@@ -65,6 +65,10 @@ func (h *controlHandler) Serve(conn net.Conn) {
 		h.reject(conn, control.CodeBadMessage)
 		return
 	}
+	if hello.Revision < 0 {
+		h.reject(conn, control.CodeBadMessage)
+		return
+	}
 	_ = conn.SetReadDeadline(time.Time{})
 
 	sess := &clientSession{
@@ -123,26 +127,18 @@ func (h *controlHandler) loop(sess *clientSession) {
 
 		switch message := msg.(type) {
 		case *control.Update:
-			results, accepted := h.server.mappings.update(sess, message.Revision, message.Mappings)
-			if !accepted {
-				h.log.Debug("rejected control update",
+			// Process the update outside the read loop. The push transaction
+			// holds controlMu while waiting for its ack, so blocking here would
+			// prevent the ack from ever being read.
+			go h.handleUpdate(sess, message)
+		case *control.PushAck:
+			if !sess.deliverPushAck(message) {
+				h.log.Debug("unexpected control push ack",
 					"client", sess.id,
+					"ok", message.OK,
 					"revision", message.Revision,
 				)
 			}
-			if err := sess.write(&control.UpdateAck{
-				Type:     control.TypeUpdateAck,
-				Revision: h.server.mappings.sessionRevision(sess),
-				Results:  results,
-			}); err != nil {
-				return
-			}
-		case *control.PushAck:
-			h.log.Debug("received control push ack",
-				"client", sess.id,
-				"ok", message.OK,
-				"revision", message.Revision,
-			)
 		case *control.Ping:
 			if err := sess.write(&control.Pong{Type: control.TypePong, TS: message.TS}); err != nil {
 				return
@@ -159,5 +155,67 @@ func (h *controlHandler) loop(sess *clientSession) {
 		default:
 			h.log.Debug("ignoring unexpected control message", "client", sess.id)
 		}
+	}
+}
+
+// handleUpdate applies one client update while holding the per-client control
+// queue. Updates are revision-checked, so out-of-order execution cannot apply
+// an older list over a newer one.
+func (h *controlHandler) handleUpdate(sess *clientSession, message *control.Update) {
+	sess.controlMu.Lock()
+	results, accepted := h.server.mappings.update(sess, message.Revision, message.Mappings)
+	ack := &control.UpdateAck{
+		Type:     control.TypeUpdateAck,
+		Revision: h.server.mappings.sessionRevision(sess),
+		Results:  results,
+	}
+	// Write the ack before releasing the per-client queue so a push cannot
+	// overtake the update that produced it.
+	err := sess.write(ack)
+	sess.controlMu.Unlock()
+
+	if !accepted {
+		h.log.Debug("rejected control update",
+			"client", sess.id,
+			"revision", message.Revision,
+		)
+	}
+	if err != nil {
+		h.log.Debug("write control update ack", "client", sess.id, "error", err)
+	}
+}
+
+// setPushWaiter registers the channel that receives the next PushAck. Only one
+// push may be in flight per session because the caller holds controlMu.
+func (s *clientSession) setPushWaiter(ch chan *control.PushAck) {
+	s.pushWaitMu.Lock()
+	s.pushWait = ch
+	s.pushWaitMu.Unlock()
+}
+
+// clearPushWaiter removes ch if it is still the active waiter. A late ack
+// after a timeout is then ignored.
+func (s *clientSession) clearPushWaiter(ch chan *control.PushAck) {
+	s.pushWaitMu.Lock()
+	if s.pushWait == ch {
+		s.pushWait = nil
+	}
+	s.pushWaitMu.Unlock()
+}
+
+// deliverPushAck forwards an ack to the waiting push without blocking the
+// control read loop.
+func (s *clientSession) deliverPushAck(ack *control.PushAck) bool {
+	s.pushWaitMu.Lock()
+	ch := s.pushWait
+	s.pushWaitMu.Unlock()
+	if ch == nil {
+		return false
+	}
+	select {
+	case ch <- ack:
+		return true
+	default:
+		return false
 	}
 }

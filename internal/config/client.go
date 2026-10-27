@@ -23,6 +23,10 @@ type ClientConfig struct {
 	Web       WebConfig       `yaml:"web" json:"web"`
 	Proxy     ProxyConfig     `yaml:"proxy" json:"proxy"`
 	Log       LogConfig       `yaml:"log" json:"log"`
+
+	// ConfigPath is the file this configuration was loaded from or saved to.
+	// It is runtime metadata and is never serialized.
+	ConfigPath string `yaml:"-" json:"-"`
 }
 
 // LoadClient reads, parses, and validates a client config file.
@@ -38,6 +42,7 @@ func LoadClient(path string) (*ClientConfig, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate client config %s: %w", path, err)
 	}
+	cfg.ConfigPath = path
 	return &cfg, nil
 }
 
@@ -52,6 +57,7 @@ func SaveClient(path string, cfg *ClientConfig) error {
 	if err := saveAtomic(path, cfg); err != nil {
 		return fmt.Errorf("save client config %s: %w", path, err)
 	}
+	cfg.ConfigPath = path
 	return nil
 }
 
