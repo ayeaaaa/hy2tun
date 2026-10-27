@@ -353,7 +353,7 @@ Task Scheduler instructions and firewall notes.
 | `web.listen` | Management address. The example uses `127.0.0.1:7500`. |
 | `web.username` | Console username. Default `admin` when `web.listen` is set. |
 | `web.password_hash` | bcrypt hash. Empty generates a password on first start. |
-| `web.trust_proxy` | Trust `X-Forwarded-For`/`X-Real-IP` for login rate limiting. Enable only behind a proxy that overwrites them. Default `false`. |
+| `web.trust_proxy` | Trust `X-Forwarded-For`/`X-Real-IP` for login rate limiting. Enable only behind a proxy that overwrites both headers with the direct client address. Default `false`. |
 | `web.tls.cert`, `web.tls.key` | Optional HTTPS certificate pair for the console. |
 | `state_file` | Persistent state JSON. Empty keeps state in memory. |
 | `log.level` | `debug`, `info`, `warn`, or `error`. |
@@ -378,7 +378,7 @@ Task Scheduler instructions and firewall notes.
 | `mappings` | List of reverse mappings (see below). |
 | `web.listen` | Client console address. The example uses `0.0.0.0:7501`. |
 | `web.username`, `web.password_hash` | Console login. Empty hash generates a password. |
-| `web.trust_proxy` | Trust `X-Forwarded-For`/`X-Real-IP` for login rate limiting. Default `false`. |
+| `web.trust_proxy` | Trust `X-Forwarded-For`/`X-Real-IP` for login rate limiting. Enable only behind a proxy that overwrites both headers with the direct client address. Default `false`. |
 | `web.tls.cert`, `web.tls.key` | Optional HTTPS for the client console. |
 | `proxy.socks5` | Optional local SOCKS5 listen address, for example `127.0.0.1:1080`. |
 | `proxy.socks5_auth` | Optional `user:password` for SOCKS5. |
@@ -511,7 +511,7 @@ The example server console binds to `127.0.0.1:7500`. Prefer one of:
            proxy_pass http://127.0.0.1:7500;
            proxy_set_header Host $host;
            proxy_set_header X-Forwarded-Proto $scheme;
-           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-For $remote_addr;
            proxy_set_header X-Real-IP $remote_addr;
            proxy_buffering off;
            proxy_read_timeout 1h;
@@ -521,11 +521,16 @@ The example server console binds to `127.0.0.1:7500`. Prefer one of:
 
    The console uses `X-Forwarded-Proto` to mark the session cookie `Secure` and
    to send HSTS, so proxied HTTPS deployments get both. Set
-   `web.trust_proxy: true` only when this proxy overwrites `X-Forwarded-For` or
-   `X-Real-IP`; then the login limiter keys on the real client IP instead of
-   the proxy's single address. Leave it `false` when clients can reach the
-   console directly, because forwarded headers are otherwise spoofable and
-   would let an attacker evade the limiter.
+   `web.trust_proxy: true` only when this proxy overwrites **both**
+   `X-Forwarded-For` and `X-Real-IP` with the direct client address (the
+   example sets both to `$remote_addr`). Prefer overwriting over
+   `$proxy_add_x_forwarded_for`: overwriting removes client-supplied entries
+   entirely, while an appending proxy leaves the result dependent on proxy
+   behavior and chain length. When trusted, the limiter prefers `X-Real-IP` and
+   otherwise uses the last `X-Forwarded-For` entry, so the nearest proxy's
+   value wins. Leave `trust_proxy` `false` when clients can reach the console
+   directly, because forwarded headers are otherwise spoofable and would let an
+   attacker evade the limiter.
 
 Do not expose the console directly on a public interface over plain HTTP. The
 console has its own login, rate limiting, and CSRF protection, but TLS protects
@@ -545,9 +550,10 @@ the password and session cookie in transit.
   request is HTTPS directly or through a TLS reverse proxy; mutating APIs
   require `X-Requested-With: hy2tun` and a matching `Origin`.
 - Login rate limiting keys on the direct peer by default. Set
-  `web.trust_proxy: true` only behind a proxy that overwrites
-  `X-Forwarded-For`/`X-Real-IP`; otherwise forwarded headers are ignored so a
-  client cannot forge a fresh IP per attempt.
+  `web.trust_proxy: true` only behind a proxy that overwrites both
+  `X-Forwarded-For` and `X-Real-IP`; otherwise forwarded headers are ignored so
+  a client cannot forge a fresh IP per attempt. When trusted, `X-Real-IP` wins
+  and the last `X-Forwarded-For` entry is the fallback.
 - Configuration and state files are written with mode `0600` and atomic
   rename. Previous contents are kept as `.bak`.
 - Passwords, tokens, and private keys are never logged.
@@ -625,8 +631,8 @@ with a smaller MTU can drop large datagrams before they arrive.
 - Five failed logins from one IP trigger a one-minute lockout. Wait and retry,
   or restart the process (the limiter is in memory). Behind a TLS reverse
   proxy, all users otherwise share the proxy's IP; set `web.trust_proxy: true`
-  when the proxy overwrites `X-Forwarded-For` or `X-Real-IP` so each client is
-  limited separately.
+  when the proxy overwrites both `X-Forwarded-For` and `X-Real-IP` with the
+  direct client address so each client is limited separately.
 - If the console is reachable but pages redirect to `/login`, the session
   cookie is missing or expired. Log in again; restarting the process
   invalidates sessions but not the persisted signing key.

@@ -517,15 +517,61 @@ func TestClientIPWithProxy(t *testing.T) {
 	require.Equal(t, "10.0.0.5", ClientIPWithProxy(req, false))
 	require.Equal(t, "10.0.0.5", ClientIP(req))
 
-	// Trusted proxy: the first X-Forwarded-For entry is the client.
-	require.Equal(t, "203.0.113.7", ClientIPWithProxy(req, true))
+	// Trusted proxy: X-Real-IP is preferred.
+	require.Equal(t, "203.0.113.8", ClientIPWithProxy(req, true))
 
-	req.Header.Set("X-Forwarded-For", "")
-	require.Equal(t, "203.0.113.8", ClientIPWithProxy(req, true), "X-Real-IP is the fallback")
+	req.Header.Set("X-Real-IP", "")
+	req.Header.Set("X-Forwarded-For", "203.0.113.7, 203.0.113.6")
+	require.Equal(t, "203.0.113.6", ClientIPWithProxy(req, true), "the last X-Forwarded-For entry is the fallback")
 
 	req.Header.Set("X-Real-IP", "not-an-ip")
+	req.Header.Set("X-Forwarded-For", "not-an-ip")
 	require.Equal(t, "10.0.0.5", ClientIPWithProxy(req, true), "invalid forwarded values fall back to RemoteAddr")
 
 	req.Header.Set("X-Forwarded-For", "[2001:db8::1]:4321")
 	require.Equal(t, "2001:db8::1", ClientIPWithProxy(req, true))
+}
+
+func TestClientIPWithProxyIgnoresSpoofedFirstXFF(t *testing.T) {
+	// A client can send its own X-Forwarded-For value, which an appending
+	// proxy would place first. Only the last entry (the nearest proxy's
+	// value) may key the limiter.
+	first := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	first.RemoteAddr = "10.0.0.5:1234"
+	first.Header.Set("X-Forwarded-For", "198.51.100.1, 203.0.113.7")
+
+	second := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	second.RemoteAddr = "10.0.0.5:1234"
+	second.Header.Set("X-Forwarded-For", "198.51.100.2, 203.0.113.7")
+
+	require.Equal(t, "203.0.113.7", ClientIPWithProxy(first, true))
+	require.Equal(t, ClientIPWithProxy(first, true), ClientIPWithProxy(second, true),
+		"rotating the spoofed first entry must not change the limiter key")
+}
+
+func TestClientIPWithProxyPrefersXRealIP(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	req.RemoteAddr = "10.0.0.5:1234"
+	req.Header.Set("X-Forwarded-For", "198.51.100.66, 203.0.113.7")
+	req.Header.Set("X-Real-IP", "203.0.113.8")
+
+	require.Equal(t, "203.0.113.8", ClientIPWithProxy(req, true),
+		"a spoofed X-Forwarded-For must not override the proxy's X-Real-IP")
+}
+
+func TestClientIPWithProxySingleXFF(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	req.RemoteAddr = "10.0.0.5:1234"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+
+	require.Equal(t, "203.0.113.9", ClientIPWithProxy(req, true))
+}
+
+func TestClientIPWithProxyDefaultIgnoresForwardedHeaders(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	req.RemoteAddr = "10.0.0.5:1234"
+	req.Header.Set("X-Forwarded-For", "198.51.100.66")
+	req.Header.Set("X-Real-IP", "203.0.113.8")
+
+	require.Equal(t, "10.0.0.5", ClientIPWithProxy(req, false))
 }

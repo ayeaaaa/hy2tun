@@ -567,21 +567,23 @@ func ClientIP(r *http.Request) string {
 // ClientIPWithProxy returns the key used for login rate limiting. Forwarded
 // headers are consulted only when trustProxy is enabled; without a trusted
 // proxy they are attacker-controlled and would let a client evade the limiter
-// by forging a new IP per request. With a trusted proxy, the first
-// X-Forwarded-For entry is the original client.
+// by forging a new IP per request. With a trusted proxy, X-Real-IP wins when
+// present; otherwise the last X-Forwarded-For entry is used, because that is
+// the value appended by the nearest proxy. Earlier entries are client-supplied
+// and can be rotated to evade the limiter.
 func ClientIPWithProxy(r *http.Request, trustProxy bool) string {
 	if r == nil {
 		return ""
 	}
 	if trustProxy {
-		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-			first, _, _ := strings.Cut(forwarded, ",")
-			if ip := normalizeClientIP(first); ip != "" {
-				return ip
-			}
-		}
 		if ip := normalizeClientIP(r.Header.Get("X-Real-IP")); ip != "" {
 			return ip
+		}
+		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+			parts := strings.Split(forwarded, ",")
+			if ip := normalizeClientIP(parts[len(parts)-1]); ip != "" {
+				return ip
+			}
 		}
 	}
 	return ClientIP(r)
