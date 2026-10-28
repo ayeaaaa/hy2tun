@@ -2,7 +2,7 @@
 <div class="page-head">
   <div>
     <h1>设置</h1>
-    <p class="page-sub">热更新配置：保存后立即生效，无需重启。敏感操作需要当前 Web 密码确认。</p>
+    <p class="page-sub">热更新配置：保存后立即生效，无需重启。修改 Web 管理员密码、显示/轮换/撤销 HY2 凭据时需要当前 Web 密码确认。</p>
   </div>
   <div class="page-head-meta"><span class="pill pill-ok">可在线编辑</span></div>
 </div>
@@ -44,10 +44,6 @@
         信任反向代理的 X-Forwarded-For / X-Real-IP
       </label>
       <p class="field-hint">仅当反向代理会覆盖这些请求头时启用；否则客户端可以伪造来源 IP，绕过登录和显示凭据的限速。</p>
-      <div class="field">
-        <label class="field-label" for="proxy-current-password">当前密码</label>
-        <input class="input" id="proxy-current-password" type="password" autocomplete="current-password" required>
-      </div>
       <div class="form-actions">
         <button type="submit" class="btn btn-primary">保存代理信任</button>
       </div>
@@ -191,10 +187,6 @@
           <input class="input" id="ports-offline-reserve" type="number" min="1" step="1" value="{{.Settings.Ports.OfflineReserveSeconds}}">
           <span class="field-hint">当前：{{duration .Settings.Ports.OfflineReserve}}（至少 1 秒）</span>
         </div>
-      </div>
-      <div class="field">
-        <label class="field-label" for="ports-current-password">当前密码</label>
-        <input class="input" id="ports-current-password" type="password" autocomplete="current-password" required>
       </div>
       <div class="notice">已运行的映射不会因为被移出白名单而关闭；新注册和更新会立即使用新策略。</div>
       <div class="form-actions">

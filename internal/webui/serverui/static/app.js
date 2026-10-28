@@ -1007,13 +1007,10 @@
     const proxyForm = $("#settings-proxy-form");
     proxyForm.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const passwordInput = $("#proxy-current-password");
       try {
         await settingsRequest("/api/settings/proxy", "PUT", {
-          current_password: passwordInput.value,
           trust_proxy: $("#trust-proxy").checked,
         });
-        passwordInput.value = "";
         showToast("代理信任设置已更新");
       } catch (error) {
         showToast(error.message, "bad");
@@ -1078,13 +1075,11 @@
       }
       try {
         await settingsRequest("/api/settings/ports", "PUT", {
-          current_password: $("#ports-current-password").value,
           allow: parsePortList($("#ports-allow").value),
           deny: parsePortList($("#ports-deny").value),
           auto_range: $("#ports-auto-range").value.trim(),
           offline_reserve_seconds: Math.floor(reserve),
         });
-        $("#ports-current-password").value = "";
         showToast("端口策略已更新");
         await refreshSettings();
       } catch (error) {

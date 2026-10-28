@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Changed
+
+- Server settings no longer require the current web password for routine port
+  policy and trust-proxy changes. Web administrator and HY2 credential
+  operations still require confirmation.
+
 ## v1.3.1 - 2026-10-28
 
 ### Added

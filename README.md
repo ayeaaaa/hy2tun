@@ -579,12 +579,14 @@ to the YAML file atomically with mode `0600` (the previous file is kept as
 running configuration is unchanged and the API returns an error. No restart is
 needed for the settings marked online below.
 
-Every sensitive mutation on the **Settings** page requires the current web
-administrator password. Pushing or deleting a mapping from a client detail
-page requires a valid session and the CSRF header/Origin, but not a password
-re-entry. Failed settings-password confirmations are rate-limited to five per
-minute per client IP. Mutations also require the CSRF header and same-origin
-`Origin` described in [Security model](#security-model).
+Changing the web administrator credentials, revealing/rotating/revoking HY2
+credentials, and other security-critical mutations require the current web
+administrator password. Routine port policy and trust-proxy changes require
+only a valid session and the CSRF header/Origin; they do not ask for the
+password again. Pushing or deleting a mapping from a client detail page also
+requires no password re-entry. Failed password confirmations are rate-limited
+to five per minute per client IP. All mutations require the CSRF header and
+same-origin `Origin` described in [Security model](#security-model).
 
 ### Which settings are online-editable
 

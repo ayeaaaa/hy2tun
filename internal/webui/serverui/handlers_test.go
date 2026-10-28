@@ -1461,12 +1461,25 @@ func TestServerSettingsWebUpdateRevokesSession(t *testing.T) {
 	require.Equal(t, 1, api.updateWebCalls)
 }
 
+func TestServerSettingsPageOmitsPasswordForRoutineSettings(t *testing.T) {
+	_, ts := newTestWeb(t, &fakeServerAPI{})
+	cookie := login(t, ts)
+
+	resp := doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/settings", "", cookie, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readBody(t, resp)
+	require.Contains(t, body, `id="web-current-password"`)
+	require.Contains(t, body, `id="credentials-current-password"`)
+	require.NotContains(t, body, `id="proxy-current-password"`)
+	require.NotContains(t, body, `id="ports-current-password"`)
+}
+
 func TestServerSettingsPortsAndTrustProxy(t *testing.T) {
 	api := &fakeServerAPI{}
 	web, ts := newTestWeb(t, api)
 	cookie := login(t, ts)
 
-	body := `{"current_password":"pw","allow":["2222","8000-8100"],"deny":["9000"],"auto_range":"20000-29999","offline_reserve_seconds":7200}`
+	body := `{"allow":["2222","8000-8100"],"deny":["9000"],"auto_range":"20000-29999","offline_reserve_seconds":7200}`
 	resp := doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/ports", body, cookie, csrfHeaders(ts.URL))
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	resp.Body.Close()
@@ -1478,22 +1491,22 @@ func TestServerSettingsPortsAndTrustProxy(t *testing.T) {
 
 	// Zero is rejected instead of silently becoming the 24h default.
 	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/ports",
-		`{"current_password":"pw","allow":[],"deny":[],"auto_range":"20000-29999","offline_reserve_seconds":0}`, cookie, csrfHeaders(ts.URL))
+		`{"allow":[],"deny":[],"auto_range":"20000-29999","offline_reserve_seconds":0}`, cookie, csrfHeaders(ts.URL))
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	resp.Body.Close()
 	require.Equal(t, 1, api.updatePortsCalls)
 
 	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/ports",
-		`{"current_password":"wrong","allow":[],"deny":[],"auto_range":"20000-29999","offline_reserve_seconds":60}`, cookie, csrfHeaders(ts.URL))
-	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+		`{"allow":[],"deny":[],"auto_range":"20000-29999","offline_reserve_seconds":60}`, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 	resp.Body.Close()
-	require.Equal(t, 1, api.updatePortsCalls)
+	require.Equal(t, 2, api.updatePortsCalls)
 
 	// The trust-proxy toggle has its own authenticated mutation and updates
 	// the live login limiter.
 	require.False(t, web.login.TrustProxy)
 	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/proxy",
-		`{"current_password":"pw","trust_proxy":true}`, cookie, csrfHeaders(ts.URL))
+		`{"trust_proxy":true}`, cookie, csrfHeaders(ts.URL))
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	resp.Body.Close()
 	require.Equal(t, 1, api.setTrustProxyCalls)
@@ -1501,7 +1514,7 @@ func TestServerSettingsPortsAndTrustProxy(t *testing.T) {
 	require.True(t, web.login.TrustProxy)
 
 	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/proxy",
-		`{"current_password":"pw","trust_proxy":false}`, cookie, map[string]string{
+		`{"trust_proxy":false}`, cookie, map[string]string{
 			"Content-Type":     "application/json",
 			"X-Requested-With": "hy2tun",
 		})
@@ -1602,12 +1615,12 @@ func TestServerSettingsReauthRateLimitsMutations(t *testing.T) {
 	}
 }
 
-func TestServerSettingsReauthCorrectPasswordBeforeLimit(t *testing.T) {
+func TestServerSettingsWebPasswordLimitStillApplies(t *testing.T) {
 	api := &fakeServerAPI{}
 	_, ts := newTestWeb(t, api)
 	cookie := login(t, ts)
 
-	correct := `{"current_password":"pw","allow":[],"deny":[],"auto_range":"20000-29999","offline_reserve_seconds":60}`
+	correct := `{"allow":[],"deny":[],"auto_range":"20000-29999","offline_reserve_seconds":60}`
 	resp := doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/ports", correct, cookie, csrfHeaders(ts.URL))
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	resp.Body.Close()

@@ -42,10 +42,11 @@ func decodeSettingsBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return true
 }
 
-// confirmCurrentPassword implements the re-authentication required by every
-// sensitive settings mutation. Failed attempts are rate-limited per client IP
-// so a stolen session cannot brute-force the web password. The submitted value
-// is never logged.
+// confirmCurrentPassword implements the re-authentication required for
+// security-critical settings mutations (web administrator and HY2 credentials).
+// Routine policy changes do not require it. Failed attempts are rate-limited
+// per client IP so a stolen session cannot brute-force the web password. The
+// submitted value is never logged.
 func (s *Server) confirmCurrentPassword(w http.ResponseWriter, r *http.Request, password string) bool {
 	ip := shared.ClientIPWithProxy(r, s.trustProxy.Load())
 	if !s.settingsLimiter.Allow(ip) {
@@ -127,16 +128,12 @@ func (s *Server) handleUpdateWebSettings(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleUpdatePorts(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		passwordRequest
 		Allow                 []string `json:"allow"`
 		Deny                  []string `json:"deny"`
 		AutoRange             string   `json:"auto_range"`
 		OfflineReserveSeconds int64    `json:"offline_reserve_seconds"`
 	}
 	if !decodeSettingsBody(w, r, &request) {
-		return
-	}
-	if !s.confirmCurrentPassword(w, r, request.secret()) {
 		return
 	}
 	if request.OfflineReserveSeconds < 1 {
@@ -152,13 +149,9 @@ func (s *Server) handleUpdatePorts(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpdateTrustProxy(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		passwordRequest
 		TrustProxy bool `json:"trust_proxy"`
 	}
 	if !decodeSettingsBody(w, r, &request) {
-		return
-	}
-	if !s.confirmCurrentPassword(w, r, request.secret()) {
 		return
 	}
 	if err := s.api.SetTrustProxy(request.TrustProxy); err != nil {
