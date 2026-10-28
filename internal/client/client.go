@@ -35,6 +35,10 @@ const (
 
 	initialBackoff = time.Second
 	maxBackoff     = 30 * time.Second
+
+	// defaultHopInterval mirrors udphop's default so startup diagnostics can
+	// report the interval that is actually used when none is configured.
+	defaultHopInterval = 30 * time.Second
 )
 
 // mappingTraffic holds the byte counters for one mapping. Tx is client-to-server
@@ -186,6 +190,11 @@ func New(cfg *config.ClientConfig, log *slog.Logger) (*Client, error) {
 	}
 	if cfg.ServerPortHopping() {
 		minHop, maxHop, _ := cfg.HopInterval()
+		if minHop == 0 && maxHop == 0 {
+			// udphop applies this default internally; log the interval that
+			// will actually be used instead of 0s.
+			minHop, maxHop = defaultHopInterval, defaultHopInterval
+		}
 		log.Warn("port hopping enabled; server must redirect the entire UDP range to the HY2 listen port",
 			"server", cfg.Server, "hop_min_interval", minHop.String(), "hop_max_interval", maxHop.String())
 	}

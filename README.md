@@ -736,15 +736,12 @@ hop and keep their configured ports.
 
 ### Client configuration
 
-`server` accepts the Hysteria 2 port-set syntax: a single port, a
-comma-separated list, an inclusive range, or a mix.
+`server` accepts the Hysteria 2 port-set syntax. Each of these is valid:
 
-```yaml
-server: "hy2tun.example.com:443"                  # single port, no hopping
-server: "hy2tun.example.com:443,8443"             # two ports
-server: "hy2tun.example.com:30000-40000"          # inclusive range
-server: "hy2tun.example.com:443,30000-30100,8443" # mixed list
-```
+- `hy2tun.example.com:443` — single port, no hopping
+- `hy2tun.example.com:443,8443` — two ports
+- `hy2tun.example.com:30000-40000` — inclusive range
+- `hy2tun.example.com:443,30000-30100,8443` — mixed list
 
 Configure the interval under `transport.udp`:
 
@@ -802,7 +799,9 @@ table inet hy2tun_porthop {
 }
 ```
 
-Load the file with `nft -f`, or create the table, chain, and rule incrementally:
+Load the file with `nft -f`, or create the table, chain, and rule incrementally.
+
+Add:
 
 ```bash
 nft add table inet hy2tun_porthop
@@ -810,21 +809,42 @@ nft add chain inet hy2tun_porthop prerouting \
   '{ type nat hook prerouting priority dstnat; policy accept; }'
 nft add rule inet hy2tun_porthop prerouting \
   udp dport 30000-40000 counter redirect to :24443
+```
+
+Verify:
+
+```bash
 nft list table inet hy2tun_porthop
+```
+
+Delete:
+
+```bash
 nft delete table inet hy2tun_porthop
 ```
 
-iptables and ip6tables:
+iptables and ip6tables. The `table inet` nftables example above covers IPv4 and
+IPv6 with one rule; the iptables path needs both commands.
+
+Add:
 
 ```bash
 iptables -t nat -A PREROUTING -p udp --dport 30000:40000 \
   -j REDIRECT --to-ports 24443
 ip6tables -t nat -A PREROUTING -p udp --dport 30000:40000 \
   -j REDIRECT --to-ports 24443
+```
 
+Verify:
+
+```bash
 iptables -t nat -L PREROUTING -n -v
 ip6tables -t nat -L PREROUTING -n -v
+```
 
+Delete:
+
+```bash
 iptables -t nat -D PREROUTING -p udp --dport 30000:40000 \
   -j REDIRECT --to-ports 24443
 ip6tables -t nat -D PREROUTING -p udp --dport 30000:40000 \
@@ -849,11 +869,16 @@ Requirements:
 
 ### Port conflicts
 
-The hop range must not overlap any UDP port used for reverse mappings:
+Keep the hop range outside every UDP port the server may use for reverse
+mappings:
 
-- explicit UDP mappings (`type: udp`, including `remote_port: 0` allocations);
-- `ports.allow` entries that cover UDP ports;
-- `ports.auto_range`, whose default is `20000-29999`.
+- every explicit UDP mapping (`type: udp`, including `remote_port: 0`
+  allocations);
+- `ports.allow`: every entry that covers a UDP port. When `ports.allow` is
+  non-empty it is also the source of automatic `remote_port: 0` allocations, so
+  the whole list matters;
+- `ports.auto_range`, used for automatic allocation when `ports.allow` is empty;
+  the default is `20000-29999`.
 
 With the default `auto_range`, use `30000-40000` rather than `20000-30000`.
 TCP mapping ports may overlap the UDP hop range because the protocols are
@@ -887,7 +912,10 @@ release.
 
    `tcpdump` sees packets before NAT, so the destination port is the hop port.
 4. Keep a TCP mapping and a UDP mapping busy while hopping. Both should keep
-   working; only the HY2 connection changes ports.
+   working; only the HY2 connection changes ports. UDP is not retransmitted, so
+   an in-flight datagram can be lost when the client switches sockets and a UDP
+   mapping may show a brief gap at a hop. TCP streams and the HY2 connection
+   recover.
 5. Remove the redirect and confirm the client eventually fails after moving to
    an unredirected port; restore the rule to recover.
 

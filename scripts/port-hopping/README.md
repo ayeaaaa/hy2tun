@@ -11,14 +11,15 @@ changes the firewall.
 - root or `CAP_NET_ADMIN`.
 - The HY2 `listen` port. The examples use `24443`; replace it with your own
   value. The server still listens on a single port.
-- A UDP hop range outside `ports.auto_range` and every explicit UDP mapping.
-  The examples use `30000-40000`, which is outside the default
-  `auto_range: "20000-29999"`.
+- A UDP hop range outside `ports.allow`, `ports.auto_range`, and every explicit
+  UDP mapping (including `remote_port: 0` allocations). The examples use
+  `30000-40000`, which is outside the default `auto_range: "20000-29999"`.
 - The cloud security group allows the whole UDP range to the instance, because
   it filters before the host's NAT. The host INPUT chain only needs the final
   listen port, because the redirect happens in PREROUTING.
-- IPv4 and IPv6 are handled separately. Add both rules if clients may use both
-  protocols.
+- The `table inet` nftables example covers IPv4 and IPv6 in one rule. Only the
+  iptables path needs separate `iptables` and `ip6tables` rules; add both if
+  clients may use both protocols.
 
 ## nftables
 
@@ -47,20 +48,28 @@ table inet hy2tun_porthop {
 nft -f /etc/nftables.d/hy2tun-porthop.nft
 ```
 
-Use either the incremental commands or the file, not both. `nft add table` and
-`nft add chain` are idempotent: re-running them succeeds and leaves the existing
-object unchanged. `nft add rule` and reloading the file are not: each run
-appends another rule, so duplicates accumulate silently. Use `nft create`
-instead of `nft add` if an existing table or chain should be an error; `create`
-returns "File exists". The `counter` statement is optional, but it makes the
-verification step below possible; remove it if you do not want counters. Delete
-the table before recreating it from scratch.
+Use either the incremental commands or the file, not both. Re-running the exact
+same `nft add table` or `nft add chain` declaration succeeds without creating a
+duplicate. `nft add` does not reconcile an existing object with a changed
+declaration, however: changing a chain declaration and re-running the command
+can fail. Delete and recreate the table, or load a complete table with `nft -f`,
+when the declaration changes. `nft add rule` and reloading the file are not
+idempotent: each run appends another rule, so duplicates accumulate silently.
+Use `nft create` instead of `nft add` if an existing table or chain should be an
+error; `create` returns "File exists". The `counter` statement is optional, but
+it makes the verification step below possible; remove it if you do not want
+counters. Delete the table before recreating it from scratch.
 
-List and delete:
+Verify:
 
 ```bash
 nft list table inet hy2tun_porthop
 nft list ruleset
+```
+
+Delete:
+
+```bash
 nft delete table inet hy2tun_porthop
 ```
 
@@ -73,17 +82,25 @@ nft delete rule inet hy2tun_porthop prerouting handle <handle>
 
 ## iptables and ip6tables
 
-Add, list, and delete:
+Add:
 
 ```bash
 iptables -t nat -A PREROUTING -p udp --dport 30000:40000 \
   -j REDIRECT --to-ports 24443
 ip6tables -t nat -A PREROUTING -p udp --dport 30000:40000 \
   -j REDIRECT --to-ports 24443
+```
 
+Verify:
+
+```bash
 iptables -t nat -L PREROUTING -n -v --line-numbers
 ip6tables -t nat -L PREROUTING -n -v --line-numbers
+```
 
+Delete:
+
+```bash
 iptables -t nat -D PREROUTING -p udp --dport 30000:40000 \
   -j REDIRECT --to-ports 24443
 ip6tables -t nat -D PREROUTING -p udp --dport 30000:40000 \
@@ -172,11 +189,15 @@ firewall-cmd --reload
 
 ## Port conflicts
 
-The hop range must not overlap UDP ports the server uses for reverse mappings:
+Keep the hop range outside every UDP port the server may use for reverse
+mappings:
 
-- explicit `type: udp` mappings, including `remote_port: 0` allocations;
-- `ports.allow` entries that cover UDP ports;
-- `ports.auto_range`, whose default is `20000-29999`.
+- every explicit `type: udp` mapping, including `remote_port: 0` allocations;
+- `ports.allow`: every entry that covers a UDP port. When `ports.allow` is
+  non-empty it is also the source of automatic `remote_port: 0` allocations, so
+  the whole list matters;
+- `ports.auto_range`, used for automatic allocation when `ports.allow` is empty;
+  the default is `20000-29999`.
 
 With the default `auto_range`, do not redirect `20000-30000`; use
 `30000-40000` instead. A UDP mapping inside the redirected range would receive
@@ -221,7 +242,9 @@ release.
    before NAT.
 5. **Traffic test.** Keep a TCP mapping and a UDP mapping busy across several
    hop intervals. Both must continue to work; only the HY2 connection changes
-   ports.
+   ports. UDP is not retransmitted, so an in-flight datagram can be lost when the
+   client switches sockets and a UDP mapping may show a brief gap at a hop. TCP
+   streams and the HY2 connection recover.
 6. **Negative test.** Remove the redirect and confirm the client eventually
    fails after moving to an unredirected port. Restore the rule and confirm
    recovery.

@@ -13,8 +13,10 @@ listen: ":443"
 #   nft add rule inet hy2tun_porthop prerouting udp dport 30000-40000 \
 #     counter redirect to :24443
 # Replace 24443 with the port from listen (443 in this example), and create the
-# hy2tun_porthop table/chain first. Do not put a UDP reverse-mapping port inside
-# the redirected range. See scripts/port-hopping/README.md for complete
+# hy2tun_porthop table/chain first. Keep the redirected range outside
+# ports.allow, ports.auto_range, and every explicit UDP mapping (including
+# remote_port: 0 allocations); ports.allow is also the automatic-allocation
+# source when non-empty. See scripts/port-hopping/README.md for complete
 # nftables and iptables/ip6tables rules.
 
 # Optional address used for the public reverse-mapping listeners. An empty

@@ -658,15 +658,12 @@ Hysteria 2 支持 UDP 端口跳跃：客户端把 HY2 连接发送到一组 UDP 
 
 ### 客户端配置
 
-`server` 支持与 Hysteria 2 相同的端口集合语法：单个端口、逗号分隔的列表、
-包含端点的范围，或它们的混合。
+`server` 支持与 Hysteria 2 相同的端口集合语法，以下写法都有效：
 
-```yaml
-server: "hy2tun.example.com:443"                  # 单端口，不启用跳跃
-server: "hy2tun.example.com:443,8443"             # 两个端口
-server: "hy2tun.example.com:30000-40000"          # 包含端点的范围
-server: "hy2tun.example.com:443,30000-30100,8443" # 混合列表
-```
+- `hy2tun.example.com:443` — 单端口，不启用跳跃
+- `hy2tun.example.com:443,8443` — 两个端口
+- `hy2tun.example.com:30000-40000` — 包含端点的范围
+- `hy2tun.example.com:443,30000-30100,8443` — 混合列表
 
 在 `transport.udp` 中配置跳跃间隔：
 
@@ -722,7 +719,9 @@ table inet hy2tun_porthop {
 }
 ```
 
-把规则保存到文件后用 `nft -f` 加载，或用增量命令创建表、链和规则：
+把规则保存到文件后用 `nft -f` 加载，或用增量命令创建表、链和规则。
+
+添加：
 
 ```bash
 nft add table inet hy2tun_porthop
@@ -730,21 +729,42 @@ nft add chain inet hy2tun_porthop prerouting \
   '{ type nat hook prerouting priority dstnat; policy accept; }'
 nft add rule inet hy2tun_porthop prerouting \
   udp dport 30000-40000 counter redirect to :24443
+```
+
+验证：
+
+```bash
 nft list table inet hy2tun_porthop
+```
+
+删除：
+
+```bash
 nft delete table inet hy2tun_porthop
 ```
 
-iptables 和 ip6tables：
+iptables 和 ip6tables。上面的 `table inet` nftables 示例用一条规则同时覆盖
+IPv4 和 IPv6；iptables 方式需要分别执行两条命令。
+
+添加：
 
 ```bash
 iptables -t nat -A PREROUTING -p udp --dport 30000:40000 \
   -j REDIRECT --to-ports 24443
 ip6tables -t nat -A PREROUTING -p udp --dport 30000:40000 \
   -j REDIRECT --to-ports 24443
+```
 
+验证：
+
+```bash
 iptables -t nat -L PREROUTING -n -v
 ip6tables -t nat -L PREROUTING -n -v
+```
 
+删除：
+
+```bash
 iptables -t nat -D PREROUTING -p udp --dport 30000:40000 \
   -j REDIRECT --to-ports 24443
 ip6tables -t nat -D PREROUTING -p udp --dport 30000:40000 \
@@ -767,11 +787,13 @@ nftables 和 iptables 只选一种。如果两者同时存在，确保重定向�
 
 ### 端口冲突
 
-跳跃范围不能与服务端用于反向映射的任何 UDP 端口重叠：
+跳跃范围必须避开服务端可能用于反向映射的每一个 UDP 端口：
 
-- 显式 UDP 映射（`type: udp`，包括 `remote_port: 0` 自动分配的端口）；
-- `ports.allow` 中覆盖 UDP 端口的条目；
-- `ports.auto_range`，默认值为 `20000-29999`。
+- 每一个显式 UDP 映射（`type: udp`，包括 `remote_port: 0` 自动分配的端口）；
+- `ports.allow` 中覆盖 UDP 端口的每一条条目。`ports.allow` 非空时它也是
+  `remote_port: 0` 自动分配端口的来源，因此整个列表都要避开；
+- `ports.auto_range`：`ports.allow` 为空时用于自动分配，默认值为
+  `20000-29999`。
 
 使用默认 `auto_range` 时，应使用 `30000-40000`，不要使用 `20000-30000`。
 服务端的 TCP 映射端口可以与 UDP 跳跃范围重叠，因为协议相互独立；但分开
@@ -801,7 +823,9 @@ nftables 和 iptables 只选一种。如果两者同时存在，确保重定向�
 
    `tcpdump` 在 NAT 之前抓包，因此目的端口是跳跃端口。
 4. 在跳跃期间持续使用一个 TCP 映射和一个 UDP 映射，两者都应保持正常；
-   只有 HY2 连接会切换端口。
+   只有 HY2 连接会切换端口。UDP 不会重传，客户端切换 socket 时在途的数据报
+   可能丢失，因此 UDP 映射在跳跃瞬间可能出现短暂中断。TCP 流和 HY2 连接会
+   自行恢复。
 5. 删除重定向规则，确认客户端跳到未重定向端口后最终失败；恢复规则后恢复
    正常。
 
