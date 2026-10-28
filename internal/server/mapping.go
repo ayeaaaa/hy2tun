@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -134,8 +135,11 @@ type clientSession struct {
 	// controlMu serializes configuration changes initiated by the client and
 	// by the server's web API.
 	controlMu sync.Mutex
-	// writeMu serializes frames written to the control stream.
-	writeMu sync.Mutex
+	// writeGate serializes frames written to the control stream. It is a
+	// channel rather than a mutex so a credential push can bound its wait
+	// against the same absolute deadline as the write itself.
+	writeGateOnce sync.Once
+	writeGate     chan struct{}
 
 	// pushWaitMu protects the single in-flight push waiter. PushAck frames
 	// arrive on the control read loop while the push caller waits.
@@ -151,13 +155,17 @@ type clientSession struct {
 	// Both are guarded by mappingManager.mu.
 	appliedRevision int64
 
-	// credentialMu guards the credential generation and sync flags. They are
+	// credentialMu guards the credential generations and sync flags. They are
 	// written at Hello and may be refreshed after a credential push, while the
 	// control loop and read models read them concurrently.
 	credentialMu         sync.Mutex
 	credentialGeneration int64
-	credentialSynced     bool
-	canCredentialUpdate  bool
+	// authenticatedGeneration is the generation whose control token
+	// authenticated this stream. It is authoritative for revocation and
+	// superseded-session cleanup; the reported generation is display-only.
+	authenticatedGeneration int64
+	credentialSynced        bool
+	canCredentialUpdate     bool
 	// credentialAck receives the next CredentialAck, including its OK/Error
 	// result. The control read loop sends non-blockingly, so a late ack cannot
 	// stall it.
@@ -193,29 +201,53 @@ func (s *clientSession) markDone() {
 	s.doneOnce.Do(func() { close(s.done) })
 }
 
-// setCredentialState records the client's credential generation and flags.
+// setCredentialState records the client's reported credential generation and
+// flags. Both the reported and authenticated generations are set; callers that
+// know the generation from the control token use setCredentialStateFor.
 // Credential rotation uses it to refresh sessions after a push; readers use
 // credentialState so the update is race-free.
 func (s *clientSession) setCredentialState(generation int64, synced, capable bool) {
+	s.setCredentialStateFor(generation, generation, synced, capable)
+}
+
+// setCredentialStateFor records the generation the client reported and the
+// generation that actually authenticated its control token.
+func (s *clientSession) setCredentialStateFor(reported, authenticated int64, synced, capable bool) {
 	if s == nil {
 		return
 	}
 	s.credentialMu.Lock()
-	s.credentialGeneration = generation
+	s.credentialGeneration = reported
+	s.authenticatedGeneration = authenticated
 	s.credentialSynced = synced
 	s.canCredentialUpdate = capable
 	s.credentialMu.Unlock()
 }
 
-// credentialState returns a consistent snapshot of the client's credential
-// generation and flags.
-func (s *clientSession) credentialState() (generation int64, synced, capable bool) {
+// credentialStateSnapshot returns a consistent snapshot of both credential
+// generations and the session flags.
+func (s *clientSession) credentialStateSnapshot() (reported, authenticated int64, synced, capable bool) {
 	if s == nil {
-		return 0, false, false
+		return 0, 0, false, false
 	}
 	s.credentialMu.Lock()
 	defer s.credentialMu.Unlock()
-	return s.credentialGeneration, s.credentialSynced, s.canCredentialUpdate
+	return s.credentialGeneration, s.authenticatedGeneration, s.credentialSynced, s.canCredentialUpdate
+}
+
+// credentialState returns the client's reported generation and flags. The
+// reported generation is for display; authentication and cleanup decisions use
+// authenticatedCredentialState.
+func (s *clientSession) credentialState() (generation int64, synced, capable bool) {
+	generation, _, synced, capable = s.credentialStateSnapshot()
+	return generation, synced, capable
+}
+
+// authenticatedCredentialState returns the generation whose control token
+// authenticated the stream plus the session flags.
+func (s *clientSession) authenticatedCredentialState() (generation int64, synced, capable bool) {
+	_, generation, synced, capable = s.credentialStateSnapshot()
+	return generation, synced, capable
 }
 
 // setCredentialWait records the generation a credential push is waiting for.
@@ -304,20 +336,58 @@ func (s *clientSession) write(msg any) error {
 	return s.writeWithDeadline(msg, time.Time{})
 }
 
+// lockWrite waits for the frame gate until deadline. The wait is bounded by
+// the same absolute deadline as the write, so a credential push cannot consume
+// its whole budget waiting behind another writer.
+func (s *clientSession) lockWrite(deadline time.Time) bool {
+	if s == nil {
+		return false
+	}
+	s.writeGateOnce.Do(func() { s.writeGate = make(chan struct{}, 1) })
+	if deadline.IsZero() {
+		deadline = time.Now().Add(10 * time.Second)
+	}
+	wait := time.Until(deadline)
+	if wait <= 0 {
+		return false
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case s.writeGate <- struct{}{}:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+// unlockWrite releases the frame gate.
+func (s *clientSession) unlockWrite() {
+	if s == nil || s.writeGate == nil {
+		return
+	}
+	<-s.writeGate
+}
+
 // writeWithDeadline sends one control frame with an absolute write deadline.
 // A zero deadline means the default 10s budget. Credential pushes use the same
-// deadline for the write and the ack wait so a client that stops reading cannot
-// extend the rotation past its budget.
+// deadline for lock acquisition, the write, and the ack wait so a client that
+// stops reading cannot extend the rotation past its budget.
 func (s *clientSession) writeWithDeadline(msg any, deadline time.Time) error {
 	if s.conn == nil {
 		return fmt.Errorf("control stream is closed")
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
 	if deadline.IsZero() {
 		deadline = time.Now().Add(10 * time.Second)
 	}
+	if !s.lockWrite(deadline) {
+		return context.DeadlineExceeded
+	}
+	defer s.unlockWrite()
+	if !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+
 	_ = s.conn.SetWriteDeadline(deadline)
 	defer func() { _ = s.conn.SetWriteDeadline(time.Time{}) }()
 	return control.WriteMessage(s.conn, msg)
@@ -427,16 +497,25 @@ func (m *mappingManager) register(sess *clientSession, mappings []config.Mapping
 	return results
 }
 
-// update applies a new mapping list from the client. It reports whether the
-// update was accepted and whether the control stream must be closed so the
-// client reconnects and re-registers its authoritative configuration. A
-// rejected bind or malformed list requires a resync; a stale revision does not,
-// because the client can simply learn the server's revision from the ack.
+// update applies a new mapping list from the client. A nil list means an empty
+// mapping list; callers that only change metadata use updateWithName.
 func (m *mappingManager) update(sess *clientSession, revision int64, mappings []config.Mapping) ([]control.Result, bool, bool) {
+	return m.updateWithName(sess, revision, mappings, "")
+}
+
+// updateWithName applies a mapping list and/or a display-name change. A nil
+// mapping list is metadata-only only when name is non-empty; otherwise it is an
+// explicit empty list, matching old clients that send `mappings:null` to clear
+// their last mapping. It reports whether the update was accepted and whether
+// the control stream must be closed so the client reconnects and re-registers
+// its authoritative configuration. A rejected bind or malformed list requires
+// a resync; a stale revision does not, because the client can simply learn the
+// server's revision from the ack.
+func (m *mappingManager) updateWithName(sess *clientSession, revision int64, mappings []config.Mapping, name string) ([]control.Result, bool, bool) {
 	now := time.Now()
 
 	m.mu.Lock()
-	results, accepted, resync := m.updateLocked(sess, revision, mappings, now)
+	results, accepted, resync := m.updateLocked(sess, revision, mappings, name, now)
 	m.mu.Unlock()
 
 	if accepted {
@@ -451,17 +530,24 @@ func (m *mappingManager) update(sess *clientSession, revision int64, mappings []
 // the new listeners and asks the caller to force a control-stream resync: the
 // client's full configuration is authoritative, and its reconnect closes
 // removed or disabled listeners that a wholesale rollback would leave running.
-func (m *mappingManager) updateLocked(sess *clientSession, revision int64, mappings []config.Mapping, now time.Time) ([]control.Result, bool, bool) {
+func (m *mappingManager) updateLocked(sess *clientSession, revision int64, mappings []config.Mapping, name string, now time.Time) ([]control.Result, bool, bool) {
 	if m.sessions[sess.id] != sess {
 		return nil, false, false
 	}
 	if revision <= sess.appliedRevision {
 		return []control.Result{{Error: string(control.CodeStaleRevision)}}, false, false
 	}
+	if mappings == nil && name == "" {
+		// Old clients send mappings:null when their mapping slice is empty.
+		// Without a name there is no metadata to change, so this is an
+		// explicit request to clear every mapping.
+		mappings = []config.Mapping{}
+	}
 	if mappings == nil {
-		// An absent mapping list means the update only changes metadata such
-		// as the display name. Keep the live mapping set untouched; an
-		// explicit empty slice still means "clear all mappings".
+		// An absent mapping list with a name means the update only changes
+		// metadata. Keep the live mapping set untouched; an explicit empty
+		// slice still means "clear all mappings".
+		sess.name = name
 		sess.revision = revision
 		sess.appliedRevision = revision
 		sess.lastSeen = now
@@ -592,6 +678,9 @@ func (m *mappingManager) updateLocked(sess *clientSession, revision int64, mappi
 
 	sess.mappings = newMappings
 	sess.order = newOrder
+	if name != "" {
+		sess.name = name
+	}
 	sess.revision = revision
 	sess.appliedRevision = revision
 	sess.lastSeen = now
@@ -617,24 +706,6 @@ func (m *mappingManager) currentResultsLocked(sess *clientSession) []control.Res
 		})
 	}
 	return results
-}
-
-// rename updates a live session's display name and persists it for offline
-// views. A session that has already been replaced is left untouched.
-func (m *mappingManager) rename(sess *clientSession, name string) {
-	now := time.Now()
-
-	m.mu.Lock()
-	if m.sessions[sess.id] != sess {
-		m.mu.Unlock()
-		return
-	}
-	sess.name = name
-	sess.lastSeen = now
-	m.persistLocked(sess, now)
-	m.mu.Unlock()
-
-	m.saveState()
 }
 
 // mappingPortUnchanged reports whether next keeps the port currently bound for

@@ -146,6 +146,13 @@ func (c *Client) UpdateWebConfig(username, passwordHash string) error {
 // configuration is written before memory is updated, and a live connection is
 // closed so the reconnect loop uses the new pair.
 func (c *Client) RotateLocalCredentials(generation int64, auth, controlToken string) error {
+	// Mirror the server's rotation minimum. A shorter password would be
+	// persisted locally and then rejected when the server rotates or the
+	// client reconnects.
+	if len(auth) < 8 {
+		return fmt.Errorf("auth password must be at least 8 bytes")
+	}
+
 	c.configMu.Lock()
 
 	current := c.cfg.Credentials.Generation
@@ -278,7 +285,9 @@ func (c *Client) sendUpdateWithName(name string) {
 		name = c.cfg.Client.Name
 	}
 	// Copy into a non-nil slice even when empty: an explicit empty list clears
-	// all server mappings, while a nil list means "no mapping change".
+	// all server mappings. A nil list would only mean "no mapping change" when
+	// a name is present; without one the server treats it as an empty list for
+	// compatibility with old clients.
 	mappings := make([]config.Mapping, len(c.cfg.Mappings))
 	copy(mappings, c.cfg.Mappings)
 	c.configMu.Unlock()

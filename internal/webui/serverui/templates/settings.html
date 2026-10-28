@@ -188,8 +188,8 @@
         </div>
         <div class="field">
           <label class="field-label" for="ports-offline-reserve">离线预留（秒）</label>
-          <input class="input" id="ports-offline-reserve" type="number" min="0" step="1" value="{{.Settings.Ports.OfflineReserveSeconds}}">
-          <span class="field-hint">当前：{{duration .Settings.Ports.OfflineReserve}}</span>
+          <input class="input" id="ports-offline-reserve" type="number" min="1" step="1" value="{{.Settings.Ports.OfflineReserveSeconds}}">
+          <span class="field-hint">当前：{{duration .Settings.Ports.OfflineReserve}}（至少 1 秒）</span>
         </div>
       </div>
       <div class="field">

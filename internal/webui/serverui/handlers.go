@@ -639,8 +639,8 @@ func (s *Server) handleUpdatePorts(w http.ResponseWriter, r *http.Request) {
 	if !s.confirmCurrentPassword(w, r, request.secret()) {
 		return
 	}
-	if request.OfflineReserveSeconds < 0 {
-		writeJSONErrorCode(w, http.StatusBadRequest, "invalid_ports", "离线预留时间不能为负数")
+	if request.OfflineReserveSeconds < 1 {
+		writeJSONErrorCode(w, http.StatusBadRequest, "invalid_ports", "离线预留时间至少需要 1 秒")
 		return
 	}
 	if err := s.api.UpdatePorts(request.Allow, request.Deny, request.AutoRange, time.Duration(request.OfflineReserveSeconds)*time.Second); err != nil {

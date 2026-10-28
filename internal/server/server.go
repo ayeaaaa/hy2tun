@@ -353,8 +353,8 @@ func (s *Server) UpdatePorts(allow, deny []string, autoRange string, offlineRese
 	if s == nil {
 		return fmt.Errorf("update ports: server is nil")
 	}
-	if offlineReserve < 0 {
-		return fmt.Errorf("update ports: offline reserve must not be negative")
+	if offlineReserve < time.Second {
+		return fmt.Errorf("update ports: offline reserve must be at least 1 second")
 	}
 
 	s.settingsMu.Lock()

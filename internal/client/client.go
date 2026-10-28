@@ -498,11 +498,54 @@ func (c *Client) Settings() clientui.SettingsView {
 			{Label: "服务器地址", Value: cfg.Server},
 			{Label: "TLS", Value: tls},
 			{Label: "Obfs", Value: obfs},
+			{Label: "带宽上行", Value: formatClientBandwidth(cfg.Bandwidth.Up)},
+			{Label: "带宽下行", Value: formatClientBandwidth(cfg.Bandwidth.Down)},
+			{Label: "忽略客户端带宽", Value: yesNo(cfg.Bandwidth.IgnoreClient)},
+			{Label: "SOCKS5 代理", Value: proxyReadOnlyValue(cfg.Proxy.SOCKS5, cfg.Proxy.SOCKS5Auth)},
+			{Label: "HTTP 代理", Value: proxyReadOnlyValue(cfg.Proxy.HTTP, cfg.Proxy.HTTPAuth)},
 			{Label: "客户端 ID", Value: cfg.Client.ID},
 			{Label: "Web 监听", Value: webListen},
 			{Label: "配置文件", Value: configFile},
 		},
 	}
+}
+
+// formatClientBandwidth renders a configured HY2 bandwidth limit. Zero means
+// unlimited.
+func formatClientBandwidth(value config.Bandwidth) string {
+	bytes := uint64(value)
+	if bytes == 0 {
+		return "未限制"
+	}
+	switch {
+	case bytes%(1<<30) == 0:
+		return fmt.Sprintf("%d GiB/s", bytes>>30)
+	case bytes%(1<<20) == 0:
+		return fmt.Sprintf("%d MiB/s", bytes>>20)
+	case bytes%(1<<10) == 0:
+		return fmt.Sprintf("%d KiB/s", bytes>>10)
+	default:
+		return fmt.Sprintf("%d B/s", bytes)
+	}
+}
+
+// proxyReadOnlyValue reports a local proxy listener without exposing its
+// authentication secret.
+func proxyReadOnlyValue(listen, auth string) string {
+	if listen == "" {
+		return "未启用"
+	}
+	if auth != "" {
+		return listen + "（需要认证）"
+	}
+	return listen
+}
+
+func yesNo(value bool) string {
+	if value {
+		return "是"
+	}
+	return "否"
 }
 
 func maskClientSecret(value string) string {

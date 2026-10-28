@@ -66,7 +66,10 @@ type Result struct {
 
 // Update is sent by the client after a local configuration change. It carries
 // the complete mapping list and the client's new revision. A non-empty Name
-// renames the client; an empty Name leaves the current name unchanged.
+// renames the client; an empty Name leaves the current name unchanged. A nil
+// Mappings list means an explicit empty list unless Name is non-empty, in which
+// case it is a metadata-only update. Old clients send null when their mapping
+// slice is empty, so the name is what distinguishes a rename from a clear.
 type Update struct {
 	Type     string           `json:"type"`
 	Revision int64            `json:"revision"`

@@ -439,6 +439,80 @@ func TestRevokePreviousCredentialsClosesOnlyStaleSessions(t *testing.T) {
 	require.True(t, currentView.Online)
 }
 
+func TestRevokeClosesPreviousTokenSessionThatReportsCurrentGeneration(t *testing.T) {
+	srv, stop := startTestServer(t)
+	defer stop()
+
+	_, _, err := srv.RotateCredentials("new-password", "new-token-0123456789abcdef", "manual")
+	require.NoError(t, err)
+	// The client claims the current generation to try to look synced.
+	conn := openCredentialControl(t, srv, defaultTestAuth, defaultTestToken, "lying-client", 2, true)
+	defer conn.Close()
+
+	statuses := srv.CredentialStatuses()
+	require.Len(t, statuses, 1)
+	require.Equal(t, "lying-client", statuses[0].ClientID)
+	require.Equal(t, int64(2), statuses[0].Generation, "reported generation is still displayed")
+	require.Equal(t, "pending", statuses[0].Status, "authentication generation must decide sync state")
+
+	client, ok := srv.Client("lying-client")
+	require.True(t, ok)
+	require.Equal(t, int64(2), client.CredentialGeneration)
+	require.False(t, client.CredentialSynced)
+
+	require.NoError(t, srv.RevokePreviousCredentials())
+
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, err = control.ReadMessage(conn)
+	require.Error(t, err, "revoke must close a session authenticated with the previous token")
+	require.NoError(t, waitFor(t, 5*time.Second, func() bool {
+		view, ok := srv.Client("lying-client")
+		return !ok || !view.Online
+	}))
+}
+
+func TestRotateCredentialsBoundsWriteGateWait(t *testing.T) {
+	oldTimeout := credentialAckTimeout
+	credentialAckTimeout = 100 * time.Millisecond
+	defer func() { credentialAckTimeout = oldTimeout }()
+
+	srv, stop := startTestServer(t)
+	defer stop()
+
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	sess := &clientSession{
+		id:            "gate-blocked-client",
+		name:          "blocked",
+		conn:          serverConn,
+		ready:         make(chan struct{}),
+		done:          make(chan struct{}),
+		credentialAck: make(chan *control.CredentialAck, 1),
+	}
+	sess.markReady()
+	sess.setCredentialState(1, true, true)
+	srv.mappings.mu.Lock()
+	srv.mappings.sessions[sess.id] = sess
+	srv.mappings.mu.Unlock()
+
+	// Another writer holds the frame gate. The push must fail within its
+	// credential budget instead of waiting for the generic 10s write deadline.
+	require.True(t, sess.lockWrite(time.Now().Add(time.Hour)))
+	defer sess.unlockWrite()
+
+	start := time.Now()
+	gen, results, err := srv.RotateCredentials("new-password", "", "auto")
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	require.Equal(t, int64(2), gen)
+	require.Len(t, results, 1)
+	require.Equal(t, credentialStatusTimeout, results[0].Status)
+	require.Equal(t, "ack_timeout", results[0].Error)
+	require.Less(t, elapsed, time.Second, "rotation must not wait for the 10s generic write deadline")
+}
+
 func TestSecondRotationClosesSupersededSessions(t *testing.T) {
 	srv, stop := startTestServer(t)
 	defer stop()

@@ -57,7 +57,8 @@ func (h *controlHandler) Serve(conn net.Conn) {
 		return
 	}
 	set := h.server.currentCredentials()
-	if _, ok := set.AcceptControlToken(hello.Token); !ok {
+	authenticatedGeneration, ok := set.AcceptControlToken(hello.Token)
+	if !ok {
 		h.reject(conn, control.CodeUnauthorized)
 		return
 	}
@@ -82,7 +83,12 @@ func (h *controlHandler) Serve(conn net.Conn) {
 	if generation == 0 {
 		generation = 1
 	}
-	synced := set.Synced(generation)
+	if authenticatedGeneration < 1 {
+		authenticatedGeneration = 1
+	}
+	// Sync state follows the generation that actually authenticated the
+	// control token, not the generation the client claims.
+	synced := set.Synced(authenticatedGeneration)
 	capable := hasCapability(hello.Capabilities, control.CapabilityCredentialUpdate)
 
 	sess := &clientSession{
@@ -96,15 +102,34 @@ func (h *controlHandler) Serve(conn net.Conn) {
 		ready:           make(chan struct{}),
 		done:            make(chan struct{}),
 	}
-	sess.setCredentialState(generation, synced, capable)
+	sess.setCredentialStateFor(generation, authenticatedGeneration, synced, capable)
 	results := h.server.mappings.register(sess, hello.Mappings)
+
+	// Registration races revoke and rotation sweeps: a hello that authenticated
+	// just before the credential set changed could otherwise register after the
+	// sweep and keep an old token alive. Re-check the token against the current
+	// set and refresh the authenticated state before acknowledging.
+	current := h.server.currentCredentials()
+	if current == nil {
+		h.server.mappings.detach(sess)
+		return
+	}
+	authenticatedGeneration, ok = current.AcceptControlToken(hello.Token)
+	if !ok {
+		h.server.mappings.detach(sess)
+		return
+	}
+	if authenticatedGeneration < 1 {
+		authenticatedGeneration = 1
+	}
+	sess.setCredentialStateFor(generation, authenticatedGeneration, current.Synced(authenticatedGeneration), capable)
 
 	ack := &control.HelloAck{
 		Type:                 control.TypeHelloAck,
 		OK:                   true,
 		ServerVersion:        version.Version,
-		CredentialGeneration: set.Generation,
-		CredentialSynced:     synced,
+		CredentialGeneration: current.Generation,
+		CredentialSynced:     current.Synced(authenticatedGeneration),
 		Results:              results,
 	}
 	if err := sess.write(ack); err != nil {
@@ -213,13 +238,10 @@ func (h *controlHandler) loop(sess *clientSession) {
 // an older list over a newer one.
 func (h *controlHandler) handleUpdate(sess *clientSession, message *control.Update) {
 	sess.controlMu.Lock()
-	results, accepted, resync := h.server.mappings.update(sess, message.Revision, message.Mappings)
-	if accepted && message.Name != "" {
-		// A rename is a separate metadata write. A nil mapping list was left
-		// untouched by updateLocked, while an explicit list was already
-		// applied above.
-		h.server.mappings.rename(sess, message.Name)
-	}
+	// A non-empty name makes a nil mapping list metadata-only. A nil list with
+	// no name is an explicit clear from an old client whose mapping slice is
+	// empty.
+	results, accepted, resync := h.server.mappings.updateWithName(sess, message.Revision, message.Mappings, message.Name)
 	ack := &control.UpdateAck{
 		Type:     control.TypeUpdateAck,
 		Revision: h.server.mappings.sessionRevision(sess),

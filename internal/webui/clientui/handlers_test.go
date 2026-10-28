@@ -702,7 +702,7 @@ func TestClientWebRotateCredentials(t *testing.T) {
 	cookie := resp.Cookies()[0]
 	resp.Body.Close()
 
-	body := `{"current_password":"pw","generation":2,"auth":"new","control_token":"new-token"}`
+	body := `{"current_password":"pw","generation":2,"auth":"new-auth","control_token":"new-token-0123456789abcdef"}`
 	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/settings/credentials", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Requested-With", "hy2tun")
@@ -731,6 +731,22 @@ func TestClientWebRotateCredentials(t *testing.T) {
 	require.False(t, settings.Credentials.Synced)
 	require.Equal(t, MaskedSecret, settings.Credentials.CurrentAuthMasked)
 	require.Equal(t, MaskedSecret, settings.Credentials.CurrentControlTokenMasked)
+}
+
+func TestClientWebRotateCredentialsRejectsShortAuth(t *testing.T) {
+	api := &fakeClientAPI{}
+	_, ts := newTestClientWeb(t, api)
+	cookie := loginClientWeb(t, ts)
+
+	body := `{"current_password":"pw","generation":2,"auth":"short","control_token":"new-token-0123456789abcdef"}`
+	resp := doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/credentials", body, cookie, map[string]string{
+		"Content-Type":     "application/json",
+		"X-Requested-With": "hy2tun",
+		"Origin":           ts.URL,
+	})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Contains(t, readClientBody(t, resp), "weak_auth")
+	require.Zero(t, api.rotation.Generation, "the handler must reject before writing config")
 }
 
 func TestClientWebSettingsJSONAndPage(t *testing.T) {

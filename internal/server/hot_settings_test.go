@@ -56,6 +56,21 @@ func TestHotOfflineReserve(t *testing.T) {
 	require.False(t, srv.store.Reserved("client-offline", 25022, now.Add(3*time.Hour)))
 }
 
+func TestUpdatePortsRejectsZeroOfflineReserve(t *testing.T) {
+	srv, stop := startTestServer(t)
+	defer stop()
+
+	before := srv.currentConfig()
+	beforeReserve := time.Duration(before.Ports.OfflineReserve)
+
+	err := srv.UpdatePorts(nil, nil, "25000-25099", 0)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "at least 1 second")
+
+	// A zero request must never be silently replaced with the 24h default.
+	require.Equal(t, beforeReserve, time.Duration(srv.currentConfig().Ports.OfflineReserve))
+}
+
 func TestUpdatePortsInvalidRangeKeepsRuntime(t *testing.T) {
 	srv, stop := startTestServer(t)
 	defer stop()

@@ -42,6 +42,18 @@ const (
 // ErrWeakSessionKey reports a session signing key shorter than 32 bytes.
 var ErrWeakSessionKey = errors.New("shared: session key must be at least 32 bytes")
 
+// ErrStaleAdmin reports a login whose verified administrator credentials were
+// replaced before the session could be issued. The caller must not issue a
+// cookie; the login raced an administrator reset.
+var ErrStaleAdmin = errors.New("shared: administrator credentials changed during login")
+
+// AdminCredential identifies the administrator snapshot a login verified. Issue
+// rejects the session when the live credentials or epoch no longer match.
+type AdminCredential struct {
+	PasswordHash string
+	Epoch        uint64
+}
+
 // SessionManager issues and validates HMAC-SHA256 signed session cookies.
 // Issued session IDs are kept in memory so logout revokes a captured cookie
 // immediately. Restarting the process invalidates all sessions.
@@ -55,6 +67,9 @@ type SessionManager struct {
 	username     string
 	passwordHash string
 	adminSet     bool
+	// adminEpoch increments on every UpdateAdmin. Issue checks it so a login
+	// that verified the old hash cannot create a session after a reset.
+	adminEpoch uint64
 }
 
 // NewSessionManager returns a manager using secret. The secret must be at
@@ -94,6 +109,7 @@ func (m *SessionManager) UpdateAdmin(username, passwordHash string) {
 	m.username = username
 	m.passwordHash = passwordHash
 	m.adminSet = true
+	m.adminEpoch++
 	m.sessions = make(map[string]time.Time)
 	m.mu.Unlock()
 }
@@ -140,20 +156,33 @@ func (m *SessionManager) AdminUsername() string {
 // login handlers keep using their own static fields. The hash is only intended
 // for the login handler; it must never be exposed by an API.
 func (m *SessionManager) Admin() (username, passwordHash string, ok bool) {
+	username, passwordHash, _, ok = m.AdminWithEpoch()
+	return username, passwordHash, ok
+}
+
+// AdminWithEpoch returns the current administrator username, bcrypt hash, and
+// credential epoch. The epoch must be passed back to Issue so a login that
+// verified an old hash cannot create a session after UpdateAdmin.
+func (m *SessionManager) AdminWithEpoch() (username, passwordHash string, epoch uint64, ok bool) {
 	if m == nil {
-		return "", "", false
+		return "", "", 0, false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.adminSet {
-		return "", "", false
+		return "", "", 0, false
 	}
-	return m.username, m.passwordHash, true
+	return m.username, m.passwordHash, m.adminEpoch, true
 }
 
 // Issue signs a session cookie for username and writes it to w. The random
 // session ID is recorded in memory so logout can revoke it.
-func (m *SessionManager) Issue(w http.ResponseWriter, r *http.Request, username string) error {
+//
+// The optional verified credential binds the cookie to the administrator
+// snapshot the caller checked. If UpdateAdmin replaced the credentials or
+// incremented the epoch while the password hash was being compared, Issue
+// returns ErrStaleAdmin and writes no cookie.
+func (m *SessionManager) Issue(w http.ResponseWriter, r *http.Request, username string, verified ...AdminCredential) error {
 	if m == nil {
 		return errors.New("shared: session manager is nil")
 	}
@@ -183,6 +212,16 @@ func (m *SessionManager) Issue(w http.ResponseWriter, r *http.Request, username 
 	signature := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 
 	m.mu.Lock()
+	if len(verified) > 0 && m.adminSet {
+		credential := verified[0]
+		if credential.Epoch == 0 ||
+			credential.Epoch != m.adminEpoch ||
+			credential.PasswordHash != m.passwordHash ||
+			username != m.username {
+			m.mu.Unlock()
+			return ErrStaleAdmin
+		}
+	}
 	if m.sessions == nil {
 		m.sessions = make(map[string]time.Time)
 	}
@@ -598,7 +637,7 @@ func (h *LoginHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, http.StatusInternalServerError, "login is not configured")
 		return
 	}
-	adminUser, adminHash := h.adminCredentials()
+	adminUser, adminHash, adminEpoch := h.adminCredentials()
 	if adminHash == "" {
 		h.fail(w, r, http.StatusInternalServerError, "login is not configured")
 		return
@@ -620,7 +659,15 @@ func (h *LoginHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.Limiter != nil {
 		h.Limiter.Success(ip)
 	}
-	if err := h.Sessions.Issue(w, r, adminUser); err != nil {
+	if err := h.Sessions.Issue(w, r, adminUser, AdminCredential{
+		PasswordHash: adminHash,
+		Epoch:        adminEpoch,
+	}); err != nil {
+		if errors.Is(err, ErrStaleAdmin) {
+			h.log().Debug("web login raced an administrator reset", "ip", ip)
+			h.fail(w, r, http.StatusUnauthorized, "invalid credentials")
+			return
+		}
 		h.log().Error("issue web session", "error", err)
 		h.fail(w, r, http.StatusInternalServerError, "could not create session")
 		return
@@ -633,17 +680,18 @@ func (h *LoginHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// adminCredentials returns the live administrator credentials. A session
-// manager with a configured admin takes precedence so hot web-admin updates
-// apply immediately; the handler fields remain a fallback for embedded users
-// that only configure the handler.
-func (h *LoginHandler) adminCredentials() (string, string) {
+// adminCredentials returns the live administrator credentials and their epoch.
+// A session manager with a configured admin takes precedence so hot web-admin
+// updates apply immediately; the handler fields remain a fallback for embedded
+// users that only configure the handler (epoch zero).
+func (h *LoginHandler) adminCredentials() (string, string, uint64) {
 	if h != nil && h.Sessions != nil {
-		if username, hash, ok := h.Sessions.Admin(); ok {
-			return username, hash
+		if username, hash, epoch, ok := h.Sessions.AdminWithEpoch(); ok {
+			return username, hash, epoch
 		}
 	}
-	return h.staticAdmin()
+	username, hash := h.staticAdmin()
+	return username, hash, 0
 }
 
 func (h *LoginHandler) credentials(r *http.Request) (string, string, error) {

@@ -1380,6 +1380,13 @@ func TestServerSettingsPortsAndTrustProxy(t *testing.T) {
 	require.Equal(t, "20000-29999", api.updatePortsAuto)
 	require.Equal(t, 2*time.Hour, api.updatePortsReserve)
 
+	// Zero is rejected instead of silently becoming the 24h default.
+	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/ports",
+		`{"current_password":"pw","allow":[],"deny":[],"auto_range":"20000-29999","offline_reserve_seconds":0}`, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	resp.Body.Close()
+	require.Equal(t, 1, api.updatePortsCalls)
+
 	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/ports",
 		`{"current_password":"wrong","allow":[],"deny":[],"auto_range":"20000-29999","offline_reserve_seconds":60}`, cookie, csrfHeaders(ts.URL))
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)

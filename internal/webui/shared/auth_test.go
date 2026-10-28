@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -650,6 +651,86 @@ func TestUpdateAdminRevokesSessionsWithoutExplicitRevoke(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
 	req.AddCookie(cookie)
 	require.False(t, manager.Valid(req), "UpdateAdmin must revoke every existing session")
+}
+
+func TestSessionManagerIssueRejectsLoginVerifiedAgainstResetCredentials(t *testing.T) {
+	manager, err := NewSessionManager(testSecret(), time.Hour)
+	require.NoError(t, err)
+
+	oldHash, err := bcrypt.GenerateFromPassword([]byte("old-password"), bcrypt.MinCost)
+	require.NoError(t, err)
+	manager.UpdateAdmin("admin", string(oldHash))
+
+	username, verifiedHash, epoch, ok := manager.AdminWithEpoch()
+	require.True(t, ok)
+	require.NotZero(t, epoch)
+
+	// A reset keeps the same username but replaces the hash. A login that
+	// already copied the old hash must not create a session after this.
+	newHash, err := bcrypt.GenerateFromPassword([]byte("new-password"), bcrypt.MinCost)
+	require.NoError(t, err)
+	manager.UpdateAdmin(username, string(newHash))
+
+	recorder := httptest.NewRecorder()
+	err = manager.Issue(recorder, httptest.NewRequest(http.MethodPost, "http://example.com/login", nil), username,
+		AdminCredential{PasswordHash: verifiedHash, Epoch: epoch})
+	require.ErrorIs(t, err, ErrStaleAdmin)
+	require.Empty(t, recorder.Result().Cookies())
+
+	// The current snapshot can still issue a session.
+	username, verifiedHash, epoch, ok = manager.AdminWithEpoch()
+	require.True(t, ok)
+	recorder = httptest.NewRecorder()
+	require.NoError(t, manager.Issue(recorder, httptest.NewRequest(http.MethodPost, "http://example.com/login", nil), username,
+		AdminCredential{PasswordHash: verifiedHash, Epoch: epoch}))
+	require.Len(t, recorder.Result().Cookies(), 1)
+}
+
+func TestSessionManagerConcurrentLoginResetRejectsStaleSession(t *testing.T) {
+	manager, err := NewSessionManager(testSecret(), time.Hour)
+	require.NoError(t, err)
+
+	oldHash, err := bcrypt.GenerateFromPassword([]byte("old-password"), bcrypt.MinCost)
+	require.NoError(t, err)
+	newHash, err := bcrypt.GenerateFromPassword([]byte("new-password"), bcrypt.MinCost)
+	require.NoError(t, err)
+
+	for i := 0; i < 25; i++ {
+		manager.UpdateAdmin("admin", string(oldHash))
+		username, verifiedHash, epoch, ok := manager.AdminWithEpoch()
+		require.True(t, ok)
+
+		recorder := httptest.NewRecorder()
+		var (
+			wg       sync.WaitGroup
+			issueErr error
+		)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			manager.UpdateAdmin(username, string(newHash))
+		}()
+		go func() {
+			defer wg.Done()
+			issueErr = manager.Issue(recorder, httptest.NewRequest(http.MethodPost, "http://example.com/login", nil), username,
+				AdminCredential{PasswordHash: verifiedHash, Epoch: epoch})
+		}()
+		wg.Wait()
+
+		if issueErr != nil {
+			require.ErrorIs(t, issueErr, ErrStaleAdmin)
+			require.Empty(t, recorder.Result().Cookies())
+			continue
+		}
+
+		// The issue won the race but UpdateAdmin revoked every session, so the
+		// cookie must no longer validate.
+		cookies := recorder.Result().Cookies()
+		require.Len(t, cookies, 1)
+		req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+		req.AddCookie(cookies[0])
+		require.False(t, manager.Valid(req), "a session issued before the reset must be revoked")
+	}
 }
 
 func TestLoginHandlerUsesUpdatedAdminCredentials(t *testing.T) {

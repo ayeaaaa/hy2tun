@@ -203,8 +203,8 @@ func (s *Server) CredentialsSnapshot() *credentials.Set {
 }
 
 // CredentialStatuses returns the credential state of every online client.
-// Generation is the client's reported generation; Status is one of synced,
-// pending, unsupported, or unknown.
+// Generation is the client's reported generation for display; Status is based
+// on the generation whose control token authenticated the stream.
 func (s *Server) CredentialStatuses() []view.CredentialResult {
 	if s == nil || s.mappings == nil {
 		return nil
@@ -213,23 +213,23 @@ func (s *Server) CredentialStatuses() []view.CredentialResult {
 	sessions := s.mappings.sessionSnapshot()
 	out := make([]view.CredentialResult, 0, len(sessions))
 	for _, entry := range sessions {
-		generation, synced, capable := entry.sess.credentialState()
+		reported, authenticated, synced, capable := entry.sess.credentialStateSnapshot()
 		status := credentialStatusUnknown
 		switch {
-		case current != nil && generation == current.Generation && synced:
+		case current != nil && authenticated == current.Generation && synced:
 			status = credentialStatusSynced
-		case current != nil && generation == current.Generation:
+		case current != nil && authenticated == current.Generation:
 			// The generation matches but the session has not confirmed it.
 			status = credentialStatusPending
 		case !capable:
 			status = credentialStatusUnsupported
-		case current != nil && current.PreviousGeneration > 0 && generation == current.PreviousGeneration:
+		case current != nil && current.PreviousGeneration > 0 && authenticated == current.PreviousGeneration:
 			status = credentialStatusPending
 		}
 		out = append(out, view.CredentialResult{
 			ClientID:   entry.id,
 			Name:       entry.name,
-			Generation: generation,
+			Generation: reported,
 			Status:     status,
 		})
 	}
@@ -237,44 +237,47 @@ func (s *Server) CredentialStatuses() []view.CredentialResult {
 	return out
 }
 
-// closeSupersededSessions disconnects sessions whose generation is neither the
-// new current nor the new previous generation.
+// closeSupersededSessions disconnects sessions whose authenticated generation
+// is neither the new current nor the new previous generation. The reported
+// generation is display-only and cannot keep an old token alive.
 func (s *Server) closeSupersededSessions(currentGeneration, previousGeneration int64) {
 	if s == nil || s.mappings == nil {
 		return
 	}
 	for _, entry := range s.mappings.sessionSnapshot() {
-		generation, _, _ := entry.sess.credentialState()
+		generation, _, _ := entry.sess.authenticatedCredentialState()
 		if generation != currentGeneration && generation != previousGeneration {
 			entry.sess.abortStream()
 		}
 	}
 }
 
-// closeSessionsNotCurrent disconnects every session that is not on the current
-// generation. Revoke uses it because the previous generation is gone.
+// closeSessionsNotCurrent disconnects every session whose authenticated
+// generation is not current. Revoke uses it because the previous generation is
+// gone.
 func (s *Server) closeSessionsNotCurrent(currentGeneration int64) {
 	if s == nil || s.mappings == nil {
 		return
 	}
 	for _, entry := range s.mappings.sessionSnapshot() {
-		generation, _, _ := entry.sess.credentialState()
+		generation, _, _ := entry.sess.authenticatedCredentialState()
 		if generation != currentGeneration {
 			entry.sess.abortStream()
 		}
 	}
 }
 
-// refreshCredentialSync recomputes the synced flag from each session's reported
-// generation. It runs after a rotation so views and status results do not keep
+// refreshCredentialSync recomputes the synced flag from each session's
+// authenticated generation while preserving the reported generation for
+// display. It runs after a rotation so views and status results do not keep
 // the Hello-time value.
 func (s *Server) refreshCredentialSync(currentGeneration int64) {
 	if s == nil || s.mappings == nil {
 		return
 	}
 	for _, entry := range s.mappings.sessionSnapshot() {
-		generation, _, capable := entry.sess.credentialState()
-		entry.sess.setCredentialState(generation, generation == currentGeneration, capable)
+		reported, authenticated, _, capable := entry.sess.credentialStateSnapshot()
+		entry.sess.setCredentialStateFor(reported, authenticated, authenticated == currentGeneration, capable)
 	}
 }
 
@@ -296,7 +299,7 @@ func (s *Server) syncCredentials(generation, previousGeneration int64, auth, con
 			Generation: generation,
 			Status:     credentialStatusPending,
 		}
-		sessionGeneration, synced, capable := entry.sess.credentialState()
+		_, sessionGeneration, synced, capable := entry.sess.credentialStateSnapshot()
 
 		switch {
 		case sessionGeneration == generation && synced:
@@ -381,7 +384,7 @@ func (s *Server) pushCredentials(sess *clientSession, clientID, name string, gen
 			}
 			if ack.OK {
 				_, _, capable := sess.credentialState()
-				sess.setCredentialState(generation, true, capable)
+				sess.setCredentialStateFor(generation, generation, true, capable)
 				result.Status = credentialStatusSynced
 				// The client has the new pair on disk. Close the old control
 				// stream so it reconnects with the new credentials instead of

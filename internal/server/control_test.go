@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -434,6 +435,120 @@ func TestUpdateNameWithExplicitEmptyMappingsClearsMappings(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "after", client.Name)
 	require.Empty(t, client.Mappings)
+}
+
+func TestUpdateNilMappingsWithoutNameClearsLastMapping(t *testing.T) {
+	srv, stop := startTestServer(t)
+	defer stop()
+
+	hy := newHY2Client(t, srv, "pw", nil)
+	conn, err := hy.TCP("_hy2tun_control_:0")
+	require.NoError(t, err)
+	defer conn.Close()
+
+	require.NoError(t, control.WriteMessage(conn, &control.Hello{
+		Type:     control.TypeHello,
+		Protocol: control.ProtocolVersion,
+		Token:    "0123456789abcdef0123456789abcdef",
+		ClientID: "legacy-clear-client",
+		Name:     "before",
+		Version:  "test",
+		Revision: 0,
+		Mappings: []config.Mapping{
+			{ID: "last", Type: "tcp", RemotePort: 0, LocalAddr: "127.0.0.1:9001", Enabled: true},
+		},
+	}))
+	msg, err := control.ReadMessage(conn)
+	require.NoError(t, err)
+	helloAck, ok := msg.(*control.HelloAck)
+	require.True(t, ok)
+	require.Len(t, helloAck.Results, 1)
+	require.True(t, helloAck.Results[0].OK)
+	assignedPort := helloAck.Results[0].AssignedPort
+	require.NotZero(t, assignedPort)
+
+	// Old clients marshal an empty mapping slice as mappings:null. With no
+	// name this is an explicit clear, not a metadata-only update.
+	require.NoError(t, control.WriteMessage(conn, &control.Update{
+		Type:     control.TypeUpdate,
+		Revision: 1,
+		Mappings: nil,
+	}))
+	msg, err = control.ReadMessage(conn)
+	require.NoError(t, err)
+	ack, ok := msg.(*control.UpdateAck)
+	require.True(t, ok)
+	require.Equal(t, int64(1), ack.Revision)
+	require.Empty(t, ack.Results)
+
+	client, ok := srv.Client("legacy-clear-client")
+	require.True(t, ok)
+	require.Empty(t, client.Mappings)
+	require.Empty(t, srv.store.Snapshot().Clients["legacy-clear-client"].Mappings)
+
+	// The public listener must be closed, not merely removed from the view.
+	_, err = net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", assignedPort), 200*time.Millisecond)
+	require.Error(t, err, "clearing the last mapping must close its public listener")
+}
+
+func TestRegistrationRacingRevokeIsRejected(t *testing.T) {
+	srv, stop := startTestServer(t)
+	defer stop()
+
+	_, _, err := srv.RotateCredentials("new-password", "new-token-0123456789abcdef", "manual")
+	require.NoError(t, err)
+
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	// Hold the mapping lock so registration cannot finish between
+	// authentication and the revoke sweep.
+	srv.mappings.mu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			srv.mappings.mu.Unlock()
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		newControlHandler(srv, srv.log).Serve(serverConn)
+	}()
+
+	// net.Pipe writes complete only after the handler reads the hello, so this
+	// returns once authentication is underway and registration is blocked.
+	require.NoError(t, control.WriteMessage(clientConn, &control.Hello{
+		Type:                 control.TypeHello,
+		Protocol:             control.ProtocolVersion,
+		Token:                defaultTestToken,
+		ClientID:             "racing-client",
+		Name:                 "racing",
+		Version:              "test",
+		Revision:             0,
+		CredentialGeneration: 2,
+	}))
+	time.Sleep(20 * time.Millisecond)
+
+	revokeDone := make(chan error, 1)
+	go func() { revokeDone <- srv.RevokePreviousCredentials() }()
+	require.NoError(t, waitFor(t, 5*time.Second, func() bool {
+		return srv.CredentialsSnapshot().PreviousGeneration == 0
+	}))
+
+	srv.mappings.mu.Unlock()
+	locked = false
+	require.NoError(t, <-revokeDone)
+
+	_ = clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, err = control.ReadMessage(clientConn)
+	require.Error(t, err, "a hello racing revoke must not receive a hello_ack")
+	require.NoError(t, waitFor(t, 5*time.Second, func() bool {
+		view, ok := srv.Client("racing-client")
+		return !ok || !view.Online
+	}))
+	<-done
 }
 
 func TestServerViews(t *testing.T) {

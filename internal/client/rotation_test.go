@@ -224,6 +224,25 @@ func TestClientRotateLocalCredentialsPersistsAndRejectsStale(t *testing.T) {
 	require.False(t, status.CredentialSynced)
 }
 
+func TestClientRotateLocalCredentialsRejectsShortAuthBeforeWriting(t *testing.T) {
+	cfgPath := writeTempClientConfig(t, 1)
+	cl, err := New(loadClientConfig(t, cfgPath), slog.Default())
+	require.NoError(t, err)
+	defer cl.Close()
+
+	before, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+
+	err = cl.RotateLocalCredentials(2, "short", "new-token-0123456789abcdef")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "at least 8 bytes")
+
+	after, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	require.Equal(t, before, after, "a rejected rotation must not rewrite the config")
+	require.Equal(t, int64(1), cl.CredentialsSnapshot().Generation)
+}
+
 // TestClientRotateDuringConnectAbandonsStaleConnection covers the window where
 // runOnce has already built its HY2 data-plane config with the old auth but has
 // not yet installed the connection. A rotation in that window must not be lost:

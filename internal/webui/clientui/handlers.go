@@ -655,6 +655,10 @@ func (s *Server) handleRotateCredentials(w http.ResponseWriter, r *http.Request)
 		writeJSONErrorCode(w, http.StatusBadRequest, "auth_required", "HY2 密码不能为空")
 		return
 	}
+	if len(request.Auth) < 8 {
+		writeJSONErrorCode(w, http.StatusBadRequest, "weak_auth", "HY2 密码至少需要 8 个字节")
+		return
+	}
 	if request.ControlToken == "" {
 		writeJSONErrorCode(w, http.StatusBadRequest, "control_token_required", "control token 不能为空")
 		return

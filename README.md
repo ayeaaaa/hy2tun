@@ -378,7 +378,7 @@ Task Scheduler instructions and firewall notes.
 | `ports.allow` | Ports or ranges clients may request. Empty means all free ports. |
 | `ports.deny` | Ports or ranges that are always rejected. Deny wins over allow. |
 | `ports.auto_range` | Range used for `remote_port: 0` when `allow` is empty. Default `20000-29999`. |
-| `ports.offline_reserve` | How long an offline client keeps a soft reservation. Default `24h`. |
+| `ports.offline_reserve` | How long an offline client keeps a soft reservation. Default `24h`. Hot updates require at least `1s`; `0` is rejected. |
 | `web.listen` | Management address. The example uses `127.0.0.1:7500`. |
 | `web.username` | Console username. Default `admin` when `web.listen` is set. |
 | `web.password_hash` | bcrypt hash. Empty generates a password on first start. |
@@ -519,7 +519,7 @@ minute per client IP. Mutations also require the CSRF header and same-origin
 | --- | --- |
 | `web.username`, `web.password_hash` | Yes. The password can only be reset, never shown. Saving revokes every web session. |
 | `auth.password`, `control.token` | Yes, when `auth.type: password`. Rotation only; see below. |
-| `ports.allow`, `ports.deny`, `ports.auto_range`, `ports.offline_reserve` | Yes. Mappings already running are not closed when a new allow list no longer covers them. |
+| `ports.allow`, `ports.deny`, `ports.auto_range`, `ports.offline_reserve` | Yes. Mappings already running are not closed when a new allow list no longer covers them. `offline_reserve` must be at least `1s`. |
 | `web.trust_proxy` | Yes. Applies immediately to login and settings-confirmation rate limiting. |
 | Mappings of online clients | Yes. Push an authoritative list or delete a mapping. Offline clients stay read-only. |
 | `credentials.generation`, `credentials.previous_*` | Managed by rotation and revoke. Not edited directly in the console. |
