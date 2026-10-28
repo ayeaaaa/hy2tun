@@ -6,39 +6,53 @@ import "hy2tun/internal/config"
 
 // Message type names carried in the "type" field of every control message.
 const (
-	TypeHello      = "hello"
-	TypeHelloAck   = "hello_ack"
-	TypeUpdate     = "update"
-	TypeUpdateAck  = "update_ack"
-	TypePush       = "push"
-	TypePushAck    = "push_ack"
-	TypeOpen       = "open"
-	TypeOpenResult = "open_result"
-	TypePing       = "ping"
-	TypePong       = "pong"
+	TypeHello            = "hello"
+	TypeHelloAck         = "hello_ack"
+	TypeUpdate           = "update"
+	TypeUpdateAck        = "update_ack"
+	TypePush             = "push"
+	TypePushAck          = "push_ack"
+	TypeOpen             = "open"
+	TypeOpenResult       = "open_result"
+	TypePing             = "ping"
+	TypePong             = "pong"
+	TypeCredentialUpdate = "credential_update"
+	TypeCredentialAck    = "credential_ack"
 )
+
+// CapabilityCredentialUpdate is advertised in Hello.Capabilities by clients
+// that accept server-pushed CredentialUpdate messages. Clients that omit it
+// are treated as legacy clients and must update credentials manually.
+const CapabilityCredentialUpdate = "credential_update_v1"
 
 // Hello is sent by the client immediately after opening the control stream.
 // It authenticates the client and publishes the authoritative mapping list.
+// Capabilities advertises optional protocol features; CredentialGeneration
+// reports the credential pair the client currently holds (absent means 1).
 type Hello struct {
-	Type     string           `json:"type"`
-	Protocol int              `json:"protocol"`
-	Token    string           `json:"token"`
-	ClientID string           `json:"client_id"`
-	Name     string           `json:"name"`
-	Version  string           `json:"version"`
-	Revision int64            `json:"revision"`
-	Mappings []config.Mapping `json:"mappings"`
+	Type                 string           `json:"type"`
+	Protocol             int              `json:"protocol"`
+	Token                string           `json:"token"`
+	ClientID             string           `json:"client_id"`
+	Name                 string           `json:"name"`
+	Version              string           `json:"version"`
+	Revision             int64            `json:"revision"`
+	CredentialGeneration int64            `json:"credential_generation,omitempty"`
+	Capabilities         []string         `json:"capabilities,omitempty"`
+	Mappings             []config.Mapping `json:"mappings"`
 }
 
 // HelloAck is the server's reply to Hello. A false OK value means the client
-// was rejected; Error carries the stable error code.
+// was rejected; Error carries the stable error code. CredentialSynced reports
+// whether the client's credential generation matches the server's current one.
 type HelloAck struct {
-	Type          string   `json:"type"`
-	OK            bool     `json:"ok"`
-	ServerVersion string   `json:"server_version"`
-	Results       []Result `json:"results"`
-	Error         string   `json:"error"`
+	Type                 string   `json:"type"`
+	OK                   bool     `json:"ok"`
+	ServerVersion        string   `json:"server_version"`
+	CredentialGeneration int64    `json:"credential_generation"`
+	CredentialSynced     bool     `json:"credential_synced"`
+	Results              []Result `json:"results"`
+	Error                string   `json:"error"`
 }
 
 // Result reports the outcome of one mapping operation.
@@ -51,10 +65,12 @@ type Result struct {
 }
 
 // Update is sent by the client after a local configuration change. It carries
-// the complete mapping list and the client's new revision.
+// the complete mapping list and the client's new revision. A non-empty Name
+// renames the client; an empty Name leaves the current name unchanged.
 type Update struct {
 	Type     string           `json:"type"`
 	Revision int64            `json:"revision"`
+	Name     string           `json:"name,omitempty"`
 	Mappings []config.Mapping `json:"mappings"`
 }
 
@@ -90,6 +106,25 @@ type PushAck struct {
 	Revision int64    `json:"revision"`
 	Results  []Result `json:"results"`
 	Error    string   `json:"error"`
+}
+
+// CredentialUpdate is pushed by the server to rotate a client's HY2 auth
+// password and control token. Generation identifies the credential pair so the
+// client can reject stale pushes and report what it applied.
+type CredentialUpdate struct {
+	Type         string `json:"type"`
+	Generation   int64  `json:"generation"`
+	Auth         string `json:"auth"`
+	ControlToken string `json:"control_token"`
+}
+
+// CredentialAck is the client's reply to CredentialUpdate. On failure OK is
+// false and Error carries the reason.
+type CredentialAck struct {
+	Type       string `json:"type"`
+	Generation int64  `json:"generation"`
+	OK         bool   `json:"ok"`
+	Error      string `json:"error"`
 }
 
 // Open asks the client to dial a local target for an incoming public
@@ -143,6 +178,10 @@ func newMessage(typ string) (any, bool) {
 		return &Ping{}, true
 	case TypePong:
 		return &Pong{}, true
+	case TypeCredentialUpdate:
+		return &CredentialUpdate{}, true
+	case TypeCredentialAck:
+		return &CredentialAck{}, true
 	default:
 		return nil, false
 	}

@@ -59,6 +59,29 @@ func TestControlRoundTripAllMessageTypes(t *testing.T) {
 	}
 }
 
+func TestCredentialMessagesRoundTrip(t *testing.T) {
+	cases := []any{
+		&Hello{Type: TypeHello, Protocol: 1, CredentialGeneration: 2, Capabilities: []string{CapabilityCredentialUpdate}},
+		&HelloAck{Type: TypeHelloAck, OK: true, CredentialGeneration: 2, CredentialSynced: true},
+		&Update{Type: TypeUpdate, Revision: 3, Name: "new-name"},
+		&CredentialUpdate{Type: TypeCredentialUpdate, Generation: 2, Auth: "a", ControlToken: "t"},
+		&CredentialAck{Type: TypeCredentialAck, Generation: 2, OK: true},
+	}
+	for _, in := range cases {
+		var buf bytes.Buffer
+		require.NoError(t, WriteMessage(&buf, in))
+		out, err := ReadMessage(&buf)
+		require.NoError(t, err)
+		require.Equal(t, in, out)
+	}
+}
+
+func TestCapabilityCredentialUpdateValue(t *testing.T) {
+	// This string is part of the wire contract; clients and servers negotiate
+	// credential pushes by exact match.
+	require.Equal(t, "credential_update_v1", CapabilityCredentialUpdate)
+}
+
 func TestReadMessageIgnoresUnknownFields(t *testing.T) {
 	var buf bytes.Buffer
 	writeRawFrame(t, &buf, []byte(`{"type":"ping","ts":42,"future":{"nested":true}}`))
@@ -92,6 +115,7 @@ func TestMessageTypeNames(t *testing.T) {
 	types := []string{
 		TypeHello, TypeHelloAck, TypeUpdate, TypeUpdateAck, TypePush,
 		TypePushAck, TypeOpen, TypeOpenResult, TypePing, TypePong,
+		TypeCredentialUpdate, TypeCredentialAck,
 	}
 	seen := make(map[string]bool, len(types))
 	for _, typ := range types {

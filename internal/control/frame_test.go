@@ -58,6 +58,86 @@ func TestReadMessageRejectsMissingType(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnknownType)
 }
 
+func TestReadMessageDecodesCredentialMessages(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    any
+	}{
+		{
+			name:    "credential_update",
+			payload: `{"type":"credential_update","generation":2,"auth":"a","control_token":"t"}`,
+			want:    &CredentialUpdate{Type: TypeCredentialUpdate, Generation: 2, Auth: "a", ControlToken: "t"},
+		},
+		{
+			name:    "credential_ack",
+			payload: `{"type":"credential_ack","generation":2,"ok":true,"error":"stale_generation"}`,
+			want:    &CredentialAck{Type: TypeCredentialAck, Generation: 2, OK: true, Error: "stale_generation"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			writeRawFrame(t, &buf, []byte(tt.payload))
+			out, err := ReadMessage(&buf)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, out)
+		})
+	}
+}
+
+func TestReadMessageAcceptsLegacyHelloWithoutCredentialFields(t *testing.T) {
+	var buf bytes.Buffer
+	writeRawFrame(t, &buf, []byte(`{"type":"hello","protocol":1,"token":"token","client_id":"c1"}`))
+	out, err := ReadMessage(&buf)
+	require.NoError(t, err)
+	require.Equal(t, &Hello{Type: TypeHello, Protocol: 1, Token: "token", ClientID: "c1"}, out)
+}
+
+func TestNewControlFieldsUseWireNames(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    any
+	}{
+		{
+			name:    "hello",
+			payload: `{"type":"hello","protocol":1,"credential_generation":2,"capabilities":["credential_update_v1"]}`,
+			want: &Hello{
+				Type: TypeHello, Protocol: 1, CredentialGeneration: 2,
+				Capabilities: []string{CapabilityCredentialUpdate},
+			},
+		},
+		{
+			name:    "hello_ack",
+			payload: `{"type":"hello_ack","ok":true,"credential_generation":2,"credential_synced":true}`,
+			want: &HelloAck{
+				Type: TypeHelloAck, OK: true, CredentialGeneration: 2, CredentialSynced: true,
+			},
+		},
+		{
+			name:    "update",
+			payload: `{"type":"update","revision":3,"name":"new-name"}`,
+			want:    &Update{Type: TypeUpdate, Revision: 3, Name: "new-name"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			writeRawFrame(t, &buf, []byte(tt.payload))
+			out, err := ReadMessage(&buf)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, out)
+		})
+	}
+}
+
+func TestUpdateOmitsEmptyName(t *testing.T) {
+	var buf bytes.Buffer
+	require.NoError(t, WriteMessage(&buf, &Update{Type: TypeUpdate, Revision: 3}))
+	require.NotContains(t, buf.String(), `"name"`)
+}
+
 func TestReadMessageRejectsZeroLength(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(t, binary.Write(&buf, binary.BigEndian, uint32(0)))
