@@ -69,8 +69,8 @@ func TestEndToEnd(t *testing.T) {
 			Token: e2eControlToken,
 		},
 		Ports: config.PortsConfig{
-			Allow:     []string{"20000-29999"},
-			AutoRange: "20000-29999",
+			Allow:     []string{"31000-31999"},
+			AutoRange: "31000-31999",
 		},
 		Web: config.WebConfig{
 			Listen:       "127.0.0.1:0",
@@ -285,6 +285,106 @@ func TestEndToEnd(t *testing.T) {
 	// The original mappings must keep working after the delete.
 	require.NoError(t, tcpEcho(tcpPublicAddr, "survives-delete"))
 	require.NoError(t, udpEcho(udpPublicAddr, "survives-delete"))
+
+	// 10. Rotate both credentials through the server web API with auto push.
+	// The client must persist the new pair, reconnect, and re-register both
+	// reverse mappings without operator intervention.
+	const (
+		rotatedAuth  = "hy2tun-e2e-rotated-password"
+		rotatedToken = "fedcba9876543210fedcba9876543210"
+	)
+	generation, results := rotateCredentialsWeb(t, webClient, webAddr, cookie,
+		e2eWebPassword, rotatedAuth, rotatedToken, "auto")
+	require.Equal(t, int64(2), generation)
+	require.Len(t, results, 1)
+	require.Equal(t, "synced", results[0].Status)
+
+	require.Eventually(t, func() bool {
+		saved, err := config.LoadClient(clientConfigPath)
+		if err != nil {
+			return false
+		}
+		return saved.Credentials.Generation == generation &&
+			saved.Auth == rotatedAuth &&
+			saved.Control.Token == rotatedToken
+	}, 10*time.Second, 20*time.Millisecond,
+		"the client must persist the pushed credential generation")
+
+	require.Eventually(t, func() bool {
+		views := srv.Clients()
+		if len(views) != 1 {
+			return false
+		}
+		c := views[0]
+		if !c.Online || c.CredentialGeneration != generation || !c.CredentialSynced {
+			return false
+		}
+		if len(c.Mappings) != 2 {
+			return false
+		}
+		ports := make(map[string]int, len(c.Mappings))
+		for _, mapping := range c.Mappings {
+			if mapping.Status != "running" {
+				return false
+			}
+			ports[mapping.ID] = mapping.AssignedPort
+		}
+		return ports["e2e-tcp"] == tcpPort && ports["e2e-udp"] == udpPort
+	}, 10*time.Second, 20*time.Millisecond,
+		"the reconnected client must report the new generation and running mappings")
+
+	require.Eventually(t, func() bool {
+		return tcpEcho(tcpPublicAddr, "tcp-after-rotation") == nil
+	}, 5*time.Second, 50*time.Millisecond,
+		"reverse TCP mapping must survive credential rotation")
+	require.Eventually(t, func() bool {
+		return udpEcho(udpPublicAddr, "udp-after-rotation") == nil
+	}, 5*time.Second, 50*time.Millisecond,
+		"reverse UDP mapping must survive credential rotation")
+
+	// 11. Revoke the previous pair. A new client using the old credentials
+	// must not be able to register.
+	revokeCredentialsWeb(t, webClient, webAddr, cookie, e2eWebPassword)
+
+	snapshot := srv.CredentialsSnapshot()
+	require.Equal(t, int64(0), snapshot.PreviousGeneration)
+	require.False(t, snapshot.AcceptAuth(e2ePassword))
+	_, accepted := snapshot.AcceptControlToken(e2eControlToken)
+	require.False(t, accepted)
+
+	oldClientConfigPath := filepath.Join(dir, "old-client.yaml")
+	oldCfg := &config.ClientConfig{
+		Server: srv.ListenAddr().String(),
+		Auth:   e2ePassword,
+		TLS:    config.ClientTLSConfig{CA: certPath},
+		Control: config.ControlConfig{
+			Token: e2eControlToken,
+		},
+		Client: config.ClientIdentity{
+			ID:   "e2e-old-client",
+			Name: "e2e-old-client",
+		},
+		Credentials: config.CredentialsConfig{Generation: 1},
+		Web:         config.WebConfig{Listen: ""},
+		Log:         config.LogConfig{Level: "info"},
+	}
+	require.NoError(t, config.SaveClient(oldClientConfigPath, oldCfg))
+	oldClient, err := client.New(oldCfg, logger)
+	require.NoError(t, err)
+	oldCtx, stopOldClient := context.WithCancel(context.Background())
+	defer stopOldClient()
+	go func() { _ = oldClient.Start(oldCtx) }()
+	defer func() { _ = oldClient.Close() }()
+
+	oldReadyCtx, cancelOldReady := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelOldReady()
+	require.Error(t, oldClient.WaitReady(oldReadyCtx),
+		"a client with revoked credentials must not complete the control handshake")
+
+	for _, clientView := range srv.Clients() {
+		require.NotEqual(t, "e2e-old-client", clientView.ID,
+			"the revoked client must not appear in the server view")
+	}
 }
 
 // TestExamplesValidate keeps the shipped example configurations loadable.
@@ -419,6 +519,70 @@ func pushMappings(t *testing.T, client *http.Client, webAddr string, cookie *htt
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
 	require.NotZero(t, result.Revision)
 	return result.Revision
+}
+
+// rotateCredentialsWeb changes the server credential pair through the web API
+// and returns the new generation and per-client results.
+func rotateCredentialsWeb(t *testing.T, client *http.Client, webAddr string, cookie *http.Cookie,
+	currentPassword, auth, controlToken, syncMode string) (int64, []view.CredentialResult) {
+	t.Helper()
+
+	body, err := json.Marshal(map[string]any{
+		"current_password": currentPassword,
+		"auth":             auth,
+		"control_token":    controlToken,
+		"sync_mode":        syncMode,
+	})
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPut,
+		"http://"+webAddr+"/api/settings/credentials", bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Requested-With", "hy2tun")
+	req.Header.Set("Origin", "http://"+webAddr)
+	req.AddCookie(cookie)
+
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		message, _ := io.ReadAll(resp.Body)
+		t.Fatalf("rotate credentials: status %d: %s", resp.StatusCode, message)
+	}
+
+	var result struct {
+		Generation int64                   `json:"generation"`
+		Results    []view.CredentialResult `json:"results"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	require.NotZero(t, result.Generation)
+	return result.Generation, result.Results
+}
+
+// revokeCredentialsWeb clears the retained previous credential pair through the
+// web API.
+func revokeCredentialsWeb(t *testing.T, client *http.Client, webAddr string, cookie *http.Cookie, currentPassword string) {
+	t.Helper()
+
+	body, err := json.Marshal(map[string]any{"current_password": currentPassword})
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost,
+		"http://"+webAddr+"/api/settings/credentials/revoke", bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Requested-With", "hy2tun")
+	req.Header.Set("Origin", "http://"+webAddr)
+	req.AddCookie(cookie)
+
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		message, _ := io.ReadAll(resp.Body)
+		t.Fatalf("revoke credentials: status %d: %s", resp.StatusCode, message)
+	}
 }
 
 // mappingsFromView copies the mapping definitions out of read models.

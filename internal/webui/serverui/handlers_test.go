@@ -655,6 +655,7 @@ func TestServerWebPushErrors(t *testing.T) {
 		{"not ready", control.ErrClientNotReady, http.StatusConflict, "client_not_ready"},
 		{"timeout", control.ErrPushTimeout, http.StatusGatewayTimeout, "push_timeout"},
 		{"bad mapping", &fakePushError{results: []control.Result{{ID: "m1", Error: "bad_message"}}}, http.StatusBadRequest, "bad_message"},
+		{"port not allowed", &fakePushError{results: []control.Result{{ID: "m1", Error: "port_not_allowed"}}}, http.StatusConflict, "port_not_allowed"},
 		{"port in use", &fakePushError{results: []control.Result{{ID: "m1", Error: "port_in_use", UDPToken: "secret-token"}}}, http.StatusConflict, "port_in_use"},
 		{"internal", errors.New("boom"), http.StatusInternalServerError, "internal"},
 	}
@@ -1216,6 +1217,7 @@ func TestServerSettingsRevealRequiresPasswordAndNoStore(t *testing.T) {
 	resp := doRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/settings/credentials/reveal",
 		`{"password":"wrong"}`, cookie, csrfHeaders(ts.URL))
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	require.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
 	raw := readBody(t, resp)
 	require.NotContains(t, raw, "current-auth-secret")
 	require.NotContains(t, raw, "previous-token-secret")

@@ -698,17 +698,39 @@ func TestClientWebRotateCredentials(t *testing.T) {
 	resp, err := client.PostForm(ts.URL+"/api/login", url.Values{"username": {"admin"}, "password": {"pw"}})
 	require.NoError(t, err)
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.NotEmpty(t, resp.Cookies())
+	cookie := resp.Cookies()[0]
+	resp.Body.Close()
 
 	body := `{"current_password":"pw","generation":2,"auth":"new","control_token":"new-token"}`
 	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/settings/credentials", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Requested-With", "hy2tun")
 	req.Header.Set("Origin", ts.URL)
-	req.AddCookie(resp.Cookies()[0])
+	req.AddCookie(cookie)
 	resp, err = client.Do(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusAccepted, resp.StatusCode)
+	require.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
+	var accepted struct {
+		Generation int64  `json:"generation"`
+		Status     string `json:"status"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&accepted))
+	resp.Body.Close()
+	require.Equal(t, int64(2), accepted.Generation)
+	require.Equal(t, "pending", accepted.Status)
 	require.Equal(t, int64(2), api.rotation.Generation)
+
+	// The settings API reflects the locally applied generation and remains
+	// unsynced until the next hello_ack.
+	resp = doClientRequest(t, ts.Client(), http.MethodGet, ts.URL+"/api/settings", "", cookie, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	settings := readClientJSON[SettingsView](t, resp)
+	require.Equal(t, int64(2), settings.Credentials.Generation)
+	require.False(t, settings.Credentials.Synced)
+	require.Equal(t, MaskedSecret, settings.Credentials.CurrentAuthMasked)
+	require.Equal(t, MaskedSecret, settings.Credentials.CurrentControlTokenMasked)
 }
 
 func TestClientWebSettingsJSONAndPage(t *testing.T) {
@@ -783,6 +805,7 @@ func TestClientWebRevealRequiresPasswordAndNoStore(t *testing.T) {
 	resp := doClientRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/settings/credentials/reveal",
 		`{"password":"wrong"}`, cookie, map[string]string{"X-Requested-With": "hy2tun", "Origin": ts.URL})
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	require.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
 	body := readClientBody(t, resp)
 	require.NotContains(t, body, "plain-auth")
 	require.NotContains(t, body, "plain-token")
