@@ -1,0 +1,42 @@
+# Changelog
+
+All notable changes to this project are documented here.
+
+## v1.2.0 - 2026-10-28
+
+### Added
+
+- Client-side Hysteria 2 UDP port hopping.
+- `server` accepts single ports, comma-separated ports, ranges, and mixed lists.
+- `transport.udp.hop_interval`, `min_hop_interval`, and `max_hop_interval`.
+- Salamander obfs composition for every hop socket.
+- Port-hopping deployment guide with nftables/iptables examples.
+- Simplified Chinese README (`README.zh-CN.md`).
+
+### Changed
+
+- Single-port configurations keep their existing YAML shape and behavior.
+- One-unique-port sets such as `443,443` normalize to a single port.
+- Release archives include both READMEs.
+
+## v1.1.0 - 2026-10-28
+
+### Added
+
+- Hot web configuration editing for web administrators, HY2 credentials,
+  port policy, trust-proxy, and client name.
+- Generation-based credential rotation with a retained previous pair.
+- Auto-push to capable online clients and manual client sync.
+- Explicit previous-credential revoke.
+- Authenticated secret reveal with masked values and `Cache-Control: no-store`.
+
+## v1.0.0 - 2026-10-27
+
+### Added
+
+- HY2 proxy server and reverse tunnel client.
+- Reverse TCP mappings over HY2 streams.
+- Reverse UDP mappings over native HY2 datagrams.
+- Server and client web consoles.
+- Mapping management, live status, logs, and credential handling.
+- Linux, OpenWrt, and Windows client builds.

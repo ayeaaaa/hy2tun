@@ -2,6 +2,9 @@
 
 [English](README.md) | **简体中文**
 
+[![CI](https://github.com/ayeaaaa/hy2tun/actions/workflows/ci.yml/badge.svg)](https://github.com/ayeaaaa/hy2tun/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 `hy2tun` 是一个基于官方 [Hysteria 2](https://github.com/apernet/hysteria)
 核心实现的反向端口映射隧道。内网客户端主动连接到公网服务端，把选定的 TCP
 和 UDP 服务暴露在服务端的公网端口上。同一个服务端仍然是普通的 HY2 代理服务端，
@@ -1157,3 +1160,7 @@ go test ./internal/e2e -v     # 只运行验收测试
 
 仓库有意不使用 Node/CDN 构建。Web 模板、CSS 和 JavaScript 通过 `go:embed`
 嵌入。
+
+## 许可证
+
+MIT，见 [`LICENSE`](LICENSE)。安全报告方式见 [`SECURITY.md`](SECURITY.md)。

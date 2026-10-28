@@ -2,6 +2,9 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+[![CI](https://github.com/ayeaaaa/hy2tun/actions/workflows/ci.yml/badge.svg)](https://github.com/ayeaaaa/hy2tun/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 `hy2tun` is a reverse port-forwarding tunnel built on the official
 [Hysteria 2](https://github.com/apernet/hysteria) core. A client inside a
 private network connects out to a public server and exposes selected TCP and
@@ -1304,3 +1307,8 @@ ephemeral ports.
 
 The repository intentionally does not use a Node/CDN build. Web templates,
 CSS, and JavaScript are embedded with `go:embed`.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE). Security reporting is described in
+[`SECURITY.md`](SECURITY.md).
