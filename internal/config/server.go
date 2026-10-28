@@ -21,6 +21,8 @@ type ServerConfig struct {
 	Web        WebConfig       `yaml:"web" json:"web"`
 	StateFile  string          `yaml:"state_file" json:"state_file"`
 	Log        LogConfig       `yaml:"log" json:"log"`
+	// Credentials tracks the credential generation and previous pair.
+	Credentials CredentialsConfig `yaml:"credentials" json:"credentials"`
 
 	// ConfigPath is the file this configuration was loaded from or saved to.
 	// It is runtime metadata and is never serialized.
@@ -74,6 +76,9 @@ func (c *ServerConfig) Validate() error {
 	if len(c.Control.Token) < 16 {
 		return fmt.Errorf("control.token must be at least 16 bytes")
 	}
+	if err := c.validateCredentials(); err != nil {
+		return err
+	}
 	if err := validatePortRanges("ports.allow", c.Ports.Allow); err != nil {
 		return err
 	}
@@ -96,6 +101,9 @@ func (c *ServerConfig) Validate() error {
 }
 
 func (c *ServerConfig) applyDefaults() {
+	if c.Credentials.Generation == 0 {
+		c.Credentials.Generation = 1
+	}
 	if c.Auth.Type == "" && c.Auth.Password != "" {
 		c.Auth.Type = "password"
 	}
@@ -111,6 +119,32 @@ func (c *ServerConfig) applyDefaults() {
 	if c.Web.Listen != "" && c.Web.Username == "" {
 		c.Web.Username = "admin"
 	}
+}
+
+func (c *ServerConfig) validateCredentials() error {
+	creds := &c.Credentials
+	if creds.Generation < 1 {
+		return fmt.Errorf("credentials.generation must be at least 1")
+	}
+	if creds.PreviousGeneration < 0 || creds.PreviousGeneration >= creds.Generation {
+		return fmt.Errorf("credentials.previous_generation must be 0 or less than credentials.generation")
+	}
+	if creds.PreviousGeneration > 0 {
+		if creds.PreviousAuth == "" {
+			return fmt.Errorf("credentials.previous_auth is required when credentials.previous_generation is set")
+		}
+		if creds.PreviousControlToken == "" {
+			return fmt.Errorf("credentials.previous_control_token is required when credentials.previous_generation is set")
+		}
+		return nil
+	}
+	if creds.PreviousAuth != "" {
+		return fmt.Errorf("credentials.previous_auth must be empty when credentials.previous_generation is 0")
+	}
+	if creds.PreviousControlToken != "" {
+		return fmt.Errorf("credentials.previous_control_token must be empty when credentials.previous_generation is 0")
+	}
+	return nil
 }
 
 func (a *AuthConfig) validate() error {

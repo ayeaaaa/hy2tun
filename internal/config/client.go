@@ -36,6 +36,8 @@ type ClientConfig struct {
 	Web       WebConfig       `yaml:"web" json:"web"`
 	Proxy     ProxyConfig     `yaml:"proxy" json:"proxy"`
 	Log       LogConfig       `yaml:"log" json:"log"`
+	// Credentials tracks the credential generation and previous pair.
+	Credentials CredentialsConfig `yaml:"credentials" json:"credentials"`
 
 	// ConfigPath is the file this configuration was loaded from or saved to.
 	// It is runtime metadata and is never serialized.
@@ -103,6 +105,9 @@ func (c *ClientConfig) Validate() error {
 	if len(c.Control.Token) < 16 {
 		return fmt.Errorf("control.token must be at least 16 bytes")
 	}
+	if c.Credentials.Generation < 1 {
+		return fmt.Errorf("credentials.generation must be at least 1")
+	}
 	if c.Client.Revision < 0 {
 		return fmt.Errorf("client.revision must not be negative")
 	}
@@ -135,6 +140,9 @@ func (c *ClientConfig) Validate() error {
 }
 
 func (c *ClientConfig) applyDefaults() {
+	if c.Credentials.Generation == 0 {
+		c.Credentials.Generation = 1
+	}
 	if c.Log.Level == "" {
 		c.Log.Level = defaultLogLevel
 	}

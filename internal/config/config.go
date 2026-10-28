@@ -39,6 +39,17 @@ type AuthConfig struct {
 	Users    map[string]string `yaml:"users,omitempty" json:"-"`
 }
 
+// CredentialsConfig tracks the generation of the current credential pair and
+// the previous pair retained during rotation. Previous secrets persist in YAML
+// so old credentials keep working across restarts, but are never exposed
+// through JSON APIs.
+type CredentialsConfig struct {
+	Generation           int64  `yaml:"generation" json:"generation"`
+	PreviousGeneration   int64  `yaml:"previous_generation" json:"previous_generation"`
+	PreviousAuth         string `yaml:"previous_auth,omitempty" json:"-"`
+	PreviousControlToken string `yaml:"previous_control_token,omitempty" json:"-"`
+}
+
 // TLSConfig is the server-side TLS certificate pair.
 type TLSConfig struct {
 	Cert string `yaml:"cert" json:"cert"`

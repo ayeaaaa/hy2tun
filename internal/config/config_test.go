@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,6 +89,7 @@ web:
 	require.Equal(t, "20000-29999", cfg.Ports.AutoRange)
 	require.Equal(t, 24*time.Hour, time.Duration(cfg.Ports.OfflineReserve))
 	require.Equal(t, "info", cfg.Log.Level)
+	require.Equal(t, int64(1), cfg.Credentials.Generation)
 }
 
 func TestLoadClientConfig(t *testing.T) {
@@ -134,6 +136,7 @@ proxy:
 	require.Equal(t, "ssh", cfg.Mappings[0].Note)
 	require.False(t, cfg.Mappings[1].Enabled)
 	require.Equal(t, "info", cfg.Log.Level)
+	require.Equal(t, int64(1), cfg.Credentials.Generation)
 }
 
 func TestBandwidthParsing(t *testing.T) {
@@ -420,4 +423,149 @@ control:
 	other := filepath.Join(dir, "other.yaml")
 	require.NoError(t, SaveServer(other, cfg))
 	require.Equal(t, other, cfg.ConfigPath)
+}
+
+func TestServerCredentialRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yaml")
+	cfg := validServerConfig()
+	cfg.Credentials = CredentialsConfig{
+		Generation: 2, PreviousGeneration: 1,
+		PreviousAuth: "old-auth", PreviousControlToken: "old-token",
+	}
+	require.NoError(t, SaveServer(path, cfg))
+	got, err := LoadServer(path)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), got.Credentials.Generation)
+	require.Equal(t, int64(1), got.Credentials.PreviousGeneration)
+	require.Equal(t, "old-auth", got.Credentials.PreviousAuth)
+	require.Equal(t, "old-token", got.Credentials.PreviousControlToken)
+}
+
+func TestClientCredentialRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "client.yaml")
+	cfg := validClientConfig()
+	cfg.Credentials = CredentialsConfig{
+		Generation: 3, PreviousGeneration: 2,
+		PreviousAuth: "old-auth", PreviousControlToken: "old-token",
+	}
+	require.NoError(t, SaveClient(path, cfg))
+	got, err := LoadClient(path)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), got.Credentials.Generation)
+	require.Equal(t, int64(2), got.Credentials.PreviousGeneration)
+	require.Equal(t, "old-auth", got.Credentials.PreviousAuth)
+	require.Equal(t, "old-token", got.Credentials.PreviousControlToken)
+}
+
+func TestServerConfigRejectsInvalidCredentialGenerations(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*ServerConfig)
+		wantErr string
+	}{
+		{
+			name: "negative previous generation",
+			mutate: func(cfg *ServerConfig) {
+				cfg.Credentials.PreviousGeneration = -1
+			},
+			wantErr: "credentials.previous_generation",
+		},
+		{
+			name: "previous generation not below current",
+			mutate: func(cfg *ServerConfig) {
+				cfg.Credentials.Generation = 2
+				cfg.Credentials.PreviousGeneration = 2
+				cfg.Credentials.PreviousAuth = "old-auth"
+				cfg.Credentials.PreviousControlToken = "old-token"
+			},
+			wantErr: "credentials.previous_generation",
+		},
+		{
+			name: "previous generation above current",
+			mutate: func(cfg *ServerConfig) {
+				cfg.Credentials.Generation = 2
+				cfg.Credentials.PreviousGeneration = 3
+				cfg.Credentials.PreviousAuth = "old-auth"
+				cfg.Credentials.PreviousControlToken = "old-token"
+			},
+			wantErr: "credentials.previous_generation",
+		},
+		{
+			name: "missing previous auth",
+			mutate: func(cfg *ServerConfig) {
+				cfg.Credentials.Generation = 2
+				cfg.Credentials.PreviousGeneration = 1
+				cfg.Credentials.PreviousControlToken = "old-token"
+			},
+			wantErr: "credentials.previous_auth",
+		},
+		{
+			name: "missing previous control token",
+			mutate: func(cfg *ServerConfig) {
+				cfg.Credentials.Generation = 2
+				cfg.Credentials.PreviousGeneration = 1
+				cfg.Credentials.PreviousAuth = "old-auth"
+			},
+			wantErr: "credentials.previous_control_token",
+		},
+		{
+			name: "previous auth without generation",
+			mutate: func(cfg *ServerConfig) {
+				cfg.Credentials.PreviousAuth = "old-auth"
+			},
+			wantErr: "credentials.previous_auth",
+		},
+		{
+			name: "previous control token without generation",
+			mutate: func(cfg *ServerConfig) {
+				cfg.Credentials.PreviousControlToken = "old-token"
+			},
+			wantErr: "credentials.previous_control_token",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validServerConfig()
+			tt.mutate(cfg)
+			require.ErrorContains(t, cfg.Validate(), tt.wantErr)
+		})
+	}
+}
+
+func TestServerConfigAllowsShortPreviousCredentials(t *testing.T) {
+	cfg := validServerConfig()
+	cfg.Credentials = CredentialsConfig{
+		Generation: 2, PreviousGeneration: 1,
+		PreviousAuth: "x", PreviousControlToken: "y",
+	}
+	require.NoError(t, cfg.Validate())
+}
+
+func TestClientConfigCredentialsGeneration(t *testing.T) {
+	cfg := validClientConfig()
+	cfg.Credentials.Generation = 0
+	require.NoError(t, cfg.Validate())
+	require.Equal(t, int64(1), cfg.Credentials.Generation)
+
+	cfg = validClientConfig()
+	cfg.Credentials.Generation = -1
+	require.ErrorContains(t, cfg.Validate(), "credentials.generation")
+}
+
+func TestPreviousCredentialSecretsAreNotSerializedToJSON(t *testing.T) {
+	cfg := validServerConfig()
+	cfg.Credentials = CredentialsConfig{
+		Generation: 2, PreviousGeneration: 1,
+		PreviousAuth: "old-auth-secret", PreviousControlToken: "old-token-secret",
+	}
+
+	data, err := json.Marshal(cfg)
+	require.NoError(t, err)
+	require.NotContains(t, string(data), "old-auth-secret")
+	require.NotContains(t, string(data), "old-token-secret")
+	require.Contains(t, string(data), `"generation":2`)
+	require.Contains(t, string(data), `"previous_generation":1`)
 }
