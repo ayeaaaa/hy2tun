@@ -20,6 +20,7 @@ import (
 	"github.com/apernet/hysteria/extras/v2/obfs"
 
 	"hy2tun/internal/config"
+	"hy2tun/internal/credentials"
 	"hy2tun/internal/ports"
 	"hy2tun/internal/state"
 	"hy2tun/internal/version"
@@ -40,6 +41,10 @@ type Server struct {
 	control  *controlHandler
 	data     *dataStreams
 	web      *serverui.Server
+
+	// credentials is the live credential pair used by the HY2 authenticator
+	// and the control-token check. It is replaced atomically on rotation.
+	credentials *credentials.Store
 
 	startedAt time.Time
 	started   atomic.Bool
@@ -68,7 +73,8 @@ func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load TLS key pair: %w", err)
 	}
-	authenticator, err := newAuthenticator(&cfg.Auth)
+	credStore := credentials.NewStore(credentialSetFromConfig(cfg))
+	authenticator, err := newAuthenticator(&cfg.Auth, credStore)
 	if err != nil {
 		return nil, err
 	}
@@ -79,12 +85,13 @@ func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 	}
 
 	s := &Server{
-		cfg:        cfg,
-		log:        log,
-		packetConn: packetConn,
-		listenAddr: packetConn.LocalAddr(),
-		startedAt:  time.Now(),
-		data:       newDataStreams(),
+		cfg:         cfg,
+		log:         log,
+		packetConn:  packetConn,
+		listenAddr:  packetConn.LocalAddr(),
+		startedAt:   time.Now(),
+		data:        newDataStreams(),
+		credentials: credStore,
 	}
 
 	policy, err := ports.NewPolicy(cfg.Ports.Allow, cfg.Ports.Deny, cfg.Ports.AutoRange)
@@ -170,10 +177,12 @@ func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 }
 
 // newAuthenticator maps the config auth mode to a Hysteria authenticator.
-func newAuthenticator(authCfg *config.AuthConfig) (hyserver.Authenticator, error) {
+// Password mode reads the live credential store so rotations take effect
+// without a restart; userpass mode keeps the static user table.
+func newAuthenticator(authCfg *config.AuthConfig, credStore *credentials.Store) (hyserver.Authenticator, error) {
 	switch authCfg.Type {
 	case "password":
-		return &auth.PasswordAuthenticator{Password: authCfg.Password}, nil
+		return newDynamicAuthenticator(credStore, nil), nil
 	case "userpass":
 		return auth.NewUserPassAuthenticator(authCfg.Users), nil
 	default:

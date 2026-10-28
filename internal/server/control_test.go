@@ -118,8 +118,11 @@ func testClientConfig(serverAddr string, mappings []config.Mapping) *config.Clie
 			Name: "test-client",
 		},
 		Mappings: append([]config.Mapping(nil), mappings...),
-		Web:      config.WebConfig{Listen: ""},
-		Log:      config.LogConfig{Level: "info"},
+		Credentials: config.CredentialsConfig{
+			Generation: 1,
+		},
+		Web: config.WebConfig{Listen: ""},
+		Log: config.LogConfig{Level: "info"},
 	}
 }
 
@@ -163,6 +166,187 @@ func TestClientRegistersTCPAndUDPMappings(t *testing.T) {
 	require.Equal(t, views[0].Mappings[0].AssignedPort, clientViews[0].AssignedPort)
 	require.Equal(t, "running", clientViews[1].Status)
 	require.Equal(t, views[0].Mappings[1].AssignedPort, clientViews[1].AssignedPort)
+}
+
+func TestHelloCarriesCredentialGeneration(t *testing.T) {
+	pair := startTestPair(t, []config.Mapping{
+		{ID: "tcp1", Type: "tcp", RemotePort: 0, LocalAddr: "127.0.0.1:9001", Enabled: true},
+	})
+	defer pair.Stop()
+
+	require.NoError(t, waitFor(t, 5*time.Second, func() bool {
+		v := pair.Server.Clients()
+		return len(v) == 1 && v[0].CredentialGeneration == 1 && v[0].CredentialSynced
+	}))
+}
+
+func TestHelloAcceptsPreviousCredentials(t *testing.T) {
+	cert, err := testutil.SelfSignedCert("localhost")
+	require.NoError(t, err)
+	cfg := validServerConfig(cert)
+	cfg.Auth.Password = "new-pw"
+	cfg.Control.Token = strings.Repeat("a", 32)
+	cfg.Credentials = config.CredentialsConfig{
+		Generation:           2,
+		PreviousGeneration:   1,
+		PreviousAuth:         "old-pw",
+		PreviousControlToken: strings.Repeat("b", 32),
+	}
+	srv, stop := startServer(t, cfg)
+	defer stop()
+
+	// The previous HY2 password must still authenticate a new connection.
+	hy := newHY2Client(t, srv, "old-pw", nil)
+	conn, err := hy.TCP("_hy2tun_control_:0")
+	require.NoError(t, err)
+	defer conn.Close()
+
+	require.NoError(t, control.WriteMessage(conn, &control.Hello{
+		Type:     control.TypeHello,
+		Protocol: control.ProtocolVersion,
+		Token:    strings.Repeat("b", 32),
+		ClientID: "legacy-client",
+		Name:     "legacy",
+		Version:  "test",
+		Revision: 0,
+	}))
+	msg, err := control.ReadMessage(conn)
+	require.NoError(t, err)
+	ack, ok := msg.(*control.HelloAck)
+	require.True(t, ok)
+	require.True(t, ack.OK)
+	require.Equal(t, int64(2), ack.CredentialGeneration)
+	require.False(t, ack.CredentialSynced)
+
+	require.NoError(t, waitFor(t, 5*time.Second, func() bool {
+		v := srv.Clients()
+		return len(v) == 1 &&
+			v[0].CredentialGeneration == 1 &&
+			!v[0].CredentialSynced &&
+			!v[0].CredentialCapable
+	}))
+}
+
+func TestHelloCurrentGenerationAndCapability(t *testing.T) {
+	srv, stop := startTestServer(t)
+	defer stop()
+
+	hy := newHY2Client(t, srv, "pw", nil)
+	conn, err := hy.TCP("_hy2tun_control_:0")
+	require.NoError(t, err)
+	defer conn.Close()
+
+	require.NoError(t, control.WriteMessage(conn, &control.Hello{
+		Type:                 control.TypeHello,
+		Protocol:             control.ProtocolVersion,
+		Token:                "0123456789abcdef0123456789abcdef",
+		ClientID:             "capable-client",
+		Name:                 "capable",
+		Version:              "test",
+		Revision:             0,
+		CredentialGeneration: 1,
+		Capabilities:         []string{control.CapabilityCredentialUpdate},
+	}))
+	msg, err := control.ReadMessage(conn)
+	require.NoError(t, err)
+	ack, ok := msg.(*control.HelloAck)
+	require.True(t, ok)
+	require.True(t, ack.OK)
+	require.Equal(t, int64(1), ack.CredentialGeneration)
+	require.True(t, ack.CredentialSynced)
+
+	require.NoError(t, waitFor(t, 5*time.Second, func() bool {
+		v := srv.Clients()
+		return len(v) == 1 &&
+			v[0].CredentialGeneration == 1 &&
+			v[0].CredentialSynced &&
+			v[0].CredentialCapable
+	}))
+}
+
+func TestCredentialAckIsForwardedToSession(t *testing.T) {
+	srv, stop := startTestServer(t)
+	defer stop()
+
+	hy := newHY2Client(t, srv, "pw", nil)
+	conn, err := hy.TCP("_hy2tun_control_:0")
+	require.NoError(t, err)
+	defer conn.Close()
+
+	require.NoError(t, control.WriteMessage(conn, &control.Hello{
+		Type:                 control.TypeHello,
+		Protocol:             control.ProtocolVersion,
+		Token:                "0123456789abcdef0123456789abcdef",
+		ClientID:             "ack-client",
+		Name:                 "ack",
+		Version:              "test",
+		Revision:             0,
+		CredentialGeneration: 1,
+		Capabilities:         []string{control.CapabilityCredentialUpdate},
+	}))
+	msg, err := control.ReadMessage(conn)
+	require.NoError(t, err)
+	_, ok := msg.(*control.HelloAck)
+	require.True(t, ok)
+
+	srv.mappings.mu.Lock()
+	sess := srv.mappings.sessions["ack-client"]
+	srv.mappings.mu.Unlock()
+	require.NotNil(t, sess)
+
+	require.NoError(t, control.WriteMessage(conn, &control.CredentialAck{
+		Type:       control.TypeCredentialAck,
+		Generation: 2,
+		OK:         true,
+	}))
+	select {
+	case generation := <-sess.credentialAck:
+		require.Equal(t, int64(2), generation)
+	case <-time.After(2 * time.Second):
+		t.Fatal("credential ack was not forwarded to the session")
+	}
+}
+
+func TestNameOnlyUpdatePersists(t *testing.T) {
+	srv, stop := startTestServer(t)
+	defer stop()
+
+	hy := newHY2Client(t, srv, "pw", nil)
+	conn, err := hy.TCP("_hy2tun_control_:0")
+	require.NoError(t, err)
+	defer conn.Close()
+
+	require.NoError(t, control.WriteMessage(conn, &control.Hello{
+		Type:     control.TypeHello,
+		Protocol: control.ProtocolVersion,
+		Token:    "0123456789abcdef0123456789abcdef",
+		ClientID: "rename-client",
+		Name:     "before",
+		Version:  "test",
+		Revision: 0,
+	}))
+	msg, err := control.ReadMessage(conn)
+	require.NoError(t, err)
+	_, ok := msg.(*control.HelloAck)
+	require.True(t, ok)
+
+	require.NoError(t, control.WriteMessage(conn, &control.Update{
+		Type:     control.TypeUpdate,
+		Revision: 1,
+		Name:     "after",
+	}))
+	msg, err = control.ReadMessage(conn)
+	require.NoError(t, err)
+	ack, ok := msg.(*control.UpdateAck)
+	require.True(t, ok)
+	require.Equal(t, int64(1), ack.Revision)
+
+	require.NoError(t, waitFor(t, 5*time.Second, func() bool {
+		client, ok := srv.Client("rename-client")
+		return ok && client.Name == "after"
+	}))
+	snapshot := srv.store.Snapshot()
+	require.Equal(t, "after", snapshot.Clients["rename-client"].Name)
 }
 
 func TestServerViews(t *testing.T) {

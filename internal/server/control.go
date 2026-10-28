@@ -1,7 +1,6 @@
 package server
 
 import (
-	"crypto/subtle"
 	"errors"
 	"io"
 	"log/slog"
@@ -57,7 +56,8 @@ func (h *controlHandler) Serve(conn net.Conn) {
 		h.reject(conn, control.CodeUnsupportedProtocol)
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(hello.Token), []byte(h.server.cfg.Control.Token)) != 1 {
+	set := h.server.currentCredentials()
+	if _, ok := set.AcceptControlToken(hello.Token); !ok {
 		h.reject(conn, control.CodeUnauthorized)
 		return
 	}
@@ -69,25 +69,43 @@ func (h *controlHandler) Serve(conn net.Conn) {
 		h.reject(conn, control.CodeBadMessage)
 		return
 	}
+	if hello.CredentialGeneration < 0 {
+		h.reject(conn, control.CodeBadMessage)
+		return
+	}
 	_ = conn.SetReadDeadline(time.Time{})
 
+	// A missing generation means a legacy client that predates credential
+	// rotation. Treat it as the initial generation so it reports as synced
+	// until the first rotation.
+	generation := hello.CredentialGeneration
+	if generation == 0 {
+		generation = 1
+	}
+
 	sess := &clientSession{
-		id:              hello.ClientID,
-		name:            hello.Name,
-		version:         hello.Version,
-		revision:        hello.Revision,
-		appliedRevision: hello.Revision,
-		conn:            conn,
-		ready:           make(chan struct{}),
-		done:            make(chan struct{}),
+		id:                   hello.ClientID,
+		name:                 hello.Name,
+		version:              hello.Version,
+		revision:             hello.Revision,
+		appliedRevision:      hello.Revision,
+		credentialGeneration: generation,
+		credentialSynced:     set.Synced(generation),
+		canCredentialUpdate:  hasCapability(hello.Capabilities, control.CapabilityCredentialUpdate),
+		credentialAck:        make(chan int64, 1),
+		conn:                 conn,
+		ready:                make(chan struct{}),
+		done:                 make(chan struct{}),
 	}
 	results := h.server.mappings.register(sess, hello.Mappings)
 
 	ack := &control.HelloAck{
-		Type:          control.TypeHelloAck,
-		OK:            true,
-		ServerVersion: version.Version,
-		Results:       results,
+		Type:                 control.TypeHelloAck,
+		OK:                   true,
+		ServerVersion:        version.Version,
+		CredentialGeneration: set.Generation,
+		CredentialSynced:     sess.credentialSynced,
+		Results:              results,
 	}
 	if err := sess.write(ack); err != nil {
 		h.server.mappings.detach(sess)
@@ -101,6 +119,16 @@ func (h *controlHandler) Serve(conn net.Conn) {
 		"mappings", len(hello.Mappings),
 	)
 	h.loop(sess)
+}
+
+// hasCapability reports whether capabilities advertises want.
+func hasCapability(capabilities []string, want string) bool {
+	for _, capability := range capabilities {
+		if capability == want {
+			return true
+		}
+	}
+	return false
 }
 
 // reject sends a failed HelloAck with the given stable error code and closes
@@ -140,6 +168,22 @@ func (h *controlHandler) loop(sess *clientSession) {
 					"revision", message.Revision,
 				)
 			}
+		case *control.CredentialAck:
+			// Rotation waits on this channel. Forward any ack non-blockingly:
+			// the client reports the generation it applied, which can be newer
+			// than the generation this session registered with.
+			if message.Generation != sess.credentialGeneration {
+				h.log.Debug("credential ack generation differs from session",
+					"client", sess.id,
+					"generation", message.Generation,
+					"session_generation", sess.credentialGeneration,
+					"ok", message.OK,
+				)
+			}
+			select {
+			case sess.credentialAck <- message.Generation:
+			default:
+			}
 		case *control.Ping:
 			if err := sess.write(&control.Pong{Type: control.TypePong, TS: message.TS}); err != nil {
 				return
@@ -165,6 +209,11 @@ func (h *controlHandler) loop(sess *clientSession) {
 func (h *controlHandler) handleUpdate(sess *clientSession, message *control.Update) {
 	sess.controlMu.Lock()
 	results, accepted, resync := h.server.mappings.update(sess, message.Revision, message.Mappings)
+	if accepted && message.Name != "" {
+		// The update already persisted the mapping state. A rename is a
+		// separate write so a name-only update needs no mapping changes.
+		h.server.mappings.rename(sess, message.Name)
+	}
 	ack := &control.UpdateAck{
 		Type:     control.TypeUpdateAck,
 		Revision: h.server.mappings.sessionRevision(sess),

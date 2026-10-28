@@ -27,6 +27,24 @@ type ClientView struct {
 	Online   bool
 	LastSeen time.Time
 	Mappings []MappingView
+
+	// CredentialGeneration is the credential pair the client reported.
+	// CredentialSynced reports whether it matches the server's current pair.
+	// CredentialCapable reports whether the client accepts pushed credential
+	// updates.
+	CredentialGeneration int64
+	CredentialSynced     bool
+	CredentialCapable    bool
+}
+
+// CredentialResult reports the outcome of syncing a credential generation to
+// one client.
+type CredentialResult struct {
+	ClientID   string
+	Name       string
+	Generation int64
+	Status     string
+	Error      string
 }
 
 // Overview summarizes the whole server.

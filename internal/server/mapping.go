@@ -151,6 +151,18 @@ type clientSession struct {
 	// Both are guarded by mappingManager.mu.
 	appliedRevision int64
 
+	// credentialGeneration is the pair the client reported in Hello.
+	// credentialSynced reports whether it matches the server's current
+	// generation. canCredentialUpdate reports whether the client advertised
+	// the credential_update_v1 capability. These are written before the
+	// session is registered and read under mappingManager.mu.
+	credentialGeneration int64
+	credentialSynced     bool
+	canCredentialUpdate  bool
+	// credentialAck receives the generation of the next CredentialAck. The
+	// control read loop sends non-blockingly, so a late ack cannot stall it.
+	credentialAck chan int64
+
 	// ready is closed once the HelloAck has been written, so data-plane opens
 	// cannot overtake the handshake. done is closed when the session is
 	// detached.
@@ -457,6 +469,24 @@ func (m *mappingManager) updateLocked(sess *clientSession, revision int64, mappi
 	sess.lastSeen = now
 	m.persistLocked(sess, now)
 	return results, true, false
+}
+
+// rename updates a live session's display name and persists it for offline
+// views. A session that has already been replaced is left untouched.
+func (m *mappingManager) rename(sess *clientSession, name string) {
+	now := time.Now()
+
+	m.mu.Lock()
+	if m.sessions[sess.id] != sess {
+		m.mu.Unlock()
+		return
+	}
+	sess.name = name
+	sess.lastSeen = now
+	m.persistLocked(sess, now)
+	m.mu.Unlock()
+
+	m.saveState()
 }
 
 // mappingPortUnchanged reports whether next keeps the port currently bound for
@@ -892,12 +922,15 @@ func (m *mappingManager) clientViews() []view.ClientView {
 
 func sessionView(sess *clientSession) view.ClientView {
 	clientView := view.ClientView{
-		ID:       sess.id,
-		Name:     sess.name,
-		Version:  sess.version,
-		Revision: sess.revision,
-		Online:   sess.online,
-		LastSeen: sess.lastSeen,
+		ID:                   sess.id,
+		Name:                 sess.name,
+		Version:              sess.version,
+		Revision:             sess.revision,
+		Online:               sess.online,
+		LastSeen:             sess.lastSeen,
+		CredentialGeneration: sess.credentialGeneration,
+		CredentialSynced:     sess.credentialSynced,
+		CredentialCapable:    sess.canCredentialUpdate,
 	}
 	for _, id := range sess.order {
 		rt := sess.mappings[id]
