@@ -50,6 +50,10 @@ type Server struct {
 	// and the control-token check. It is replaced atomically on rotation.
 	credentials *credentials.Store
 
+	// rotationMu serializes credential rotation and revoke. Auto-push holds it
+	// while waiting for client acks, so two rotations cannot interleave.
+	rotationMu sync.Mutex
+
 	// trustProxy mirrors cfg.Web.TrustProxy for readers that must not hold
 	// settingsMu, and is updated together with the web console's login handler.
 	trustProxy atomic.Bool

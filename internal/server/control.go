@@ -182,9 +182,12 @@ func (h *controlHandler) loop(sess *clientSession) {
 					"ok", message.OK,
 				)
 			}
-			select {
-			case sess.credentialAck <- message:
-			default:
+			if !sess.deliverCredentialAck(message) {
+				h.log.Debug("ignoring unexpected credential ack",
+					"client", sess.id,
+					"generation", message.Generation,
+					"ok", message.OK,
+				)
 			}
 		case *control.Ping:
 			if err := sess.write(&control.Pong{Type: control.TypePong, TS: message.TS}); err != nil {

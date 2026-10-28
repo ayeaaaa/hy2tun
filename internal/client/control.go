@@ -226,15 +226,21 @@ func (c *Client) handshake(conn net.Conn) error {
 	defer func() { _ = conn.SetDeadline(time.Time{}) }()
 
 	cfg := c.snapshotConfig()
+	generation := cfg.Credentials.Generation
+	if generation < 1 {
+		generation = 1
+	}
 	hello := &control.Hello{
-		Type:     control.TypeHello,
-		Protocol: control.ProtocolVersion,
-		Token:    cfg.Control.Token,
-		ClientID: cfg.Client.ID,
-		Name:     cfg.Client.Name,
-		Version:  version.Version,
-		Revision: cfg.Client.Revision,
-		Mappings: cfg.Mappings,
+		Type:                 control.TypeHello,
+		Protocol:             control.ProtocolVersion,
+		Token:                cfg.Control.Token,
+		ClientID:             cfg.Client.ID,
+		Name:                 cfg.Client.Name,
+		Version:              version.Version,
+		Revision:             cfg.Client.Revision,
+		CredentialGeneration: generation,
+		Capabilities:         []string{control.CapabilityCredentialUpdate},
+		Mappings:             cfg.Mappings,
 	}
 	if err := c.writeControl(conn, hello); err != nil {
 		return fmt.Errorf("send control hello: %w", err)
@@ -331,6 +337,8 @@ func (c *Client) serveControl(conn net.Conn) error {
 			c.handlePush(conn, message)
 		case *control.UpdateAck:
 			c.handleUpdateAck(message)
+		case *control.CredentialUpdate:
+			c.handleCredentialUpdate(conn, message)
 		case *control.Ping:
 			if err := c.writeControl(conn, &control.Pong{
 				Type: control.TypePong,
@@ -496,6 +504,73 @@ func (c *Client) handleUpdateAck(ack *control.UpdateAck) {
 		c.setMappingResults(effective, ack.Results)
 	}
 	c.reconcileUDPMappings()
+}
+
+// handleCredentialUpdate applies a server-pushed credential pair. The config is
+// written before the ack, so a successful ack always means the new values are
+// durable. The control stream is then closed so the reconnect uses the new
+// credentials.
+func (c *Client) handleCredentialUpdate(conn net.Conn, msg *control.CredentialUpdate) {
+	if conn == nil || msg == nil {
+		return
+	}
+	ack := &control.CredentialAck{
+		Type:       control.TypeCredentialAck,
+		Generation: msg.Generation,
+	}
+
+	c.configMu.Lock()
+	currentGeneration := c.cfg.Credentials.Generation
+	if currentGeneration < 1 {
+		currentGeneration = 1
+	}
+	switch {
+	case msg.Generation <= currentGeneration:
+		c.configMu.Unlock()
+		ack.Error = "stale_generation"
+		c.writeCredentialAck(conn, ack)
+		return
+	case msg.Auth == "" || msg.ControlToken == "":
+		c.configMu.Unlock()
+		ack.Error = "invalid_credentials"
+		c.writeCredentialAck(conn, ack)
+		return
+	}
+
+	next := cloneClientConfig(c.cfg)
+	next.Auth = msg.Auth
+	next.Control.Token = msg.ControlToken
+	next.Credentials = config.CredentialsConfig{Generation: msg.Generation}
+	tokens := c.udpTokenSnapshot()
+	views := c.mappingSnapshot()
+	if err := next.Validate(); err != nil {
+		c.configMu.Unlock()
+		ack.Error = "invalid_credentials"
+		c.writeCredentialAck(conn, ack)
+		return
+	}
+	if err := writeConfigAtomic(c.configPath, next); err != nil {
+		c.configMu.Unlock()
+		c.log.Warn("write rotated credentials", "error", err)
+		ack.Error = "write_failed"
+		c.writeCredentialAck(conn, ack)
+		return
+	}
+	c.storeConfigLocked(next, tokens, views)
+	c.configMu.Unlock()
+
+	ack.OK = true
+	c.writeCredentialAck(conn, ack)
+	c.log.Info("credentials updated", "generation", msg.Generation)
+	// The server closes the control stream after processing the ack, which
+	// makes runOnce return and Start reconnect with the new pair. Closing the
+	// stream here would race the ack write and can discard it on the wire.
+}
+
+func (c *Client) writeCredentialAck(conn net.Conn, ack *control.CredentialAck) {
+	if err := c.writeControl(conn, ack); err != nil {
+		c.log.Warn("send credential ack", "error", err)
+	}
 }
 
 // applyRejectedUpdateResults marks mappings that are not already running as

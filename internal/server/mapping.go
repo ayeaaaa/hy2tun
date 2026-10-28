@@ -162,6 +162,11 @@ type clientSession struct {
 	// result. The control read loop sends non-blockingly, so a late ack cannot
 	// stall it.
 	credentialAck chan *control.CredentialAck
+	// credentialWaitMu guards credentialWaitGen. A rotation records the
+	// generation it is pushing so the control loop can drop stale acks before
+	// they occupy the single-slot ack channel.
+	credentialWaitMu  sync.Mutex
+	credentialWaitGen int64
 
 	// ready is closed once the HelloAck has been written, so data-plane opens
 	// cannot overtake the handshake. done is closed when the session is
@@ -211,6 +216,69 @@ func (s *clientSession) credentialState() (generation int64, synced, capable boo
 	s.credentialMu.Lock()
 	defer s.credentialMu.Unlock()
 	return s.credentialGeneration, s.credentialSynced, s.canCredentialUpdate
+}
+
+// setCredentialWait records the generation a credential push is waiting for.
+// Zero means no push is in flight.
+func (s *clientSession) setCredentialWait(generation int64) {
+	if s == nil {
+		return
+	}
+	s.credentialWaitMu.Lock()
+	s.credentialWaitGen = generation
+	s.credentialWaitMu.Unlock()
+}
+
+// deliverCredentialAck forwards an ack to a waiting rotation. Acks for another
+// generation are dropped so a stale ack cannot fill the buffered channel and
+// hide the matching ack.
+func (s *clientSession) deliverCredentialAck(ack *control.CredentialAck) bool {
+	if s == nil || ack == nil {
+		return false
+	}
+	s.credentialWaitMu.Lock()
+	expected := s.credentialWaitGen
+	s.credentialWaitMu.Unlock()
+	if expected != 0 && ack.Generation != expected {
+		return false
+	}
+	select {
+	case s.credentialAck <- ack:
+		return true
+	default:
+		return false
+	}
+}
+
+// drainCredentialAcks removes acks left behind by an earlier timed-out push.
+func (s *clientSession) drainCredentialAcks() {
+	if s == nil {
+		return
+	}
+	for {
+		select {
+		case <-s.credentialAck:
+		default:
+			return
+		}
+	}
+}
+
+// isReady reports whether the handshake response has been written. Credential
+// pushes must not overtake the hello_ack.
+func (s *clientSession) isReady() bool {
+	if s == nil {
+		return false
+	}
+	if s.ready == nil {
+		return true
+	}
+	select {
+	case <-s.ready:
+		return true
+	default:
+		return false
+	}
 }
 
 // waitReady blocks until the handshake response has been written, the session
@@ -945,6 +1013,30 @@ func (m *mappingManager) overview() (onlineClients, activeMappings int, txBytes,
 		}
 	}
 	return onlineClients, activeMappings, txBytes, rxBytes
+}
+
+// sessionEntry is a live session together with the metadata read under the
+// manager lock. Credential pushes and status reads use the copy so a concurrent
+// rename cannot race them.
+type sessionEntry struct {
+	sess *clientSession
+	id   string
+	name string
+}
+
+// sessionSnapshot returns the live sessions without holding the manager lock
+// while callers send control messages or wait for acks.
+func (m *mappingManager) sessionSnapshot() []sessionEntry {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]sessionEntry, 0, len(m.sessions))
+	for _, sess := range m.sessions {
+		out = append(out, sessionEntry{sess: sess, id: sess.id, name: sess.name})
+	}
+	return out
 }
 
 // clientViews returns a consistent snapshot of live sessions merged with
