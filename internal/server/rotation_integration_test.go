@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -658,4 +659,100 @@ func TestCredentialRotationKeepsTCPAndUDP(t *testing.T) {
 		}
 		return true
 	}), "both mappings must be running after the reconnect: %+v", pair.Server.Clients())
+}
+
+// TestHotConfigWriteFailureLeavesRuntimeUnchanged proves that every hot
+// settings mutation persists the configuration before swapping runtime state.
+// A failed write must leave credentials, ports, the web administrator, and the
+// live client untouched.
+func TestHotConfigWriteFailureLeavesRuntimeUnchanged(t *testing.T) {
+	echoAddr, stopEcho := testutil.StartTCPEcho(t)
+	defer stopEcho()
+
+	cert, err := testutil.SelfSignedCert("localhost")
+	require.NoError(t, err)
+	serverCfg := validServerConfig(cert)
+	dir := t.TempDir()
+	serverCfg.ConfigPath = filepath.Join(dir, "server.yaml")
+	require.NoError(t, config.SaveServer(serverCfg.ConfigPath, serverCfg))
+
+	srv, stopServer := startServer(t, serverCfg)
+	defer stopServer()
+
+	clientCfg := testClientConfig(srv.ListenAddr().String(), []config.Mapping{
+		{ID: "tcp1", Type: "tcp", RemotePort: 0, LocalAddr: echoAddr, Enabled: true},
+	})
+	clientConfigPath := filepath.Join(dir, "client.yaml")
+	require.NoError(t, config.SaveClient(clientConfigPath, clientCfg))
+	cl, err := client.New(clientCfg, slog.Default())
+	require.NoError(t, err)
+	clientCtx, stopClient := context.WithCancel(context.Background())
+	defer stopClient()
+	go func() { _ = cl.Start(clientCtx) }()
+	defer func() { _ = cl.Close() }()
+
+	readyCtx, cancelReady := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelReady()
+	require.NoError(t, cl.WaitReady(readyCtx))
+
+	require.NoError(t, waitFor(t, 5*time.Second, func() bool {
+		v := srv.Clients()
+		return len(v) == 1 && len(v[0].Mappings) == 1 &&
+			v[0].Mappings[0].Status == "running" &&
+			v[0].Mappings[0].AssignedPort != 0
+	}))
+	publicAddr := fmt.Sprintf("127.0.0.1:%d", srv.Clients()[0].Mappings[0].AssignedPort)
+	requirePublicTCPEcho(t, publicAddr, "before-write-failure")
+
+	beforeCreds := srv.CredentialsSnapshot()
+	beforeSummary := srv.ConfigSummary()
+
+	writeErr := errors.New("write failed")
+	originalSave := srv.saveConfig
+	srv.saveConfig = func(string, *config.ServerConfig) error { return writeErr }
+	// Restore the seam before the test cleanup stops the server.
+	defer func() { srv.saveConfig = originalSave }()
+
+	// RotateCredentials persists the new generation before swapping runtime
+	// credentials. A failed write must not change the live pair or push to the
+	// connected client.
+	_, _, err = srv.RotateCredentials("new-auth-password", "new-control-token-0123456789", "auto")
+	require.ErrorIs(t, err, writeErr)
+	afterCreds := srv.CredentialsSnapshot()
+	require.Equal(t, beforeCreds.Generation, afterCreds.Generation)
+	require.Equal(t, beforeCreds.Auth, afterCreds.Auth)
+	require.Equal(t, beforeCreds.ControlToken, afterCreds.ControlToken)
+	require.Equal(t, beforeCreds.PreviousGeneration, afterCreds.PreviousGeneration)
+	require.Equal(t, beforeCreds.PreviousAuth, afterCreds.PreviousAuth)
+	require.Equal(t, beforeCreds.PreviousControlToken, afterCreds.PreviousControlToken)
+	requirePublicTCPEcho(t, publicAddr, "after-rotate-write-failure")
+
+	// UpdatePorts persists before swapping the live policy.
+	err = srv.UpdatePorts([]string{"26000"}, nil, "26000-26099", 2*time.Hour)
+	require.ErrorIs(t, err, writeErr)
+	afterSummary := srv.ConfigSummary()
+	require.Equal(t, beforeSummary.PortsAllow, afterSummary.PortsAllow)
+	require.Equal(t, beforeSummary.PortsDeny, afterSummary.PortsDeny)
+	require.Equal(t, beforeSummary.PortsAutoRange, afterSummary.PortsAutoRange)
+	require.Equal(t, beforeSummary.OfflineReserve, afterSummary.OfflineReserve)
+	requirePublicTCPEcho(t, publicAddr, "after-ports-write-failure")
+
+	// UpdateWebConfig persists before replacing the live web administrator.
+	hash, err := bcrypt.GenerateFromPassword([]byte("new-web-password"), bcrypt.MinCost)
+	require.NoError(t, err)
+	err = srv.UpdateWebConfig("root", string(hash))
+	require.ErrorIs(t, err, writeErr)
+	afterSummary = srv.ConfigSummary()
+	require.Equal(t, beforeSummary.WebUsername, afterSummary.WebUsername)
+	require.Equal(t, beforeSummary.WebPasswordConfigured, afterSummary.WebPasswordConfigured)
+	requirePublicTCPEcho(t, publicAddr, "after-web-write-failure")
+
+	// The client was never pushed or disconnected by the failed mutations.
+	views := srv.Clients()
+	require.Len(t, views, 1)
+	require.True(t, views[0].Online)
+	require.Equal(t, beforeCreds.Generation, views[0].CredentialGeneration)
+	require.True(t, views[0].CredentialSynced)
+	require.Len(t, views[0].Mappings, 1)
+	require.Equal(t, "running", views[0].Mappings[0].Status)
 }
