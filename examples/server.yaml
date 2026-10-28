@@ -54,7 +54,8 @@ control:
 
 # Credential generation. The server maintains this automatically when the HY2
 # password or control token is rotated from the web console. Missing or 0
-# means generation 1. The previous pair remains valid until it is revoked.
+# means generation 1. The previous pair remains valid until it is revoked or
+# replaced by another rotation.
 credentials:
   generation: 1
   # Written by the server during rotation. Both previous values are required

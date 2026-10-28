@@ -373,8 +373,8 @@ Task Scheduler instructions and firewall notes.
 | `control.token` | Shared control secret, at least 16 bytes. Use 32 random bytes. |
 | `credentials.generation` | Current credential generation. Missing or `0` means `1`; rotation writes it. |
 | `credentials.previous_generation` | Previous generation retained during rotation; `0` means none. |
-| `credentials.previous_auth` | Previous HY2 password accepted until revoke. Required with `previous_generation`. |
-| `credentials.previous_control_token` | Previous control token accepted until revoke. Required with `previous_generation`. |
+| `credentials.previous_auth` | Previous HY2 password accepted until revoke or a later rotation replaces it. Required with `previous_generation`. |
+| `credentials.previous_control_token` | Previous control token accepted until revoke or a later rotation replaces it. Required with `previous_generation`. |
 | `ports.allow` | Ports or ranges clients may request. Empty means all free ports. |
 | `ports.deny` | Ports or ranges that are always rejected. Deny wins over allow. |
 | `ports.auto_range` | Range used for `remote_port: 0` when `allow` is empty. Default `20000-29999`. |
@@ -401,7 +401,7 @@ Task Scheduler instructions and firewall notes.
 | `obfs.type` | Must match the server. Empty or `salamander`. |
 | `bandwidth.up`, `bandwidth.down` | Optional client-side HY2 limits. |
 | `control.token` | Must match `control.token` on the server. |
-| `credentials.generation` | Client credential generation. Missing or `0` means `1`; server push or manual sync writes it. The client does not store previous credentials. |
+| `credentials.generation` | Client credential generation. Missing or `0` means `1`; server push or manual sync writes it. The client ignores the `previous_*` fields; they are reserved. |
 | `client.id` | Stable client ID. Empty generates one on first start. |
 | `client.name` | Display name in the server console. |
 | `client.revision` | Configuration revision. The client updates it automatically. |
@@ -504,10 +504,12 @@ to the YAML file atomically with mode `0600` (the previous file is kept as
 running configuration is unchanged and the API returns an error. No restart is
 needed for the settings marked online below.
 
-Every sensitive settings change requires the current web administrator
-password. Failed confirmations are rate-limited to five per minute per client
-IP. Mutations also require the CSRF header and same-origin `Origin` described
-in [Security model](#security-model).
+Every sensitive mutation on the **Settings** page requires the current web
+administrator password. Pushing or deleting a mapping from a client detail
+page requires a valid session and the CSRF header/Origin, but not a password
+re-entry. Failed settings-password confirmations are rate-limited to five per
+minute per client IP. Mutations also require the CSRF header and same-origin
+`Origin` described in [Security model](#security-model).
 
 ### Which settings are online-editable
 
@@ -565,15 +567,17 @@ When the server rotates credentials it increments `generation` by one and
 moves the old current pair into `credentials.previous_generation`,
 `credentials.previous_auth`, and `credentials.previous_control_token`. The
 server accepts both the current and the previous HY2 password and control
-token until the previous pair is revoked. On the server, the generation is
-used only for status reporting and for closing stale control sessions; it is
-not an authentication factor. A capable client that reports the previous
-generation is reported as `pending`.
+token until the previous pair is revoked or replaced by another rotation. On
+the server, the generation is used only for status reporting and for closing
+stale control sessions; it is not an authentication factor. A capable client
+that reports the previous generation is reported as `pending`.
 
-The client only tracks `credentials.generation`; it does not retain previous
-credentials. A pushed or manually applied rotation replaces its current pair.
-The previous pair is accepted for authentication only; it is never pushed to
-clients.
+The client only tracks `credentials.generation`.
+`previous_generation`, `previous_auth`, and `previous_control_token` are
+reserved and ignored in `client.yaml`; the client never retains or uses
+previous credentials. A pushed or manually applied rotation replaces its
+current pair. The server's previous pair is accepted for authentication only;
+it is never pushed to clients.
 
 ### Rotating credentials from the server console
 
@@ -608,7 +612,8 @@ Auto-push results are:
 Auto-push never retries automatically. The settings page polls
 `GET /api/settings` and shows the current status of every online client; offline
 clients are listed with an unknown generation. Offline clients are not pushed;
-clients still on the previous generation keep working until it is revoked.
+clients still on the previous generation keep working until it is revoked or
+superseded by a later rotation.
 
 A second rotation while a previous pair exists replaces that previous pair.
 Control sessions on generations older than the new previous generation are
@@ -676,13 +681,15 @@ shown.
 
 New clients send `credential_generation` and
 `capabilities: ["credential_update_v1"]` in the control `hello`. The server
-uses the capability only to decide whether auto-push is safe:
+uses the capability to gate auto-push and to mark non-capable clients as
+`unsupported`; it never sends them a `credential_update` message:
 
 - **Old client, new server** — after a rotation, a client that omits
   `credential_update_v1` is never sent a `credential_update` message, so it
   does not disconnect on an unknown message. It is marked `unsupported` and
-  keeps working with the previous credentials until they are revoked. Update
-  the client binary, or edit `client.yaml` manually and restart it.
+  keeps working with the previous credentials until they are revoked or
+  superseded by a later rotation. Update the client binary, or edit
+  `client.yaml` manually and restart it.
 - **Old client, missing generation** — a `hello` without
   `credential_generation` is treated as generation `1`. If the server is still
   on generation `1`, the client is reported as `synced`.
@@ -694,7 +701,8 @@ uses the capability only to decide whether auto-push is safe:
   `1` with no previous pair, so existing deployments upgrade in place.
 - **Standard Hysteria 2 clients** — they do not use the hy2tun control protocol
   and are unaffected except that the server accepts the current or previous
-  HY2 password until revoke, as described above.
+  HY2 password until revoke or until a later rotation replaces the previous
+  pair, as described above.
 
 ### Write order and failure behavior
 
@@ -804,10 +812,11 @@ the password and session cookie in transit.
 - Hot settings are persisted before they take effect. A failed validation or
   file write leaves the running credential set, port policy, and web login
   unchanged.
-- Rotation keeps the previous HY2 pair valid until an explicit revoke; revoke
-  closes control sessions that are not on the current generation. Standard
-  Hysteria 2 proxy connections that were already authenticated can survive
-  until they close naturally, because HY2 authenticates per connection.
+- Rotation keeps the previous HY2 pair valid until an explicit revoke or a
+  later rotation replaces it; revoke closes control sessions that are not on
+  the current generation. Standard Hysteria 2 proxy connections that were
+  already authenticated can survive until they close naturally, because HY2
+  authenticates per connection.
 - Login rate limiting keys on the direct peer by default. Set
   `web.trust_proxy: true` only behind a proxy that overwrites both
   `X-Forwarded-For` and `X-Real-IP`; otherwise forwarded headers are ignored so
@@ -904,13 +913,16 @@ with a smaller MTU can drop large datagrams before they arrive.
 
 - `unsupported` in the server sync table means the client predates
   `credential_update_v1`. It was not sent the new pair and stays connected on
-  the previous credentials. Update the client, or edit `client.yaml` and
-  restart it.
+  the previous credentials until they are revoked or superseded by a later
+  rotation. Update the client, or edit `client.yaml` and restart it.
 - `pending` or `timeout` after auto-push means the client did not confirm the
   new generation (not ready, a config write/ack failure, or no acknowledgement
   within five seconds). The previous pair is still valid, so the tunnel keeps
-  working. Check the client log for a config write error, then retry the
-  rotation or use manual sync. Auto-push is not retried automatically.
+  working. The server has already persisted the new pair: submitting the same
+  values again returns `no_change`, and there is no re-push endpoint. Use
+  manual client sync, or rotate again to a different pair. A second rotation
+  replaces the previous pair, so clients on even older generations are
+  disconnected immediately.
 - `no_change` means both fields were blank or matched the current pair; no new
   generation was created.
 - `unsupported_auth_type` means the server uses `auth.type: userpass`, which

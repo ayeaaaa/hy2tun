@@ -108,7 +108,10 @@
       </div>
     </div>
     <div class="notice">
-      轮换后旧凭据仍然有效，直到点击“撤销旧凭据”。自动推送最多等待每个客户端 5 秒；未确认的客户端保持待同步。旧客户端不支持推送时会显示“不支持”。
+      轮换后旧凭据仍然有效，直到点击“撤销旧凭据”或被下一次轮换替换。自动推送最多等待每个客户端 5 秒；未确认的客户端保持待同步。旧客户端不支持推送时会显示“不支持”。
+    </div>
+    <div class="notice" data-second-rotation-warning{{if not .Settings.Credentials.PreviousGeneration}} hidden{{end}}>
+      当前存在上一代凭据（代际 <span data-second-rotation-generation>{{.Settings.Credentials.PreviousGeneration}}</span>）。再次轮换会替换上一代：只有紧邻的上一代继续有效，仍在使用更早代际的客户端会立即断开。
     </div>
     <div class="form-actions">
       <button type="submit" class="btn btn-primary" {{if not .Settings.Credentials.Rotatable}}disabled{{end}}>保存并轮换</button>

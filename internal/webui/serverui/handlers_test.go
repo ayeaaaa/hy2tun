@@ -1156,6 +1156,69 @@ func TestServerSettingsAPIReturnsMaskedValues(t *testing.T) {
 	require.Contains(t, page, "office")
 }
 
+func elementTag(t *testing.T, page, marker string) string {
+	t.Helper()
+	idx := strings.Index(page, marker)
+	require.NotEqual(t, -1, idx, "marker %q not found", marker)
+	start := strings.LastIndex(page[:idx], "<")
+	require.NotEqual(t, -1, start)
+	end := strings.Index(page[idx:], ">")
+	require.NotEqual(t, -1, end)
+	return page[start : idx+end+1]
+}
+
+func TestServerSettingsWarnsOnSecondRotation(t *testing.T) {
+	t.Run("with previous generation", func(t *testing.T) {
+		api := &fakeServerAPI{
+			settings: SettingsView{
+				Credentials: CredentialSettingsView{
+					Generation:         2,
+					PreviousGeneration: 1,
+					Rotatable:          true,
+				},
+			},
+		}
+		_, ts := newTestWeb(t, api)
+		cookie := login(t, ts)
+
+		// The settings JSON must expose the previous generation so the page
+		// can decide whether a second rotation replaces it.
+		resp := doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/api/settings", "", cookie, nil)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		var settings SettingsView
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&settings))
+		resp.Body.Close()
+		require.Equal(t, int64(1), settings.Credentials.PreviousGeneration)
+
+		resp = doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/settings", "", cookie, nil)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		page := readBody(t, resp)
+		warningTag := elementTag(t, page, "data-second-rotation-warning")
+		require.NotContains(t, warningTag, "hidden")
+		require.Contains(t, page, "更早代际")
+		require.Contains(t, page, "立即断开")
+	})
+
+	t.Run("without previous generation", func(t *testing.T) {
+		api := &fakeServerAPI{
+			settings: SettingsView{
+				Credentials: CredentialSettingsView{
+					Generation: 1,
+					Rotatable:  true,
+				},
+			},
+		}
+		_, ts := newTestWeb(t, api)
+		cookie := login(t, ts)
+
+		resp := doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/settings", "", cookie, nil)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		page := readBody(t, resp)
+		warningTag := elementTag(t, page, "data-second-rotation-warning")
+		require.Contains(t, warningTag, "hidden")
+	})
+}
+
 func TestServerSettingsRotateCredentials(t *testing.T) {
 	api := &fakeServerAPI{
 		rotateGeneration: 3,

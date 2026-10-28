@@ -39,8 +39,8 @@ control:
   token: "replace-with-the-server-control-token"
 
 # Credential generation. A server push or manual sync from the client web
-# console updates it; missing or 0 means generation 1. The client does not
-# store previous credentials.
+# console updates it; missing or 0 means generation 1. The previous_* fields
+# are reserved and ignored by the client.
 credentials:
   generation: 1
 

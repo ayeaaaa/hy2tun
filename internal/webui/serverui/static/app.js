@@ -786,6 +786,16 @@
         "[data-settings-previous-generation]",
         credentials.previous_generation ? String(credentials.previous_generation) : "—"
       );
+      const secondRotationWarning = $("[data-second-rotation-warning]");
+      if (secondRotationWarning) {
+        secondRotationWarning.hidden = !(Number(credentials.previous_generation) > 0);
+      }
+      const secondRotationGeneration = $("[data-second-rotation-generation]");
+      if (secondRotationGeneration) {
+        secondRotationGeneration.textContent = credentials.previous_generation
+          ? String(credentials.previous_generation)
+          : "";
+      }
       updateSecretMasks(credentials);
       renderCredentialClients(settings.clients);
       const count = $("[data-credential-client-count]");
@@ -994,8 +1004,8 @@
       const previous = $("[data-settings-previous-generation]");
       const hasPrevious = previous && previous.textContent.trim() !== "" && previous.textContent.trim() !== "—";
       const warning = hasPrevious
-        ? "轮换后旧凭据仍然有效，直到撤销。自动推送会等待在线客户端确认，未确认的客户端保持待同步。继续轮换？"
-        : "确认轮换 HY2 凭据？旧凭据会保留为上一代，直到显式撤销。";
+        ? "当前存在上一代凭据。继续轮换会替换上一代：只有紧邻的上一代保持有效，仍在使用更早代际的客户端会立即断开。自动推送会等待在线客户端确认，未确认的客户端保持待同步。继续轮换？"
+        : "确认轮换 HY2 凭据？旧凭据会保留为上一代，直到显式撤销或被下一次轮换替换。";
       if (!window.confirm(warning)) {
         return;
       }
