@@ -569,3 +569,154 @@ func TestPreviousCredentialSecretsAreNotSerializedToJSON(t *testing.T) {
 	require.Contains(t, string(data), `"generation":2`)
 	require.Contains(t, string(data), `"previous_generation":1`)
 }
+
+func TestClientConfigAcceptsPortHoppingServer(t *testing.T) {
+	for _, server := range []string{
+		"127.0.0.1:443,8443",
+		"127.0.0.1:20000-20010",
+		"127.0.0.1:443,5000-5001,8443",
+	} {
+		cfg := validClientConfig()
+		cfg.Server = server
+		require.NoError(t, cfg.Validate(), server)
+		require.True(t, cfg.ServerPortHopping(), server)
+	}
+}
+
+func TestClientConfigRejectsBadPortHoppingServer(t *testing.T) {
+	for _, server := range []string{
+		"127.0.0.1",
+		"127.0.0.1:0",
+		"127.0.0.1:65536",
+		"127.0.0.1:443-",
+		"127.0.0.1:443,",
+		"127.0.0.1:443-442",
+		":443",
+	} {
+		cfg := validClientConfig()
+		cfg.Server = server
+		require.Error(t, cfg.Validate(), server)
+	}
+}
+
+func TestClientConfigNormalizesOnePortSet(t *testing.T) {
+	for _, server := range []string{"127.0.0.1:443,443", "127.0.0.1:443-443"} {
+		cfg := validClientConfig()
+		cfg.Server = server
+		require.NoError(t, cfg.Validate(), server)
+		require.False(t, cfg.ServerPortHopping(), server)
+		normalized, hopping, err := cfg.NormalizedServer()
+		require.NoError(t, err, server)
+		require.False(t, hopping, server)
+		require.Equal(t, "127.0.0.1:443", normalized, server)
+	}
+}
+
+func TestClientConfigPortHoppingIntervals(t *testing.T) {
+	tests := []struct {
+		name    string
+		udp     *ClientTransportUDPConfig
+		wantMin time.Duration
+		wantMax time.Duration
+		wantErr string
+	}{
+		{
+			name: "default",
+		},
+		{
+			name:    "fixed",
+			udp:     &ClientTransportUDPConfig{HopInterval: Duration(30 * time.Second)},
+			wantMin: 30 * time.Second,
+			wantMax: 30 * time.Second,
+		},
+		{
+			name:    "random",
+			udp:     &ClientTransportUDPConfig{MinHopInterval: Duration(15 * time.Second), MaxHopInterval: Duration(45 * time.Second)},
+			wantMin: 15 * time.Second,
+			wantMax: 45 * time.Second,
+		},
+		{
+			name:    "both fixed and random",
+			udp:     &ClientTransportUDPConfig{HopInterval: Duration(30 * time.Second), MinHopInterval: Duration(15 * time.Second), MaxHopInterval: Duration(45 * time.Second)},
+			wantErr: "hop_interval cannot be used together",
+		},
+		{
+			name:    "only min",
+			udp:     &ClientTransportUDPConfig{MinHopInterval: Duration(15 * time.Second)},
+			wantErr: "min_hop_interval and max_hop_interval must both be set",
+		},
+		{
+			name:    "too short",
+			udp:     &ClientTransportUDPConfig{HopInterval: Duration(4 * time.Second)},
+			wantErr: "at least 5s",
+		},
+		{
+			name:    "min greater than max",
+			udp:     &ClientTransportUDPConfig{MinHopInterval: Duration(45 * time.Second), MaxHopInterval: Duration(15 * time.Second)},
+			wantErr: "must not be greater",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validClientConfig()
+			cfg.Server = "127.0.0.1:30000-30001"
+			if tt.udp != nil {
+				cfg.Transport = &ClientTransportConfig{UDP: tt.udp}
+			}
+			min, max, err := cfg.HopInterval()
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.wantMin, min)
+			require.Equal(t, tt.wantMax, max)
+			require.NoError(t, cfg.Validate())
+		})
+	}
+}
+
+func TestClientConfigRejectsHopIntervalOnSinglePort(t *testing.T) {
+	for _, server := range []string{"127.0.0.1:443", "127.0.0.1:443,443"} {
+		cfg := validClientConfig()
+		cfg.Server = server
+		cfg.Transport = &ClientTransportConfig{UDP: &ClientTransportUDPConfig{
+			HopInterval: Duration(30 * time.Second),
+		}}
+		require.ErrorContains(t, cfg.Validate(), "requires a multi-port server address", server)
+	}
+}
+
+func TestSaveClientDoesNotAddTransportForSinglePort(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "client.yaml")
+	cfg := validClientConfig()
+	require.NoError(t, SaveClient(path, cfg))
+
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "transport:")
+
+	loaded, err := LoadClient(path)
+	require.NoError(t, err)
+	require.Nil(t, loaded.Transport)
+}
+
+func TestClientTransportRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "client.yaml")
+	cfg := validClientConfig()
+	cfg.Server = "127.0.0.1:30000-30001"
+	cfg.Transport = &ClientTransportConfig{UDP: &ClientTransportUDPConfig{
+		MinHopInterval: Duration(15 * time.Second),
+		MaxHopInterval: Duration(45 * time.Second),
+	}}
+	require.NoError(t, SaveClient(path, cfg))
+
+	loaded, err := LoadClient(path)
+	require.NoError(t, err)
+	require.NotNil(t, loaded.Transport)
+	require.NotNil(t, loaded.Transport.UDP)
+	require.Equal(t, 15*time.Second, time.Duration(loaded.Transport.UDP.MinHopInterval))
+	require.Equal(t, 45*time.Second, time.Duration(loaded.Transport.UDP.MaxHopInterval))
+}
