@@ -1,7 +1,7 @@
 {{define "content"}}
 <div class="page-head">
   <div>
-    <h1>{{if .Status.Name}}{{.Status.Name}}{{else}}未命名客户端{{end}}</h1>
+    <h1 data-client-name>{{if .Status.Name}}{{.Status.Name}}{{else}}未命名客户端{{end}}</h1>
     <div class="status-line">
       <span class="connection-pill {{if .Status.Connected}}is-online{{else}}is-offline{{end}}" data-connection data-connected="{{.Status.Connected}}">
         <span class="status-dot {{if .Status.Connected}}is-online{{else}}is-offline{{end}}" aria-hidden="true"></span>
@@ -130,17 +130,135 @@
 
 <section class="panel tab-panel" id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" data-panel="settings" hidden>
   <div class="panel-head">
-    <h2>连接设置</h2>
-    <span class="badge badge-muted">只读</span>
+    <div>
+      <h2>设置</h2>
+      <span class="muted small">热更新：保存后立即生效，敏感操作需要当前 Web 密码确认</span>
+    </div>
+    <span class="badge badge-ok">可在线编辑</span>
   </div>
-  <dl class="kv">
-    <div><dt>服务器地址</dt><dd class="mono">{{if .Settings.Server}}{{.Settings.Server}}{{else}}—{{end}}</dd></div>
-    <div><dt>TLS</dt><dd>{{if .Settings.TLS}}已启用{{if .Settings.TLSInsecure}}（跳过证书校验）{{end}}{{else}}未启用{{end}}{{if .Settings.TLSSNI}} · SNI <span class="mono">{{.Settings.TLSSNI}}</span>{{end}}</dd></div>
-    <div><dt>Obfs</dt><dd class="mono">{{if .Settings.Obfs}}{{.Settings.Obfs}}{{else}}未启用{{end}}</dd></div>
-    <div><dt>控制令牌</dt><dd>{{if .Settings.ControlToken}}<span class="mono">{{.Settings.ControlToken}}</span>{{else}}<span class="muted">未配置</span>{{end}}</dd></div>
-    <div><dt>配置文件</dt><dd class="mono">{{if .Settings.ConfigPath}}{{.Settings.ConfigPath}}{{else}}—{{end}}</dd></div>
-  </dl>
-  <div class="notice">客户端设置为只读。修改配置文件后重启 hy2tun 生效。</div>
+
+  <div class="settings-section">
+    <div class="panel-head panel-head-sub"><h2>Web 管理员</h2></div>
+    <form id="settings-web-form" class="settings-form" autocomplete="off">
+      <div class="kv kv-inline">
+        <div><dt>密码状态</dt><dd>{{if .Settings.WebPasswordConfigured}}已设置（只能重置，不会回显）{{else}}未设置{{end}}</dd></div>
+      </div>
+      <div class="grid-2">
+        <div class="field">
+          <label class="field-label" for="web-username">用户名</label>
+          <input class="input" id="web-username" name="username" value="{{.Settings.WebUsername}}" autocomplete="username" required>
+        </div>
+        <div class="field">
+          <label class="field-label" for="web-current-password">当前密码</label>
+          <input class="input" id="web-current-password" name="current_password" type="password" autocomplete="current-password" required>
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="field">
+          <label class="field-label" for="web-new-password">新密码</label>
+          <input class="input" id="web-new-password" name="new_password" type="password" minlength="8" autocomplete="new-password" required>
+        </div>
+        <div class="field">
+          <label class="field-label" for="web-confirm-password">确认新密码</label>
+          <input class="input" id="web-confirm-password" type="password" minlength="8" autocomplete="new-password" required>
+        </div>
+      </div>
+      <p class="field-hint">保存后会立即退出所有 Web 会话，请使用新用户名和密码重新登录。密码只显示“已设置”，不会回显。</p>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">保存 Web 管理员</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="settings-section">
+    <div class="panel-head panel-head-sub">
+      <h2>HY2 凭据</h2>
+      <span class="pill pill-muted">本地代际 <span data-settings-generation>{{.Settings.Credentials.Generation}}</span></span>
+    </div>
+    <dl class="kv">
+      <div><dt>本地代际</dt><dd class="mono" data-settings-generation>{{.Settings.Credentials.Generation}}</dd></div>
+      <div><dt>服务端代际</dt><dd class="mono" data-server-generation>{{if .Settings.Credentials.ServerGeneration}}{{.Settings.Credentials.ServerGeneration}}{{else}}未知{{end}}</dd></div>
+      <div>
+        <dt>同步状态</dt>
+        <dd>
+          <span class="badge {{if .Settings.Credentials.Synced}}badge-ok{{else}}badge-muted{{end}}" data-sync-badge>{{if .Settings.Credentials.Synced}}已同步{{else}}待同步{{end}}</span>
+        </dd>
+      </div>
+      <div><dt>当前 HY2 密码</dt><dd class="mono secret-value" data-secret="current-auth">{{if .Settings.Credentials.CurrentAuthMasked}}{{.Settings.Credentials.CurrentAuthMasked}}{{else}}未设置{{end}}</dd></div>
+      <div><dt>当前 control token</dt><dd class="mono secret-value" data-secret="current-token">{{if .Settings.Credentials.CurrentControlTokenMasked}}{{.Settings.Credentials.CurrentControlTokenMasked}}{{else}}未设置{{end}}</dd></div>
+    </dl>
+
+    <div class="settings-inline">
+      <div class="field">
+        <label class="field-label" for="credentials-reveal-password">当前密码（显示凭据）</label>
+        <input class="input" id="credentials-reveal-password" type="password" autocomplete="current-password">
+      </div>
+      <button type="button" class="btn btn-quiet" data-reveal-credentials>显示凭据</button>
+      <button type="button" class="btn btn-quiet" data-hide-secrets hidden>隐藏凭据</button>
+    </div>
+    <p class="field-hint settings-hint">凭据默认打码。显示结果不会写入缓存，30 秒后自动恢复打码。</p>
+
+    <form id="settings-credentials-form" class="settings-form" autocomplete="off">
+      <div class="grid-2">
+        <div class="field">
+          <label class="field-label" for="credentials-generation">新代际</label>
+          <input class="input mono" id="credentials-generation" type="number" min="1" step="1" inputmode="numeric" placeholder="{{if .Settings.Credentials.ServerGeneration}}例如 {{.Settings.Credentials.ServerGeneration}}{{else}}例如 2{{end}}" required>
+          <span class="field-hint">必须大于本地代际。建议填写服务端当前代际。</span>
+        </div>
+        <div class="field">
+          <label class="field-label" for="credentials-current-password">当前密码</label>
+          <input class="input" id="credentials-current-password" type="password" autocomplete="current-password" required>
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="field">
+          <label class="field-label" for="credentials-auth">新 HY2 密码</label>
+          <input class="input" id="credentials-auth" type="password" autocomplete="new-password" required>
+        </div>
+        <div class="field">
+          <label class="field-label" for="credentials-token">新 control token</label>
+          <input class="input" id="credentials-token" type="password" autocomplete="new-password" required>
+        </div>
+      </div>
+      <div class="notice">保存后客户端会立即写入配置并使用新凭据重连，当前连接会短暂中断。若填写的代际与服务端代际不一致，仍会保存，但可能显示待同步。</div>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">保存并重连</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="settings-section">
+    <div class="panel-head panel-head-sub"><h2>客户端名称</h2></div>
+    <form id="settings-name-form" class="settings-form" autocomplete="off">
+      <div class="grid-2">
+        <div class="field">
+          <label class="field-label" for="client-name">名称</label>
+          <input class="input" id="client-name" type="text" value="{{.Settings.Name}}" maxlength="128" autocomplete="off" required>
+        </div>
+        <div class="field">
+          <label class="field-label" for="name-current-password">当前密码</label>
+          <input class="input" id="name-current-password" type="password" autocomplete="current-password" required>
+        </div>
+      </div>
+      <p class="field-hint">名称会立即同步到服务端，并写入客户端配置文件。</p>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">保存名称</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="settings-section">
+    <div class="panel-head panel-head-sub">
+      <h2>连接信息</h2>
+      <span class="badge badge-muted">只读</span>
+    </div>
+    <dl class="kv">
+      {{range .Settings.ReadOnly}}
+      <div><dt>{{.Label}}</dt><dd class="mono">{{if .Value}}{{.Value}}{{else}}—{{end}}</dd></div>
+      {{end}}
+    </dl>
+    <div class="notice">服务器地址、TLS、Obfs、Web 监听和配置文件路径仍需修改配置文件并重启 hy2tun 生效。</div>
+  </div>
 </section>
 
 <dialog class="drawer" id="mapping-drawer" aria-labelledby="drawer-title">

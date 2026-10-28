@@ -17,24 +17,36 @@ import (
 //go:embed templates/*.html static/*
 var assets embed.FS
 
-// Settings is the read-only client connection summary shown on the settings
-// tab. ControlToken is always masked before it reaches a template or JSON
-// response.
-type Settings struct {
-	Server       string `json:"server"`
-	TLS          bool   `json:"tls"`
-	TLSInsecure  bool   `json:"tls_insecure"`
-	TLSSNI       string `json:"tls_sni"`
-	Obfs         string `json:"obfs"`
-	ControlToken string `json:"control_token"`
-	ConfigPath   string `json:"config_path"`
+// MaskedSecret is the fixed placeholder shown instead of a stored secret. It
+// deliberately reveals neither the value nor its length.
+const MaskedSecret = "••••••••"
+
+// SettingsView is the secret-free settings snapshot used by the settings page
+// and GET /api/settings. It never contains a plaintext password or token; the
+// current HY2 pair is represented only by a fixed mask.
+type SettingsView struct {
+	WebUsername           string                 `json:"web_username"`
+	WebPasswordConfigured bool                   `json:"web_password_configured"`
+	Name                  string                 `json:"name"`
+	Credentials           CredentialSettingsView `json:"credentials"`
+	ReadOnly              []ReadOnlySetting      `json:"read_only"`
 }
 
-// SettingsProvider is optionally implemented by the client API to expose the
-// read-only connection settings. It is deliberately separate from API so a
-// minimal test fake only needs the six core methods.
-type SettingsProvider interface {
-	Settings() Settings
+// CredentialSettingsView describes the client's local credential generation
+// and the generation reported by the server's last handshake.
+type CredentialSettingsView struct {
+	Generation                int64  `json:"generation"`
+	ServerGeneration          int64  `json:"server_generation"`
+	CurrentAuthMasked         string `json:"current_auth_masked"`
+	CurrentControlTokenMasked string `json:"current_control_token_masked"`
+	Synced                    bool   `json:"synced"`
+}
+
+// ReadOnlySetting is a configuration field that still requires a file edit and
+// restart.
+type ReadOnlySetting struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
 }
 
 type pageBase struct {
@@ -48,7 +60,7 @@ type indexPage struct {
 	Status         view.ClientStatus
 	Mappings       []view.MappingView
 	Logs           []view.LogEntry
-	Settings       Settings
+	Settings       SettingsView
 	ActiveMappings int
 }
 
@@ -58,15 +70,18 @@ type loginPage struct {
 }
 
 type statusResponse struct {
-	Name           string `json:"name"`
-	Server         string `json:"server"`
-	Version        string `json:"version"`
-	Connected      bool   `json:"connected"`
-	UptimeSeconds  int64  `json:"uptime_seconds"`
-	TxBytes        uint64 `json:"tx_bytes"`
-	RxBytes        uint64 `json:"rx_bytes"`
-	ActiveMappings int    `json:"active_mappings"`
-	Mappings       int    `json:"mappings"`
+	Name                       string `json:"name"`
+	Server                     string `json:"server"`
+	Version                    string `json:"version"`
+	Connected                  bool   `json:"connected"`
+	UptimeSeconds              int64  `json:"uptime_seconds"`
+	TxBytes                    uint64 `json:"tx_bytes"`
+	RxBytes                    uint64 `json:"rx_bytes"`
+	ActiveMappings             int    `json:"active_mappings"`
+	Mappings                   int    `json:"mappings"`
+	CredentialGeneration       int64  `json:"credential_generation"`
+	ServerCredentialGeneration int64  `json:"server_credential_generation"`
+	CredentialSynced           bool   `json:"credential_synced"`
 }
 
 type mappingResponse struct {
@@ -135,44 +150,54 @@ func (s *Server) render(w http.ResponseWriter, status int, page string, data any
 func (s *Server) base(title string) pageBase {
 	return pageBase{
 		Title:    title,
-		Username: s.cfg.Username,
+		Username: s.adminUsername(),
 		Version:  version.Version,
 	}
 }
 
-func (s *Server) settingsFor(status view.ClientStatus) Settings {
-	settings := Settings{}
-	if provider, ok := s.api.(SettingsProvider); ok {
-		settings = provider.Settings()
+// adminUsername returns the live administrator username, falling back to the
+// startup configuration until UpdateAdmin has been called.
+func (s *Server) adminUsername() string {
+	if username := s.sessions.AdminUsername(); username != "" {
+		return username
 	}
-	if settings.Server == "" {
-		settings.Server = status.Server
-	}
-	settings.ControlToken = maskControlToken(settings.ControlToken)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg.Username
+}
+
+func (s *Server) settingsFor() SettingsView {
+	settings := s.api.Settings()
+	// Defense in depth: the API is expected to mask already, but a template or
+	// JSON response must never carry a plaintext secret even if it does not.
+	settings.Credentials.CurrentAuthMasked = maskSecret(settings.Credentials.CurrentAuthMasked)
+	settings.Credentials.CurrentControlTokenMasked = maskSecret(settings.Credentials.CurrentControlTokenMasked)
 	return settings
 }
 
-// maskControlToken replaces any configured token with a fixed mask. The caller
-// never receives the original value, even if a SettingsProvider returns one by
-// mistake.
-func maskControlToken(value string) string {
+// maskSecret replaces any non-empty secret with the fixed placeholder. The
+// caller never receives the original value.
+func maskSecret(value string) string {
 	if strings.TrimSpace(value) == "" {
 		return ""
 	}
-	return "••••••••"
+	return MaskedSecret
 }
 
 func statusResponseFrom(status view.ClientStatus, mappings []view.MappingView) statusResponse {
 	return statusResponse{
-		Name:           status.Name,
-		Server:         status.Server,
-		Version:        status.Version,
-		Connected:      status.Connected,
-		UptimeSeconds:  int64(status.Uptime / time.Second),
-		TxBytes:        status.TxBytes,
-		RxBytes:        status.RxBytes,
-		ActiveMappings: countActiveMappings(mappings),
-		Mappings:       len(mappings),
+		Name:                       status.Name,
+		Server:                     status.Server,
+		Version:                    status.Version,
+		Connected:                  status.Connected,
+		UptimeSeconds:              int64(status.Uptime / time.Second),
+		TxBytes:                    status.TxBytes,
+		RxBytes:                    status.RxBytes,
+		ActiveMappings:             countActiveMappings(mappings),
+		Mappings:                   len(mappings),
+		CredentialGeneration:       status.CredentialGeneration,
+		ServerCredentialGeneration: status.ServerCredentialGeneration,
+		CredentialSynced:           status.CredentialSynced,
 	}
 }
 

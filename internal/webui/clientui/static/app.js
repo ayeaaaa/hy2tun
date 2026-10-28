@@ -273,6 +273,168 @@
         text.textContent = status.connected ? "已连接" : "未连接";
       }
     }
+    applyCredentialStatus(status);
+  }
+
+  function setSyncBadge(synced) {
+    const badge = $("[data-sync-badge]");
+    if (!badge) {
+      return;
+    }
+    badge.classList.toggle("badge-ok", synced);
+    badge.classList.toggle("badge-muted", !synced);
+    badge.textContent = synced ? "已同步" : "待同步";
+  }
+
+  function applyCredentialStatus(status) {
+    if (!status) {
+      return;
+    }
+    const generation = Number(status.credential_generation) || 0;
+    if (generation > 0) {
+      setTextAll("[data-settings-generation]", generation);
+    }
+    const serverGeneration = Number(status.server_credential_generation) || 0;
+    setTextAll("[data-server-generation]", serverGeneration > 0 ? String(serverGeneration) : "未知");
+    setSyncBadge(Boolean(status.credential_synced));
+  }
+
+  function updateSecretMasks(credentials) {
+    const masks = {
+      "current-auth": credentials.current_auth_masked,
+      "current-token": credentials.current_control_token_masked,
+    };
+    for (const [key, value] of Object.entries(masks)) {
+      const element = document.querySelector(`[data-secret="${key}"]`);
+      if (!element) {
+        continue;
+      }
+      element.dataset.mask = value || "未设置";
+      if (element.dataset.revealed !== "true") {
+        element.textContent = element.dataset.mask;
+      }
+    }
+  }
+
+  function applySettings(settings) {
+    if (!settings) {
+      return;
+    }
+    const credentials = settings.credentials || {};
+    const generation = Number(credentials.generation) || 0;
+    setTextAll("[data-settings-generation]", generation > 0 ? String(generation) : "—");
+    const serverGeneration = Number(credentials.server_generation) || 0;
+    setTextAll("[data-server-generation]", serverGeneration > 0 ? String(serverGeneration) : "未知");
+    setSyncBadge(Boolean(credentials.synced));
+    updateSecretMasks(credentials);
+
+    if (settings.name) {
+      const heading = $("[data-client-name]");
+      if (heading) {
+        heading.textContent = settings.name;
+      }
+      const input = document.getElementById("client-name");
+      if (input && document.activeElement !== input) {
+        input.value = settings.name;
+      }
+    }
+    if (settings.web_username) {
+      const input = document.getElementById("web-username");
+      if (input && document.activeElement !== input) {
+        input.value = settings.web_username;
+      }
+    }
+  }
+
+  async function settingsRequest(path, method, body) {
+    const response = await fetch(path, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Requested-With": "hy2tun",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify(body || {}),
+    });
+    if (response.status === 401) {
+      window.location.href = "/login";
+      throw new Error("会话已失效，请重新登录");
+    }
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (error) {
+      payload = null;
+    }
+    if (!response.ok) {
+      const message = (payload && payload.error) || `请求失败（HTTP ${response.status}）`;
+      throw new Error(message);
+    }
+    return payload;
+  }
+
+  async function refreshSettings() {
+    try {
+      const response = await fetch("/api/settings", {
+        headers: { Accept: "application/json" },
+        credentials: "same-origin",
+      });
+      if (response.status === 401) {
+        window.location.href = "/login";
+        return null;
+      }
+      if (!response.ok) {
+        return null;
+      }
+      const settings = await response.json();
+      applySettings(settings);
+      return settings;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  let credentialPollTimer = null;
+
+  function stopCredentialPolling() {
+    if (credentialPollTimer !== null) {
+      window.clearTimeout(credentialPollTimer);
+      credentialPollTimer = null;
+    }
+  }
+
+  function pollCredentialStatus(expected) {
+    stopCredentialPolling();
+    let attempts = 0;
+    const tick = async () => {
+      attempts += 1;
+      try {
+        const response = await fetch("/api/status", {
+          headers: { Accept: "application/json" },
+          credentials: "same-origin",
+        });
+        if (response.status === 401) {
+          window.location.href = "/login";
+          return;
+        }
+        if (response.ok) {
+          const status = await response.json();
+          applyCredentialStatus(status);
+          if (Number(status.credential_generation) === expected && status.credential_synced) {
+            showToast(`凭据已同步到代际 ${expected}`);
+            return;
+          }
+        }
+      } catch (error) {
+        // Keep polling; the reconnect can briefly interrupt requests.
+      }
+      if (attempts >= 20) {
+        showToast("凭据已应用，等待服务端确认同步状态");
+        return;
+      }
+      credentialPollTimer = window.setTimeout(tick, 1000);
+    };
+    tick();
   }
 
   function applySnapshot(data) {
@@ -351,6 +513,9 @@
         startLogPolling();
       } else {
         stopLogPolling();
+      }
+      if (target === "settings") {
+        refreshSettings();
       }
       if (window.history && window.history.replaceState) {
         window.history.replaceState(null, "", `#${target}`);
@@ -448,6 +613,232 @@
     if (select) {
       select.addEventListener("change", refreshLogs);
     }
+  }
+
+  function initSettings() {
+    if (!$("#settings-web-form")) {
+      return;
+    }
+
+    const secretFields = $$("[data-secret]");
+    secretFields.forEach((element) => {
+      element.dataset.mask = element.textContent;
+    });
+    let revealTimer = 0;
+    const hideButton = $("[data-hide-secrets]");
+
+    const maskSecrets = () => {
+      secretFields.forEach((element) => {
+        element.textContent = element.dataset.mask || "未设置";
+        delete element.dataset.revealed;
+      });
+      if (hideButton) {
+        hideButton.hidden = true;
+      }
+      if (revealTimer) {
+        window.clearTimeout(revealTimer);
+        revealTimer = 0;
+      }
+    };
+
+    const showSecrets = (data) => {
+      const current = (data && data.current) || {};
+      const values = {
+        "current-auth": current.auth,
+        "current-token": current.control_token,
+      };
+      for (const [key, value] of Object.entries(values)) {
+        const element = document.querySelector(`[data-secret="${key}"]`);
+        if (!element) {
+          continue;
+        }
+        if (value) {
+          element.dataset.revealed = "true";
+          element.textContent = value;
+        } else {
+          delete element.dataset.revealed;
+          element.textContent = "未设置";
+        }
+      }
+      if (hideButton) {
+        hideButton.hidden = false;
+      }
+      if (revealTimer) {
+        window.clearTimeout(revealTimer);
+      }
+      revealTimer = window.setTimeout(maskSecrets, 30000);
+    };
+
+    document.addEventListener("click", async (event) => {
+      const revealButton = event.target.closest("[data-reveal-credentials]");
+      if (revealButton) {
+        const passwordInput = $("#credentials-reveal-password");
+        const password = passwordInput ? passwordInput.value : "";
+        if (!password) {
+          showToast("请输入当前 Web 密码", "bad");
+          if (passwordInput) {
+            passwordInput.focus();
+          }
+          return;
+        }
+        revealButton.disabled = true;
+        try {
+          const data = await settingsRequest("/api/settings/credentials/reveal", "POST", { password });
+          showSecrets(data);
+          showToast("已显示凭据，30 秒后自动隐藏");
+        } catch (error) {
+          showToast(error.message, "bad");
+        } finally {
+          revealButton.disabled = false;
+          if (passwordInput) {
+            passwordInput.value = "";
+          }
+        }
+        return;
+      }
+
+      if (event.target.closest("[data-hide-secrets]")) {
+        maskSecrets();
+      }
+    });
+
+    const webForm = $("#settings-web-form");
+    webForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const username = $("#web-username").value.trim();
+      const currentPassword = $("#web-current-password").value;
+      const newPassword = $("#web-new-password").value;
+      const confirmPassword = $("#web-confirm-password").value;
+      if (!username) {
+        showToast("用户名不能为空", "bad");
+        return;
+      }
+      if (Array.from(newPassword).length < 8) {
+        showToast("新密码至少需要 8 个字符", "bad");
+        return;
+      }
+      if (newPassword !== confirmPassword) {
+        showToast("两次输入的新密码不一致", "bad");
+        return;
+      }
+      if (!window.confirm("保存后会退出所有 Web 会话，需要使用新用户名和密码重新登录。继续？")) {
+        return;
+      }
+      const button = $("button[type='submit']", webForm);
+      if (button) {
+        button.disabled = true;
+      }
+      try {
+        await settingsRequest("/api/settings/web", "PUT", {
+          username,
+          current_password: currentPassword,
+          new_password: newPassword,
+        });
+        showToast("Web 管理员已更新，请重新登录");
+        window.location.href = "/login";
+      } catch (error) {
+        showToast(error.message, "bad");
+        if (button) {
+          button.disabled = false;
+        }
+      }
+    });
+
+    const nameForm = $("#settings-name-form");
+    nameForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const name = $("#client-name").value.trim();
+      const passwordInput = $("#name-current-password");
+      const currentPassword = passwordInput.value;
+      if (!name) {
+        showToast("客户端名称不能为空", "bad");
+        return;
+      }
+      const button = $("button[type='submit']", nameForm);
+      if (button) {
+        button.disabled = true;
+      }
+      try {
+        const settings = await settingsRequest("/api/settings/name", "PUT", {
+          name,
+          current_password: currentPassword,
+        });
+        applySettings(settings);
+        passwordInput.value = "";
+        showToast("客户端名称已更新");
+      } catch (error) {
+        showToast(error.message, "bad");
+      } finally {
+        if (button) {
+          button.disabled = false;
+        }
+      }
+    });
+
+    const credentialsForm = $("#settings-credentials-form");
+    credentialsForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const generation = Number($("#credentials-generation").value);
+      const auth = $("#credentials-auth").value;
+      const token = $("#credentials-token").value;
+      const passwordInput = $("#credentials-current-password");
+      const currentPassword = passwordInput.value;
+      const localGeneration = Number(($("[data-settings-generation]") || {}).textContent || 0);
+      const serverText = (($("[data-server-generation]") || {}).textContent || "").trim();
+      const serverGeneration = Number(serverText) || 0;
+
+      if (!Number.isInteger(generation) || generation < 1) {
+        showToast("新代际必须是正整数", "bad");
+        return;
+      }
+      if (generation <= localGeneration) {
+        showToast(`新代际必须大于本地代际 ${localGeneration}`, "bad");
+        return;
+      }
+      if (!auth) {
+        showToast("请填写新的 HY2 密码", "bad");
+        return;
+      }
+      if (!token) {
+        showToast("请填写新的 control token", "bad");
+        return;
+      }
+      let warning = "保存后客户端会立即写入配置并使用新凭据重连，当前连接会短暂中断。继续？";
+      if (serverGeneration > 0 && generation !== serverGeneration) {
+        warning = `新代际 ${generation} 与服务端代际 ${serverGeneration} 不一致。仍会保存，但可能显示待同步。继续？`;
+      }
+      if (!window.confirm(warning)) {
+        return;
+      }
+
+      const button = $("button[type='submit']", credentialsForm);
+      if (button) {
+        button.disabled = true;
+        button.textContent = "保存中…";
+      }
+      try {
+        await settingsRequest("/api/settings/credentials", "PUT", {
+          generation,
+          auth,
+          control_token: token,
+          current_password: currentPassword,
+        });
+        $("#credentials-auth").value = "";
+        $("#credentials-token").value = "";
+        passwordInput.value = "";
+        maskSecrets();
+        showToast(`凭据已保存到代际 ${generation}，客户端正在重连`);
+        await refreshSettings();
+        pollCredentialStatus(generation);
+      } catch (error) {
+        showToast(error.message, "bad");
+      } finally {
+        if (button) {
+          button.disabled = false;
+          button.textContent = "保存并重连";
+        }
+      }
+    });
   }
 
   function drawerError(message) {
@@ -676,6 +1067,7 @@
 
   function init() {
     initSSE();
+    initSettings();
     initTabs();
     initLogs();
     initDrawer();

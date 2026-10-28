@@ -101,8 +101,7 @@ type Client struct {
 }
 
 var (
-	_ clientui.API              = (*Client)(nil)
-	_ clientui.SettingsProvider = (*Client)(nil)
+	_ clientui.API = (*Client)(nil)
 )
 
 // New validates cfg and prepares the HY2 client configuration. It does not
@@ -445,26 +444,72 @@ func (c *Client) Logs(level string, limit int) []view.LogEntry {
 	return c.logs.Entries(level, limit)
 }
 
-// Settings returns the read-only client connection summary for the web console.
-// The control token is masked here; the plaintext never leaves the client.
-func (c *Client) Settings() clientui.Settings {
+// Settings returns the secret-free settings snapshot for the web console. The
+// HY2 password and control token are masked here; their plaintext is only
+// available through the authenticated reveal endpoint.
+func (c *Client) Settings() clientui.SettingsView {
 	c.configMu.Lock()
 	cfg := c.cfg
 	configPath := c.configPath
 	c.configMu.Unlock()
 
-	settings := clientui.Settings{
-		Server:      cfg.Server,
-		TLS:         true,
-		TLSInsecure: cfg.TLS.Insecure,
-		TLSSNI:      cfg.TLS.SNI,
-		Obfs:        cfg.Obfs.Type,
-		ConfigPath:  configPath,
+	c.mu.Lock()
+	serverGeneration := c.serverCredentialGeneration
+	synced := c.credentialSynced
+	c.mu.Unlock()
+
+	generation := cfg.Credentials.Generation
+	if generation < 1 {
+		generation = 1
 	}
-	if cfg.Control.Token != "" {
-		settings.ControlToken = "••••••••"
+
+	tls := "已启用"
+	if cfg.TLS.Insecure {
+		tls += "（跳过证书校验）"
 	}
-	return settings
+	if cfg.TLS.SNI != "" {
+		tls += " · SNI " + cfg.TLS.SNI
+	}
+	obfs := cfg.Obfs.Type
+	if obfs == "" {
+		obfs = "未启用"
+	}
+	webListen := cfg.Web.Listen
+	if webListen == "" {
+		webListen = "未启用"
+	}
+	configFile := configPath
+	if configFile == "" {
+		configFile = "—"
+	}
+
+	return clientui.SettingsView{
+		WebUsername:           cfg.Web.Username,
+		WebPasswordConfigured: cfg.Web.PasswordHash != "",
+		Name:                  cfg.Client.Name,
+		Credentials: clientui.CredentialSettingsView{
+			Generation:                generation,
+			ServerGeneration:          serverGeneration,
+			CurrentAuthMasked:         maskClientSecret(cfg.Auth),
+			CurrentControlTokenMasked: maskClientSecret(cfg.Control.Token),
+			Synced:                    synced,
+		},
+		ReadOnly: []clientui.ReadOnlySetting{
+			{Label: "服务器地址", Value: cfg.Server},
+			{Label: "TLS", Value: tls},
+			{Label: "Obfs", Value: obfs},
+			{Label: "客户端 ID", Value: cfg.Client.ID},
+			{Label: "Web 监听", Value: webListen},
+			{Label: "配置文件", Value: configFile},
+		},
+	}
+}
+
+func maskClientSecret(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return clientui.MaskedSecret
 }
 
 // WebAddr returns the bound client web address, or the configured address when
