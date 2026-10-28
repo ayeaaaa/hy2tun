@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"hy2tun/internal/config"
@@ -38,9 +39,11 @@ type State struct {
 // Store owns the in-memory state and its on-disk representation. All methods
 // are safe for concurrent use.
 type Store struct {
-	mu             sync.RWMutex
-	path           string
-	offlineReserve time.Duration
+	mu   sync.RWMutex
+	path string
+	// offlineReserve is read on every online-to-offline transition so a hot
+	// configuration update applies without restarting the process.
+	offlineReserve atomic.Int64
 	state          State
 	dirty          bool
 }
@@ -53,10 +56,10 @@ type Store struct {
 // offline.
 func Open(path string, offlineReserve time.Duration) (*Store, error) {
 	s := &Store{
-		path:           path,
-		offlineReserve: offlineReserve,
-		state:          State{Clients: make(map[string]*ClientState)},
+		path:  path,
+		state: State{Clients: make(map[string]*ClientState)},
 	}
+	s.offlineReserve.Store(int64(offlineReserve))
 	if path == "" {
 		return s, nil
 	}
@@ -111,9 +114,18 @@ func (s *Store) Upsert(client ClientState) {
 	s.dirty = true
 }
 
+// SetOfflineReserve replaces how long ports stay reserved for clients that go
+// offline after this call. Existing reservations are not recalculated.
+func (s *Store) SetOfflineReserve(reserve time.Duration) {
+	if s == nil {
+		return
+	}
+	s.offlineReserve.Store(int64(reserve))
+}
+
 // SetOnline records that a client is online or offline. LastSeen is always set
 // to now. When the client goes offline, its ports stay reserved for the
-// store's offlineReserve duration. Unknown clients are ignored.
+// store's current offlineReserve duration. Unknown clients are ignored.
 func (s *Store) SetOnline(id string, online bool, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -125,7 +137,7 @@ func (s *Store) SetOnline(id string, online bool, now time.Time) {
 	client.Online = online
 	client.LastSeen = now
 	if !online {
-		client.ReservedUntil = now.Add(s.offlineReserve)
+		client.ReservedUntil = now.Add(time.Duration(s.offlineReserve.Load()))
 	}
 	s.dirty = true
 }

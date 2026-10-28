@@ -29,8 +29,12 @@ import (
 
 // Server is a running hy2tund HY2 server.
 type Server struct {
-	cfg *config.ServerConfig
-	log *slog.Logger
+	// settingsMu guards cfg. Hot settings updates build a copy, persist it, and
+	// only then replace the pointer, so readers always observe a complete
+	// configuration. Use currentConfig instead of reading cfg directly.
+	settingsMu sync.RWMutex
+	cfg        *config.ServerConfig
+	log        *slog.Logger
 
 	hyServer   hyserver.Server
 	packetConn net.PacketConn
@@ -45,6 +49,14 @@ type Server struct {
 	// credentials is the live credential pair used by the HY2 authenticator
 	// and the control-token check. It is replaced atomically on rotation.
 	credentials *credentials.Store
+
+	// trustProxy mirrors cfg.Web.TrustProxy for readers that must not hold
+	// settingsMu, and is updated together with the web console's login handler.
+	trustProxy atomic.Bool
+
+	// saveConfig persists a configuration file. It is a field so tests can
+	// inject write failures; production uses config.SaveServer.
+	saveConfig func(path string, cfg *config.ServerConfig) error
 
 	startedAt time.Time
 	started   atomic.Bool
@@ -92,7 +104,9 @@ func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 		startedAt:   time.Now(),
 		data:        newDataStreams(),
 		credentials: credStore,
+		saveConfig:  config.SaveServer,
 	}
+	s.trustProxy.Store(cfg.Web.TrustProxy)
 
 	policy, err := ports.NewPolicy(cfg.Ports.Allow, cfg.Ports.Deny, cfg.Ports.AutoRange)
 	if err != nil {
@@ -281,34 +295,157 @@ func (s *Server) WebAddr() string {
 	if s.web != nil {
 		return s.web.Addr()
 	}
-	return s.cfg.Web.Listen
+	return s.currentConfig().Web.Listen
+}
+
+// currentConfig returns the configuration currently in effect. Hot updates
+// replace the pointer under settingsMu; callers must treat the result as
+// read-only.
+func (s *Server) currentConfig() *config.ServerConfig {
+	s.settingsMu.RLock()
+	defer s.settingsMu.RUnlock()
+	return s.cfg
+}
+
+// cloneConfig returns a deep-enough copy for a hot update. Only fields that
+// hot updates replace are copied; nested maps that are never mutated may be
+// shared.
+func cloneConfig(cfg *config.ServerConfig) *config.ServerConfig {
+	if cfg == nil {
+		return nil
+	}
+	next := *cfg
+	next.Ports.Allow = append([]string(nil), cfg.Ports.Allow...)
+	next.Ports.Deny = append([]string(nil), cfg.Ports.Deny...)
+	return &next
+}
+
+// persistConfig writes next with the configured save function. Configurations
+// created programmatically without a path have nothing to persist; the hot
+// update still applies at runtime.
+func (s *Server) persistConfig(next *config.ServerConfig) error {
+	if next == nil || next.ConfigPath == "" {
+		return nil
+	}
+	save := s.saveConfig
+	if save == nil {
+		save = config.SaveServer
+	}
+	if err := save(next.ConfigPath, next); err != nil {
+		return err
+	}
+	return nil
+}
+
+// UpdatePorts validates and hot-applies a port policy and offline reservation
+// duration. The configuration file is written first; if that fails, the
+// running policy and store are left unchanged. Mappings that are already bound
+// stay running even when the new allow list no longer covers them.
+func (s *Server) UpdatePorts(allow, deny []string, autoRange string, offlineReserve time.Duration) error {
+	if s == nil {
+		return fmt.Errorf("update ports: server is nil")
+	}
+	if offlineReserve < 0 {
+		return fmt.Errorf("update ports: offline reserve must not be negative")
+	}
+
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
+
+	next := cloneConfig(s.cfg)
+	if next == nil {
+		return fmt.Errorf("update ports: server config is nil")
+	}
+	next.Ports.Allow = append([]string(nil), allow...)
+	next.Ports.Deny = append([]string(nil), deny...)
+	next.Ports.AutoRange = autoRange
+	next.Ports.OfflineReserve = config.Duration(offlineReserve)
+	// Validate applies the documented defaults (for example an empty
+	// auto_range) and checks every port specification with the same parser
+	// used at load time.
+	if err := next.Validate(); err != nil {
+		return fmt.Errorf("update ports: %w", err)
+	}
+	policy, err := ports.NewPolicy(next.Ports.Allow, next.Ports.Deny, next.Ports.AutoRange)
+	if err != nil {
+		return fmt.Errorf("update ports: %w", err)
+	}
+	if err := s.persistConfig(next); err != nil {
+		return fmt.Errorf("update ports: %w", err)
+	}
+
+	s.cfg = next
+	if s.mappings != nil {
+		s.mappings.SetPolicy(policy)
+	}
+	if s.store != nil {
+		s.store.SetOfflineReserve(time.Duration(next.Ports.OfflineReserve))
+	}
+	s.log.Info("port policy updated",
+		"allow", next.Ports.Allow,
+		"deny", next.Ports.Deny,
+		"auto_range", next.Ports.AutoRange,
+		"offline_reserve", time.Duration(next.Ports.OfflineReserve).String(),
+	)
+	return nil
+}
+
+// SetTrustProxy hot-applies whether forwarded headers are trusted when
+// deriving client IPs. The configuration file is written first; on failure the
+// runtime setting is unchanged.
+func (s *Server) SetTrustProxy(trust bool) error {
+	if s == nil {
+		return fmt.Errorf("set trust proxy: server is nil")
+	}
+
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
+
+	next := cloneConfig(s.cfg)
+	if next == nil {
+		return fmt.Errorf("set trust proxy: server config is nil")
+	}
+	next.Web.TrustProxy = trust
+	if err := s.persistConfig(next); err != nil {
+		return fmt.Errorf("set trust proxy: %w", err)
+	}
+
+	s.cfg = next
+	s.trustProxy.Store(trust)
+	if s.web != nil {
+		s.web.SetTrustProxy(trust)
+	}
+	s.log.Info("trust proxy updated", "trust_proxy", trust)
+	return nil
 }
 
 // ConfigSummary returns a secret-free configuration summary for the web
 // console's read-only settings page.
 func (s *Server) ConfigSummary() serverui.ConfigSummary {
-	webListen := s.cfg.Web.Listen
+	cfg := s.currentConfig()
+	webListen := cfg.Web.Listen
 	if s.web != nil {
 		webListen = s.web.Addr()
 	}
 	return serverui.ConfigSummary{
-		ConfigPath:             s.cfg.ConfigPath,
+		ConfigPath:             cfg.ConfigPath,
 		Listen:                 s.listenAddr.String(),
-		ListenHost:             s.cfg.ListenHost,
+		ListenHost:             cfg.ListenHost,
 		WebListen:              webListen,
-		WebUsername:            s.cfg.Web.Username,
-		WebTLS:                 s.cfg.Web.TLS.Cert != "",
-		TLS:                    s.cfg.TLS.Cert != "",
-		StateFile:              s.cfg.StateFile,
-		PortsAllow:             append([]string(nil), s.cfg.Ports.Allow...),
-		PortsDeny:              append([]string(nil), s.cfg.Ports.Deny...),
-		PortsAutoRange:         s.cfg.Ports.AutoRange,
-		OfflineReserve:         time.Duration(s.cfg.Ports.OfflineReserve),
-		OfflineReserveSeconds:  int64(time.Duration(s.cfg.Ports.OfflineReserve) / time.Second),
-		LogLevel:               s.cfg.Log.Level,
+		WebUsername:            cfg.Web.Username,
+		WebTLS:                 cfg.Web.TLS.Cert != "",
+		TLS:                    cfg.TLS.Cert != "",
+		StateFile:              cfg.StateFile,
+		PortsAllow:             append([]string(nil), cfg.Ports.Allow...),
+		PortsDeny:              append([]string(nil), cfg.Ports.Deny...),
+		PortsAutoRange:         cfg.Ports.AutoRange,
+		OfflineReserve:         time.Duration(cfg.Ports.OfflineReserve),
+		OfflineReserveSeconds:  int64(time.Duration(cfg.Ports.OfflineReserve) / time.Second),
+		TrustProxy:             s.trustProxy.Load(),
+		LogLevel:               cfg.Log.Level,
 		Version:                version.Version,
-		ControlTokenConfigured: s.cfg.Control.Token != "",
-		WebPasswordConfigured:  s.cfg.Web.PasswordHash != "",
+		ControlTokenConfigured: cfg.Control.Token != "",
+		WebPasswordConfigured:  cfg.Web.PasswordHash != "",
 	}
 }
 

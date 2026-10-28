@@ -755,6 +755,16 @@ func TestServerWebClientsPages(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestSetTrustProxyUpdatesLoginHandler(t *testing.T) {
+	web, _ := newTestWeb(t, &fakeServerAPI{})
+
+	require.False(t, web.login.TrustProxy)
+	web.SetTrustProxy(true)
+	require.True(t, web.login.TrustProxy)
+	web.SetTrustProxy(false)
+	require.False(t, web.login.TrustProxy)
+}
+
 func TestServerWebStaticAndLoginPage(t *testing.T) {
 	_, ts := newTestWeb(t, &fakeServerAPI{})
 

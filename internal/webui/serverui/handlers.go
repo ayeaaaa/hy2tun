@@ -155,6 +155,15 @@ func (s *Server) Addr() string {
 	return s.cfg.Listen
 }
 
+// SetTrustProxy updates whether the login rate limiter trusts forwarded client
+// IP headers. It takes effect for subsequent requests without a restart.
+func (s *Server) SetTrustProxy(trust bool) {
+	if s == nil || s.login == nil {
+		return
+	}
+	s.login.SetTrustProxy(trust)
+}
+
 // Start binds the web listener and serves in the background. It returns once
 // the listener is bound, so bind and certificate errors are reported
 // synchronously. HTTPS is used when web.tls.cert/key are configured.

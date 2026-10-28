@@ -33,6 +33,7 @@ type ConfigSummary struct {
 	PortsAutoRange         string        `json:"ports_auto_range"`
 	OfflineReserve         time.Duration `json:"-"`
 	OfflineReserveSeconds  int64         `json:"offline_reserve_seconds"`
+	TrustProxy             bool          `json:"trust_proxy"`
 	LogLevel               string        `json:"log_level"`
 	Version                string        `json:"version"`
 	ControlTokenConfigured bool          `json:"control_token_configured"`

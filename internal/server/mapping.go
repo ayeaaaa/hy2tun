@@ -257,8 +257,11 @@ func (s *clientSession) abortStream() {
 // mappingManager owns all client sessions and serializes port allocation and
 // binding across clients.
 type mappingManager struct {
-	mu       sync.Mutex
-	policy   *ports.Policy
+	mu sync.Mutex
+	// policy is swapped atomically by hot configuration updates. Existing
+	// mappings keep their listeners; only new registration and allocation read
+	// the current policy.
+	policy   atomic.Pointer[ports.Policy]
 	store    *state.Store
 	log      *slog.Logger
 	bindHost string
@@ -285,8 +288,7 @@ func newMappingManager(policy *ports.Policy, store *state.Store, log *slog.Logge
 	if reserved == nil {
 		reserved = make(map[int]struct{})
 	}
-	return &mappingManager{
-		policy:     policy,
+	m := &mappingManager{
 		store:      store,
 		log:        log,
 		bindHost:   bindHost,
@@ -295,6 +297,18 @@ func newMappingManager(policy *ports.Policy, store *state.Store, log *slog.Logge
 		sessions:   make(map[string]*clientSession),
 		pendingUDP: make(map[string]*mappingRuntime),
 	}
+	m.policy.Store(policy)
+	return m
+}
+
+// SetPolicy atomically installs a new allow/deny/auto policy. Mappings that are
+// already bound are left running; later registrations and allocations use the
+// new policy.
+func (m *mappingManager) SetPolicy(policy *ports.Policy) {
+	if m == nil || policy == nil {
+		return
+	}
+	m.policy.Store(policy)
 }
 
 // newRuntime creates a mapping runtime attached to this manager's data-plane
@@ -723,10 +737,14 @@ func (m *mappingManager) bindLocked(sess *clientSession, rt *mappingRuntime, ign
 		}
 	}
 	softReserved := m.softReservedPortsLocked(sess.id)
+	policy := m.policy.Load()
+	if policy == nil {
+		return m.fail(rt, control.CodeInternal)
+	}
 
 	excluded := make(map[int]struct{})
 	for {
-		port, err := m.policy.Allocate(requested, func(candidate int) bool {
+		port, err := policy.Allocate(requested, func(candidate int) bool {
 			if _, skip := excluded[candidate]; skip {
 				return false
 			}

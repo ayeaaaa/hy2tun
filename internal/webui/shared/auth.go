@@ -447,10 +447,30 @@ type LoginHandler struct {
 	PasswordHash string
 	Log          *slog.Logger
 	// TrustProxy makes the limiter key on X-Forwarded-For / X-Real-IP. Enable
-	// it only when a trusted reverse proxy overwrites those headers.
+	// it only when a trusted reverse proxy overwrites those headers. Use
+	// SetTrustProxy for changes after the handler starts serving requests.
 	TrustProxy bool
 	OnSuccess  LoginSuccessFunc
 	OnError    LoginErrorFunc
+
+	trustMu sync.RWMutex
+}
+
+// SetTrustProxy updates whether forwarded headers are trusted. It is safe to
+// call while requests are being served.
+func (h *LoginHandler) SetTrustProxy(trust bool) {
+	if h == nil {
+		return
+	}
+	h.trustMu.Lock()
+	h.TrustProxy = trust
+	h.trustMu.Unlock()
+}
+
+func (h *LoginHandler) trustProxyEnabled() bool {
+	h.trustMu.RLock()
+	defer h.trustMu.RUnlock()
+	return h.TrustProxy
 }
 
 // ServeHTTP implements http.Handler.
@@ -462,7 +482,7 @@ func (h *LoginHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 
-	ip := ClientIPWithProxy(r, h.TrustProxy)
+	ip := ClientIPWithProxy(r, h.trustProxyEnabled())
 	if h.Limiter != nil && !h.Limiter.Allow(ip) {
 		w.Header().Set("Retry-After", "60")
 		h.log().Debug("web login rate limited", "ip", ip)

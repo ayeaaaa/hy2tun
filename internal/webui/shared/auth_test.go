@@ -324,6 +324,44 @@ func TestRequireCSRFUsesForwardedProtoBehindTLSProxy(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, recorder.Code)
 }
 
+func TestLoginHandlerSetTrustProxyHotToggle(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("correct"), bcrypt.MinCost)
+	require.NoError(t, err)
+	sessions, err := NewSessionManager(testSecret(), time.Hour)
+	require.NoError(t, err)
+
+	handler := &LoginHandler{
+		Sessions:     sessions,
+		Limiter:      NewLoginLimiter(1, time.Minute, time.Minute),
+		Username:     "admin",
+		PasswordHash: string(hash),
+	}
+
+	attempt := func(forwarded string) int {
+		req := httptest.NewRequest(http.MethodPost, "http://example.com/api/login", strings.NewReader("username=admin&password=wrong"))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.RemoteAddr = "10.0.0.5:1234"
+		req.Header.Set("X-Forwarded-For", forwarded)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, req)
+		return recorder.Code
+	}
+
+	// With trust disabled, every forwarded header shares the RemoteAddr bucket.
+	require.Equal(t, http.StatusUnauthorized, attempt("203.0.113.1"))
+	require.Equal(t, http.StatusTooManyRequests, attempt("203.0.113.2"))
+
+	// Enabling trust immediately makes distinct forwarded clients independent.
+	handler.SetTrustProxy(true)
+	require.Equal(t, http.StatusUnauthorized, attempt("203.0.113.3"))
+	require.Equal(t, http.StatusUnauthorized, attempt("203.0.113.4"))
+	require.Equal(t, http.StatusTooManyRequests, attempt("203.0.113.3"))
+
+	// Disabling it again returns to the shared RemoteAddr bucket.
+	handler.SetTrustProxy(false)
+	require.Equal(t, http.StatusTooManyRequests, attempt("203.0.113.5"))
+}
+
 func TestLoginHandlerTrustProxyRateLimit(t *testing.T) {
 	hash, err := bcrypt.GenerateFromPassword([]byte("correct"), bcrypt.MinCost)
 	require.NoError(t, err)
