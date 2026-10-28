@@ -2,9 +2,13 @@ package client
 
 import (
 	"fmt"
+	"strings"
+
+	"golang.org/x/crypto/bcrypt"
 
 	"hy2tun/internal/config"
 	"hy2tun/internal/control"
+	"hy2tun/internal/credentials"
 	"hy2tun/internal/view"
 )
 
@@ -86,6 +90,134 @@ func (c *Client) DeleteMapping(id string) error {
 	return nil
 }
 
+// UpdateName changes the client display name, bumps the mapping revision, and
+// writes the configuration atomically. When the control stream is online the
+// new name is announced immediately; otherwise the next hello carries it.
+func (c *Client) UpdateName(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("client name is required")
+	}
+	if err := c.editConfig(func(cfg *config.ClientConfig) error {
+		cfg.Client.Name = name
+		return nil
+	}); err != nil {
+		return err
+	}
+	c.sendUpdateWithName(name)
+	return nil
+}
+
+// UpdateWebConfig replaces the client web administrator credentials and writes
+// the configuration atomically. The web listener is not restarted; callers
+// update the live login handler separately.
+func (c *Client) UpdateWebConfig(username, passwordHash string) error {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return fmt.Errorf("web username is required")
+	}
+	if _, err := bcrypt.Cost([]byte(passwordHash)); err != nil {
+		return fmt.Errorf("web password hash is invalid: %w", err)
+	}
+
+	c.configMu.Lock()
+	defer c.configMu.Unlock()
+
+	if c.configPath == "" {
+		return fmt.Errorf("client config path is not set")
+	}
+	next := cloneClientConfig(c.cfg)
+	next.Web.Username = username
+	next.Web.PasswordHash = passwordHash
+	if err := next.Validate(); err != nil {
+		return err
+	}
+	if err := writeConfigAtomic(c.configPath, next); err != nil {
+		return err
+	}
+	c.storeConfigLocked(next, c.udpTokenSnapshot(), c.mappingSnapshot())
+	return nil
+}
+
+// RotateLocalCredentials applies a manually supplied credential pair. The
+// generation must advance so a stale web form cannot roll the client back. The
+// configuration is written before memory is updated, and a live connection is
+// closed so the reconnect loop uses the new pair.
+func (c *Client) RotateLocalCredentials(generation int64, auth, controlToken string) error {
+	c.configMu.Lock()
+
+	current := c.cfg.Credentials.Generation
+	if current < 1 {
+		current = 1
+	}
+	if generation <= current {
+		c.configMu.Unlock()
+		return fmt.Errorf("credential generation %d must be greater than current generation %d", generation, current)
+	}
+	if c.configPath == "" {
+		c.configMu.Unlock()
+		return fmt.Errorf("client config path is not set")
+	}
+	next := cloneClientConfig(c.cfg)
+	next.Auth = auth
+	next.Control.Token = controlToken
+	next.Credentials = config.CredentialsConfig{Generation: generation}
+	if err := next.Validate(); err != nil {
+		c.configMu.Unlock()
+		return err
+	}
+	if err := writeConfigAtomic(c.configPath, next); err != nil {
+		c.configMu.Unlock()
+		return err
+	}
+	c.storeConfigLocked(next, c.udpTokenSnapshot(), c.mappingSnapshot())
+	c.configMu.Unlock()
+
+	c.mu.Lock()
+	c.credentialsGeneration = generation
+	c.credentialSynced = false
+	c.mu.Unlock()
+
+	c.log.Info("credentials applied locally", "generation", generation)
+	c.forceReconnect()
+	return nil
+}
+
+// CredentialsSnapshot returns an independent copy of the current credential
+// pair. The client never stores a previous pair, so only the current values are
+// populated.
+func (c *Client) CredentialsSnapshot() *credentials.Set {
+	c.configMu.Lock()
+	defer c.configMu.Unlock()
+
+	generation := c.cfg.Credentials.Generation
+	if generation < 1 {
+		generation = 1
+	}
+	return &credentials.Set{
+		Generation:   generation,
+		Auth:         c.cfg.Auth,
+		ControlToken: c.cfg.Control.Token,
+	}
+}
+
+// ServerCredentialGeneration returns the generation reported by the server's
+// last HelloAck. A zero value means the server predates credential rotation or
+// no handshake has completed yet.
+func (c *Client) ServerCredentialGeneration() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.serverCredentialGeneration
+}
+
+// CredentialSynced reports whether the last HelloAck confirmed that the local
+// credential pair matches the server's current pair.
+func (c *Client) CredentialSynced() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.credentialSynced
+}
+
 // editConfig applies one local mutation to a copy of the configuration, bumps
 // the revision, validates, and writes it. The in-memory configuration is only
 // replaced after the write succeeds, so a failed write leaves both memory and
@@ -128,6 +260,13 @@ func (c *Client) afterLocalEdit() {
 // write failure is left to the reconnect loop; the local file remains
 // authoritative.
 func (c *Client) sendUpdate() {
+	c.sendUpdateWithName("")
+}
+
+// sendUpdateWithName announces the current mapping list and, when name is
+// non-empty, a rename. The full list travels with every update so a concurrent
+// mapping edit can never be lost behind a metadata-only revision.
+func (c *Client) sendUpdateWithName(name string) {
 	c.configMu.Lock()
 	revision := c.cfg.Client.Revision
 	// Copy into a non-nil slice even when empty: an explicit empty list clears
@@ -146,6 +285,7 @@ func (c *Client) sendUpdate() {
 	if err := c.writeControl(conn, &control.Update{
 		Type:     control.TypeUpdate,
 		Revision: revision,
+		Name:     name,
 		Mappings: mappings,
 	}); err != nil {
 		c.log.Warn("send control update", "error", err)

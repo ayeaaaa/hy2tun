@@ -55,15 +55,21 @@ type Client struct {
 	newHY2      func(*hyclient.Config) (hyclient.Client, *hyclient.HandshakeInfo, error)
 	startedAt   time.Time
 
-	mu             sync.Mutex
-	hy             hyclient.Client
-	controlConn    net.Conn
-	connected      bool
-	mappings       []view.MappingView
-	mappingConfigs map[string]config.Mapping
-	udpTokens      map[string]string
-	udpMappings    map[string]*udpMapping
-	traffic        map[string]*mappingTraffic
+	mu          sync.Mutex
+	hy          hyclient.Client
+	controlConn net.Conn
+	connected   bool
+	// credentialsGeneration mirrors cfg.Credentials.Generation. The server
+	// fields are the last HelloAck values; 0/false mean the server predates
+	// credential rotation, so the generation is unknown rather than 1.
+	credentialsGeneration      int64
+	serverCredentialGeneration int64
+	credentialSynced           bool
+	mappings                   []view.MappingView
+	mappingConfigs             map[string]config.Mapping
+	udpTokens                  map[string]string
+	udpMappings                map[string]*udpMapping
+	traffic                    map[string]*mappingTraffic
 	// dataConns maps a live data-plane connection to the control stream that
 	// owns it, so a dropped stream cannot leak local dials.
 	dataConns map[net.Conn]net.Conn
@@ -136,25 +142,30 @@ func New(cfg *config.ClientConfig, log *slog.Logger) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	credentialsGeneration := cfg.Credentials.Generation
+	if credentialsGeneration < 1 {
+		credentialsGeneration = 1
+	}
 
 	cl := &Client{
-		cfg:            cfg,
-		log:            log,
-		serverAddr:     serverAddr,
-		tlsConfig:      tlsConfig,
-		connFactory:    connFactory,
-		newHY2:         hyclient.NewClient,
-		startedAt:      time.Now(),
-		configPath:     cfg.ConfigPath,
-		mappings:       mappingViews(cfg.Mappings, nil),
-		mappingConfigs: mappingConfigMap(cfg.Mappings),
-		udpTokens:      make(map[string]string),
-		udpMappings:    make(map[string]*udpMapping),
-		traffic:        make(map[string]*mappingTraffic),
-		dataConns:      make(map[net.Conn]net.Conn),
-		logs:           logs,
-		ready:          make(chan struct{}),
-		closed:         make(chan struct{}),
+		cfg:                   cfg,
+		log:                   log,
+		serverAddr:            serverAddr,
+		tlsConfig:             tlsConfig,
+		connFactory:           connFactory,
+		newHY2:                hyclient.NewClient,
+		startedAt:             time.Now(),
+		configPath:            cfg.ConfigPath,
+		credentialsGeneration: credentialsGeneration,
+		mappings:              mappingViews(cfg.Mappings, nil),
+		mappingConfigs:        mappingConfigMap(cfg.Mappings),
+		udpTokens:             make(map[string]string),
+		udpMappings:           make(map[string]*udpMapping),
+		traffic:               make(map[string]*mappingTraffic),
+		dataConns:             make(map[net.Conn]net.Conn),
+		logs:                  logs,
+		ready:                 make(chan struct{}),
+		closed:                make(chan struct{}),
 	}
 	if cfg.WebEnabled() {
 		sessionKey, err := loadClientWebSessionKey(cfg, log)
@@ -401,6 +412,9 @@ func (c *Client) Status() view.ClientStatus {
 
 	c.mu.Lock()
 	connected := c.connected
+	credentialGeneration := c.credentialsGeneration
+	serverCredentialGeneration := c.serverCredentialGeneration
+	credentialSynced := c.credentialSynced
 	c.mu.Unlock()
 
 	mappings := c.Mappings()
@@ -410,13 +424,16 @@ func (c *Client) Status() view.ClientStatus {
 		rxBytes += mapping.RxBytes
 	}
 	return view.ClientStatus{
-		Name:      name,
-		Server:    server,
-		Version:   version.Version,
-		Connected: connected,
-		Uptime:    time.Since(c.startedAt),
-		TxBytes:   txBytes,
-		RxBytes:   rxBytes,
+		Name:                       name,
+		Server:                     server,
+		Version:                    version.Version,
+		Connected:                  connected,
+		Uptime:                     time.Since(c.startedAt),
+		TxBytes:                    txBytes,
+		RxBytes:                    rxBytes,
+		CredentialGeneration:       credentialGeneration,
+		ServerCredentialGeneration: serverCredentialGeneration,
+		CredentialSynced:           credentialSynced,
 	}
 }
 

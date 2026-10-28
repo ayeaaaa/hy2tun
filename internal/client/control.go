@@ -314,6 +314,8 @@ func (c *Client) applyHelloAck(snapshot *config.ClientConfig, ack *control.Hello
 	c.storeConfigLocked(next, tokens, views)
 	c.configMu.Unlock()
 
+	c.recordServerCredentials(ack)
+
 	// If the hello write-back changed the file, or a local edit happened while
 	// hello was in flight, announce the current config. A local edit that
 	// arrives after this point sends its own update because the handshake is
@@ -322,6 +324,23 @@ func (c *Client) applyHelloAck(snapshot *config.ClientConfig, ack *control.Hello
 		c.sendUpdate()
 	}
 	return nil
+}
+
+// recordServerCredentials stores the credential generation and sync flag from
+// HelloAck. A server that predates credential rotation omits the generation;
+// its zero value and false flag mean "unknown", not generation 1.
+func (c *Client) recordServerCredentials(ack *control.HelloAck) {
+	if ack == nil || ack.CredentialGeneration <= 0 {
+		c.mu.Lock()
+		c.serverCredentialGeneration = 0
+		c.credentialSynced = false
+		c.mu.Unlock()
+		return
+	}
+	c.mu.Lock()
+	c.serverCredentialGeneration = ack.CredentialGeneration
+	c.credentialSynced = ack.CredentialSynced
+	c.mu.Unlock()
 }
 
 // serveControl processes control messages until the stream fails. Reverse UDP
@@ -564,12 +583,39 @@ func (c *Client) handleCredentialUpdate(conn net.Conn, msg *control.CredentialUp
 	c.storeConfigLocked(next, tokens, views)
 	c.configMu.Unlock()
 
+	c.mu.Lock()
+	c.credentialsGeneration = msg.Generation
+	c.credentialSynced = false
+	c.mu.Unlock()
+
 	ack.OK = true
 	if err := c.writeCredentialAck(conn, ack); err != nil {
 		return
 	}
 	c.log.Info("credentials updated", "generation", msg.Generation)
 	c.forceReconnectAfterCredentialAck(conn)
+}
+
+// forceReconnect closes the live control stream and HY2 client so the Start
+// loop reconnects with the current configuration. Manual credential rotation
+// has no ack to flush, so the close is immediate.
+func (c *Client) forceReconnect() {
+	c.mu.Lock()
+	conn := c.controlConn
+	hy := c.hy
+	c.mu.Unlock()
+	closeLiveConnection(conn, hy)
+}
+
+// closeLiveConnection closes a captured connection pair. Either value may be
+// nil when the client is offline.
+func closeLiveConnection(conn net.Conn, hy hyclient.Client) {
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if hy != nil {
+		_ = hy.Close()
+	}
 }
 
 // forceReconnectAfterCredentialAck closes the control stream so runOnce
@@ -594,10 +640,7 @@ func (c *Client) forceReconnectAfterCredentialAck(conn net.Conn) {
 		defer timer.Stop()
 		select {
 		case <-timer.C:
-			_ = conn.Close()
-			if hy != nil {
-				_ = hy.Close()
-			}
+			closeLiveConnection(conn, hy)
 		case <-c.closed:
 		}
 	}()

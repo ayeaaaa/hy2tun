@@ -66,6 +66,15 @@ type ClientStatus struct {
 	Uptime    time.Duration
 	TxBytes   uint64
 	RxBytes   uint64
+
+	// CredentialGeneration is the credential generation the client currently
+	// holds. ServerCredentialGeneration is the generation reported by the
+	// server's last HelloAck; 0 means the server predates rotation and its
+	// generation is unknown. CredentialSynced reports whether the last
+	// HelloAck confirmed the local pair matches the server's current pair.
+	CredentialGeneration       int64
+	ServerCredentialGeneration int64
+	CredentialSynced           bool
 }
 
 // LogEntry is one client log line exposed by the client web UI.

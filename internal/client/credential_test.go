@@ -71,4 +71,6 @@ func TestCredentialUpdateForcesReconnect(t *testing.T) {
 	require.Equal(t, int64(2), saved.Credentials.Generation)
 	require.Equal(t, "new-password", saved.Auth)
 	require.Equal(t, "new-token-0123456789abcdef", saved.Control.Token)
+	require.Equal(t, int64(2), cl.Status().CredentialGeneration)
+	require.False(t, cl.CredentialSynced())
 }
