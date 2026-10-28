@@ -104,7 +104,9 @@ func (c *Client) UpdateName(name string) error {
 	}); err != nil {
 		return err
 	}
-	c.sendUpdateWithName(name)
+	// Announce the current configuration, not the argument: a concurrent
+	// rename may have advanced the revision since editConfig returned.
+	c.sendUpdate()
 	return nil
 }
 
@@ -254,21 +256,27 @@ func (c *Client) afterLocalEdit() {
 	c.sendUpdate()
 }
 
-// sendUpdate announces the current revision and complete mapping list. It is
-// gated on a completed handshake: the control connection is installed before
-// hello_ack, but an Update sent before Hello would be a protocol violation. A
-// write failure is left to the reconnect loop; the local file remains
-// authoritative.
+// sendUpdate announces the current revision, display name, and complete
+// mapping list. It is gated on a completed handshake: the control connection is
+// installed before hello_ack, but an Update sent before Hello would be a
+// protocol violation. A write failure is left to the reconnect loop; the local
+// file remains authoritative.
 func (c *Client) sendUpdate() {
 	c.sendUpdateWithName("")
 }
 
-// sendUpdateWithName announces the current mapping list and, when name is
-// non-empty, a rename. The full list travels with every update so a concurrent
-// mapping edit can never be lost behind a metadata-only revision.
+// sendUpdateWithName announces the current mapping list and display name. When
+// name is empty the current configuration's name is used. The name and revision
+// are read in the same configMu critical section so a concurrent rename cannot
+// pair an old name with a newer revision. The full list travels with every
+// update so a concurrent mapping edit can never be lost behind a metadata-only
+// revision.
 func (c *Client) sendUpdateWithName(name string) {
 	c.configMu.Lock()
 	revision := c.cfg.Client.Revision
+	if name == "" {
+		name = c.cfg.Client.Name
+	}
 	// Copy into a non-nil slice even when empty: an explicit empty list clears
 	// all server mappings, while a nil list means "no mapping change".
 	mappings := make([]config.Mapping, len(c.cfg.Mappings))
@@ -316,6 +324,18 @@ func (c *Client) snapshotConfig() *config.ClientConfig {
 	c.configMu.Lock()
 	defer c.configMu.Unlock()
 	return cloneClientConfig(c.cfg)
+}
+
+// currentCredentialGeneration returns the generation currently in memory. A
+// missing or zero generation means the initial generation.
+func (c *Client) currentCredentialGeneration() int64 {
+	c.configMu.Lock()
+	defer c.configMu.Unlock()
+	generation := c.cfg.Credentials.Generation
+	if generation < 1 {
+		generation = 1
+	}
+	return generation
 }
 
 // storeConfigLocked installs a new configuration and its derived read models.

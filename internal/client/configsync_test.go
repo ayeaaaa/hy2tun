@@ -215,6 +215,7 @@ func TestSendUpdateWaitsForHandshake(t *testing.T) {
 	update, ok := msg.(*control.Update)
 	require.True(t, ok)
 	require.Equal(t, int64(4), update.Revision)
+	require.Equal(t, "test", update.Name)
 	require.Len(t, update.Mappings, 2)
 	require.Equal(t, "m2", update.Mappings[1].ID)
 }

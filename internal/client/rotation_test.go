@@ -5,14 +5,18 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	hyclient "github.com/apernet/hysteria/core/v2/client"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/bcrypt"
 
@@ -220,6 +224,79 @@ func TestClientRotateLocalCredentialsPersistsAndRejectsStale(t *testing.T) {
 	require.False(t, status.CredentialSynced)
 }
 
+// TestClientRotateDuringConnectAbandonsStaleConnection covers the window where
+// runOnce has already built its HY2 data-plane config with the old auth but has
+// not yet installed the connection. A rotation in that window must not be lost:
+// the old-auth connection has to be abandoned and the next attempt has to use
+// the new credentials.
+func TestClientRotateDuringConnectAbandonsStaleConnection(t *testing.T) {
+	cfgPath := writeTempClientConfig(t, 1)
+	cl, err := New(loadClientConfig(t, cfgPath), slog.Default())
+	require.NoError(t, err)
+	defer cl.Close()
+
+	fake := newGatedSetupHY2Client()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	stopConnect := errors.New("stop test connect")
+
+	var (
+		mu       sync.Mutex
+		auths    []string
+		attempts int
+	)
+	cl.newHY2 = func(cfg *hyclient.Config) (hyclient.Client, *hyclient.HandshakeInfo, error) {
+		mu.Lock()
+		attempts++
+		attempt := attempts
+		auths = append(auths, cfg.Auth)
+		mu.Unlock()
+
+		if attempt == 1 {
+			close(started)
+			<-release
+			return fake, nil, nil
+		}
+		return nil, nil, stopConnect
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := cl.runOnce(context.Background())
+		done <- runErr
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("connect did not start")
+	}
+
+	require.NoError(t, cl.RotateLocalCredentials(2, "new-auth", "new-token-0123456789abcdef"))
+	close(release)
+
+	select {
+	case runErr := <-done:
+		require.NoError(t, runErr, "the stale connection setup must be abandoned cleanly")
+	case <-time.After(2 * time.Second):
+		t.Fatal("runOnce did not abandon the stale connection")
+	}
+
+	require.True(t, fake.isClosed(), "the stale HY2 client must be closed")
+	tracking := fake.trackingConn()
+	require.NotNil(t, tracking)
+	require.False(t, tracking.wrote.Load(), "the stale connection must not reach the Hello handshake")
+
+	// The retry must build its HY2 config from the rotated auth.
+	_, err = cl.runOnce(context.Background())
+	require.ErrorIs(t, err, stopConnect)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, auths, 2)
+	require.Equal(t, "new-auth", auths[1])
+}
+
 func TestClientNameUpdateWritesConfigAndNotifiesServer(t *testing.T) {
 	pair := startTestPair(t, nil)
 	defer pair.Stop()
@@ -249,6 +326,113 @@ func TestClientNameUpdateRejectsEmptyName(t *testing.T) {
 
 	require.Error(t, cl.UpdateName("  "))
 	require.Equal(t, int64(1), cl.Revision())
+}
+
+// TestClientNameUpdateDuringHandshakeIsAnnounced simulates a rename while the
+// HelloAck is in flight. The rename cannot be sent before the handshake is
+// marked connected, so applyHelloAck's follow-up update must carry the current
+// name instead of an empty one.
+func TestClientNameUpdateDuringHandshakeIsAnnounced(t *testing.T) {
+	cfgPath := writeTempClientConfig(t, 3)
+	cl, err := New(loadClientConfig(t, cfgPath), slog.Default())
+	require.NoError(t, err)
+	defer cl.Close()
+
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+
+	cl.mu.Lock()
+	cl.controlConn = local
+	cl.mu.Unlock()
+
+	// handshake snapshots the pre-rename configuration.
+	snapshot := cl.snapshotConfig()
+	require.NoError(t, cl.UpdateName("new-name"))
+	require.Equal(t, int64(4), cl.Revision())
+
+	updates := make(chan *control.Update, 1)
+	go func() {
+		msg, readErr := control.ReadMessage(remote)
+		if readErr != nil {
+			updates <- nil
+			return
+		}
+		update, _ := msg.(*control.Update)
+		updates <- update
+	}()
+
+	cl.markConnected()
+	require.NoError(t, cl.applyHelloAck(snapshot, &control.HelloAck{
+		Type:                 control.TypeHelloAck,
+		OK:                   true,
+		ServerVersion:        "test",
+		CredentialGeneration: 1,
+		CredentialSynced:     true,
+	}))
+
+	var update *control.Update
+	select {
+	case update = <-updates:
+	case <-time.After(2 * time.Second):
+		t.Fatal("applyHelloAck did not announce the concurrent rename")
+	}
+	require.NotNil(t, update)
+	require.Equal(t, int64(4), update.Revision)
+	require.Equal(t, "new-name", update.Name)
+}
+
+// TestClientNameUpdateDuringHandshakeReachesServer uses a real server and
+// pauses the client's HelloAck read so the rename lands in the exact handshake
+// window. The follow-up update must still reach the server with the new name.
+func TestClientNameUpdateDuringHandshakeReachesServer(t *testing.T) {
+	srv, stopServer := startTestServerForClient(t)
+	defer stopServer()
+
+	cfg := testClientConfigForServer(srv.ListenAddr().String(), nil)
+	configPath := filepath.Join(t.TempDir(), "client.yaml")
+	require.NoError(t, config.SaveClient(configPath, cfg))
+
+	cl, err := New(cfg, slog.Default())
+	require.NoError(t, err)
+	defer cl.Close()
+
+	gate := newHandshakeGate()
+	realNew := hyclient.NewClient
+	cl.newHY2 = func(cfg *hyclient.Config) (hyclient.Client, *hyclient.HandshakeInfo, error) {
+		hy, info, err := realNew(cfg)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &gatedReadHY2Client{Client: hy, gate: gate}, info, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- cl.Start(ctx) }()
+
+	select {
+	case <-gate.readStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("client did not reach the HelloAck read")
+	}
+
+	require.NoError(t, cl.UpdateName("new-name"))
+	close(gate.release)
+
+	require.NoError(t, waitFor(t, 5*time.Second, func() bool {
+		clients := srv.Clients()
+		return len(clients) == 1 && clients[0].Name == "new-name"
+	}))
+
+	_ = cl.Close()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("client Start did not return after Close")
+	}
 }
 
 func TestClientStatusTracksHelloAckCredentialState(t *testing.T) {
@@ -320,4 +504,114 @@ func TestClientUpdateWebConfigWritesConfigWithoutReconnect(t *testing.T) {
 
 	require.Error(t, cl.UpdateWebConfig("", string(newHash)))
 	require.Error(t, cl.UpdateWebConfig("root", "not-a-bcrypt-hash"))
+}
+
+// writeTrackingConn records whether the control handshake attempted a write.
+type writeTrackingConn struct {
+	net.Conn
+	wrote atomic.Bool
+}
+
+func (c *writeTrackingConn) Write(p []byte) (int, error) {
+	c.wrote.Store(true)
+	return c.Conn.Write(p)
+}
+
+// gatedSetupHY2Client is a HY2 client whose control stream is a net.Pipe with
+// its far end already closed, so any handshake write fails immediately without
+// blocking the test.
+type gatedSetupHY2Client struct {
+	closed    chan struct{}
+	closeOnce sync.Once
+
+	mu   sync.Mutex
+	conn *writeTrackingConn
+}
+
+func newGatedSetupHY2Client() *gatedSetupHY2Client {
+	return &gatedSetupHY2Client{closed: make(chan struct{})}
+}
+
+func (f *gatedSetupHY2Client) TCP(string) (net.Conn, error) {
+	local, remote := net.Pipe()
+	_ = remote.Close()
+
+	conn := &writeTrackingConn{Conn: local}
+	f.mu.Lock()
+	f.conn = conn
+	f.mu.Unlock()
+	return conn, nil
+}
+
+func (f *gatedSetupHY2Client) UDP() (hyclient.HyUDPConn, error) {
+	return nil, fmt.Errorf("UDP is not used by this test")
+}
+
+func (f *gatedSetupHY2Client) Close() error {
+	f.closeOnce.Do(func() { close(f.closed) })
+	return nil
+}
+
+func (f *gatedSetupHY2Client) isClosed() bool {
+	select {
+	case <-f.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+func (f *gatedSetupHY2Client) trackingConn() *writeTrackingConn {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.conn
+}
+
+// handshakeGate blocks the first control-stream read until release is closed.
+type handshakeGate struct {
+	readStarted chan struct{}
+	release     chan struct{}
+	once        sync.Once
+}
+
+func newHandshakeGate() *handshakeGate {
+	return &handshakeGate{
+		readStarted: make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+}
+
+func (g *handshakeGate) waitForRead() {
+	g.once.Do(func() {
+		close(g.readStarted)
+		<-g.release
+	})
+}
+
+// gatedReadHY2Client wraps a real HY2 client and gates the control stream's
+// first read so a test can act between Hello and HelloAck.
+type gatedReadHY2Client struct {
+	hyclient.Client
+	gate *handshakeGate
+}
+
+func (c *gatedReadHY2Client) TCP(addr string) (net.Conn, error) {
+	conn, err := c.Client.TCP(addr)
+	if err != nil {
+		return nil, err
+	}
+	if addr != controlAddress {
+		return conn, nil
+	}
+	return &gatedReadConn{Conn: conn, gate: c.gate}, nil
+}
+
+type gatedReadConn struct {
+	net.Conn
+	gate *handshakeGate
+}
+
+func (c *gatedReadConn) Read(p []byte) (int, error) {
+	c.gate.waitForRead()
+	return c.Conn.Read(p)
 }

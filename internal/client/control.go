@@ -30,6 +30,10 @@ var errClientClosed = errors.New("client closed")
 // whether the control handshake succeeded so Start can reset its backoff.
 func (c *Client) runOnce(ctx context.Context) (bool, error) {
 	cfg := c.snapshotConfig()
+	cfgGeneration := cfg.Credentials.Generation
+	if cfgGeneration < 1 {
+		cfgGeneration = 1
+	}
 	hyConfig := &hyclient.Config{
 		ServerAddr:  c.serverAddr,
 		Auth:        cfg.Auth,
@@ -97,6 +101,18 @@ func (c *Client) runOnce(ctx context.Context) (bool, error) {
 		c.closeDataFor(conn)
 		closeBoth()
 	}()
+
+	// The HY2 data plane was built with the snapshot's auth. If a credential
+	// rotation landed while the connection was being established,
+	// forceReconnect may have run before setCurrent and found nothing to
+	// close. Abandon this connection so the next attempt uses the new pair.
+	if current := c.currentCredentialGeneration(); current != cfgGeneration {
+		c.log.Debug("credentials rotated during connection setup",
+			"generation", cfgGeneration,
+			"current_generation", current,
+		)
+		return false, nil
+	}
 
 	stopWatch := make(chan struct{})
 	go func() {
