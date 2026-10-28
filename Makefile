@@ -2,7 +2,7 @@ GO ?= go
 BIN_DIR ?= bin
 LDFLAGS ?= -s -w
 
-.PHONY: all build test race release clean
+.PHONY: all build test race bench release clean
 
 all: build
 
@@ -16,6 +16,9 @@ test:
 
 race:
 	$(GO) test -race ./...
+
+bench:
+	$(GO) test ./... -run '^$$' -bench . -benchmem
 
 release:
 	./scripts/release.sh

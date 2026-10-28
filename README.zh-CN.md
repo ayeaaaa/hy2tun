@@ -1232,6 +1232,18 @@ Go 测试只在 Linux 上运行。OpenWrt 和 Windows 真机执行属于外部�
 
 ## 开发
 
+运行基准测试和 fuzz：
+
+```bash
+make bench
+go test ./internal/control -run '^$' -fuzz=FuzzReadMessage -fuzztime=30s
+go test ./internal/ports -run '^$' -fuzz=FuzzParseRanges -fuzztime=30s
+go test ./internal/config -run '^$' -fuzz=FuzzParseListen -fuzztime=30s
+```
+
+基准测试覆盖控制帧编解码和端口策略解析/分配；用于本机回归对比，不作为跨机器
+性能 SLA。
+
 ```bash
 go test ./...                 # 单元 + 集成 + 端到端测试
 go test -race ./...           # 竞态检测

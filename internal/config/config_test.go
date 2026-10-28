@@ -783,3 +783,12 @@ func TestClientTransportRoundTrip(t *testing.T) {
 	require.Equal(t, 15*time.Second, time.Duration(loaded.Transport.UDP.MinHopInterval))
 	require.Equal(t, 45*time.Second, time.Duration(loaded.Transport.UDP.MaxHopInterval))
 }
+
+func FuzzParseListen(f *testing.F) {
+	for _, seed := range []string{":443", "127.0.0.1:0", ":30000-30002", "", "missing-port", ":9000-8000"} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, value string) {
+		_, _, _ = ParseListen(value)
+	})
+}

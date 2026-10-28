@@ -1382,6 +1382,18 @@ version, and date with the result.
 
 ## Development
 
+Run benchmarks and fuzz targets:
+
+```bash
+make bench
+go test ./internal/control -run '^$' -fuzz=FuzzReadMessage -fuzztime=30s
+go test ./internal/ports -run '^$' -fuzz=FuzzParseRanges -fuzztime=30s
+go test ./internal/config -run '^$' -fuzz=FuzzParseListen -fuzztime=30s
+```
+
+Benchmarks cover control-frame encode/decode and port policy parsing/allocation;
+they are intended for local regression checks, not as a cross-machine SLA.
+
 ```bash
 go test ./...                 # unit + integration + end-to-end tests
 go test -race ./...           # race detector
