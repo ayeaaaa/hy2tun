@@ -151,17 +151,17 @@ type clientSession struct {
 	// Both are guarded by mappingManager.mu.
 	appliedRevision int64
 
-	// credentialGeneration is the pair the client reported in Hello.
-	// credentialSynced reports whether it matches the server's current
-	// generation. canCredentialUpdate reports whether the client advertised
-	// the credential_update_v1 capability. These are written before the
-	// session is registered and read under mappingManager.mu.
+	// credentialMu guards the credential generation and sync flags. They are
+	// written at Hello and may be refreshed after a credential push, while the
+	// control loop and read models read them concurrently.
+	credentialMu         sync.Mutex
 	credentialGeneration int64
 	credentialSynced     bool
 	canCredentialUpdate  bool
-	// credentialAck receives the generation of the next CredentialAck. The
-	// control read loop sends non-blockingly, so a late ack cannot stall it.
-	credentialAck chan int64
+	// credentialAck receives the next CredentialAck, including its OK/Error
+	// result. The control read loop sends non-blockingly, so a late ack cannot
+	// stall it.
+	credentialAck chan *control.CredentialAck
 
 	// ready is closed once the HelloAck has been written, so data-plane opens
 	// cannot overtake the handshake. done is closed when the session is
@@ -186,6 +186,31 @@ func (s *clientSession) markDone() {
 		return
 	}
 	s.doneOnce.Do(func() { close(s.done) })
+}
+
+// setCredentialState records the client's credential generation and flags.
+// Credential rotation uses it to refresh sessions after a push; readers use
+// credentialState so the update is race-free.
+func (s *clientSession) setCredentialState(generation int64, synced, capable bool) {
+	if s == nil {
+		return
+	}
+	s.credentialMu.Lock()
+	s.credentialGeneration = generation
+	s.credentialSynced = synced
+	s.canCredentialUpdate = capable
+	s.credentialMu.Unlock()
+}
+
+// credentialState returns a consistent snapshot of the client's credential
+// generation and flags.
+func (s *clientSession) credentialState() (generation int64, synced, capable bool) {
+	if s == nil {
+		return 0, false, false
+	}
+	s.credentialMu.Lock()
+	defer s.credentialMu.Unlock()
+	return s.credentialGeneration, s.credentialSynced, s.canCredentialUpdate
 }
 
 // waitReady blocks until the handshake response has been written, the session
@@ -340,6 +365,16 @@ func (m *mappingManager) updateLocked(sess *clientSession, revision int64, mappi
 	if revision <= sess.appliedRevision {
 		return []control.Result{{Error: string(control.CodeStaleRevision)}}, false, false
 	}
+	if mappings == nil {
+		// An absent mapping list means the update only changes metadata such
+		// as the display name. Keep the live mapping set untouched; an
+		// explicit empty slice still means "clear all mappings".
+		sess.revision = revision
+		sess.appliedRevision = revision
+		sess.lastSeen = now
+		m.persistLocked(sess, now)
+		return m.currentResultsLocked(sess), true, false
+	}
 
 	results := make([]control.Result, len(mappings))
 	next := make(map[string]config.Mapping, len(mappings))
@@ -469,6 +504,26 @@ func (m *mappingManager) updateLocked(sess *clientSession, revision int64, mappi
 	sess.lastSeen = now
 	m.persistLocked(sess, now)
 	return results, true, false
+}
+
+// currentResultsLocked reports the live mapping set without changing it. It is
+// used to acknowledge metadata-only updates that carry no mapping list.
+func (m *mappingManager) currentResultsLocked(sess *clientSession) []control.Result {
+	results := make([]control.Result, 0, len(sess.order))
+	for _, id := range sess.order {
+		rt := sess.mappings[id]
+		if rt == nil {
+			continue
+		}
+		results = append(results, control.Result{
+			ID:           id,
+			OK:           rt.errCode == "",
+			AssignedPort: rt.assignedPort,
+			UDPToken:     rt.udpToken,
+			Error:        rt.errCode,
+		})
+	}
+	return results
 }
 
 // rename updates a live session's display name and persists it for offline
@@ -921,6 +976,7 @@ func (m *mappingManager) clientViews() []view.ClientView {
 }
 
 func sessionView(sess *clientSession) view.ClientView {
+	generation, synced, capable := sess.credentialState()
 	clientView := view.ClientView{
 		ID:                   sess.id,
 		Name:                 sess.name,
@@ -928,9 +984,9 @@ func sessionView(sess *clientSession) view.ClientView {
 		Revision:             sess.revision,
 		Online:               sess.online,
 		LastSeen:             sess.lastSeen,
-		CredentialGeneration: sess.credentialGeneration,
-		CredentialSynced:     sess.credentialSynced,
-		CredentialCapable:    sess.canCredentialUpdate,
+		CredentialGeneration: generation,
+		CredentialSynced:     synced,
+		CredentialCapable:    capable,
 	}
 	for _, id := range sess.order {
 		rt := sess.mappings[id]

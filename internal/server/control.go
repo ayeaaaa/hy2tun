@@ -82,21 +82,21 @@ func (h *controlHandler) Serve(conn net.Conn) {
 	if generation == 0 {
 		generation = 1
 	}
+	synced := set.Synced(generation)
+	capable := hasCapability(hello.Capabilities, control.CapabilityCredentialUpdate)
 
 	sess := &clientSession{
-		id:                   hello.ClientID,
-		name:                 hello.Name,
-		version:              hello.Version,
-		revision:             hello.Revision,
-		appliedRevision:      hello.Revision,
-		credentialGeneration: generation,
-		credentialSynced:     set.Synced(generation),
-		canCredentialUpdate:  hasCapability(hello.Capabilities, control.CapabilityCredentialUpdate),
-		credentialAck:        make(chan int64, 1),
-		conn:                 conn,
-		ready:                make(chan struct{}),
-		done:                 make(chan struct{}),
+		id:              hello.ClientID,
+		name:            hello.Name,
+		version:         hello.Version,
+		revision:        hello.Revision,
+		appliedRevision: hello.Revision,
+		credentialAck:   make(chan *control.CredentialAck, 1),
+		conn:            conn,
+		ready:           make(chan struct{}),
+		done:            make(chan struct{}),
 	}
+	sess.setCredentialState(generation, synced, capable)
 	results := h.server.mappings.register(sess, hello.Mappings)
 
 	ack := &control.HelloAck{
@@ -104,7 +104,7 @@ func (h *controlHandler) Serve(conn net.Conn) {
 		OK:                   true,
 		ServerVersion:        version.Version,
 		CredentialGeneration: set.Generation,
-		CredentialSynced:     sess.credentialSynced,
+		CredentialSynced:     synced,
 		Results:              results,
 	}
 	if err := sess.write(ack); err != nil {
@@ -169,19 +169,21 @@ func (h *controlHandler) loop(sess *clientSession) {
 				)
 			}
 		case *control.CredentialAck:
-			// Rotation waits on this channel. Forward any ack non-blockingly:
-			// the client reports the generation it applied, which can be newer
-			// than the generation this session registered with.
-			if message.Generation != sess.credentialGeneration {
+			// Rotation waits on this channel. Forward the whole ack
+			// non-blockingly so the waiter can distinguish success from
+			// failure; the client reports the generation it applied, which can
+			// be newer than the generation this session registered with.
+			sessionGeneration, _, _ := sess.credentialState()
+			if message.Generation != sessionGeneration {
 				h.log.Debug("credential ack generation differs from session",
 					"client", sess.id,
 					"generation", message.Generation,
-					"session_generation", sess.credentialGeneration,
+					"session_generation", sessionGeneration,
 					"ok", message.OK,
 				)
 			}
 			select {
-			case sess.credentialAck <- message.Generation:
+			case sess.credentialAck <- message:
 			default:
 			}
 		case *control.Ping:
@@ -210,8 +212,9 @@ func (h *controlHandler) handleUpdate(sess *clientSession, message *control.Upda
 	sess.controlMu.Lock()
 	results, accepted, resync := h.server.mappings.update(sess, message.Revision, message.Mappings)
 	if accepted && message.Name != "" {
-		// The update already persisted the mapping state. A rename is a
-		// separate write so a name-only update needs no mapping changes.
+		// A rename is a separate metadata write. A nil mapping list was left
+		// untouched by updateLocked, while an explicit list was already
+		// applied above.
 		h.server.mappings.rename(sess, message.Name)
 	}
 	ack := &control.UpdateAck{

@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,6 +13,46 @@ import (
 	"hy2tun/internal/config"
 	"hy2tun/internal/control"
 )
+
+func TestCredentialStateAccessors(t *testing.T) {
+	sess := &clientSession{ready: make(chan struct{}), done: make(chan struct{})}
+	generation, synced, capable := sess.credentialState()
+	require.Zero(t, generation)
+	require.False(t, synced)
+	require.False(t, capable)
+
+	sess.setCredentialState(2, true, true)
+	generation, synced, capable = sess.credentialState()
+	require.Equal(t, int64(2), generation)
+	require.True(t, synced)
+	require.True(t, capable)
+}
+
+func TestCredentialStateConcurrentAccess(t *testing.T) {
+	sess := &clientSession{ready: make(chan struct{}), done: make(chan struct{})}
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		for generation := int64(1); generation <= 1000; generation++ {
+			sess.setCredentialState(generation, generation%2 == 0, true)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			_, _, _ = sess.credentialState()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			_ = sessionView(sess)
+		}
+	}()
+	wg.Wait()
+}
 
 type testRuntimeSnapshot struct {
 	runtime      *mappingRuntime

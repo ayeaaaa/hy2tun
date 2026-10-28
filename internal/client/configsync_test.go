@@ -219,6 +219,46 @@ func TestSendUpdateWaitsForHandshake(t *testing.T) {
 	require.Equal(t, "m2", update.Mappings[1].ID)
 }
 
+func TestSendUpdateSendsExplicitEmptyMappingsAfterLastDelete(t *testing.T) {
+	cfgPath := writeTempClientConfig(t, 3)
+	cl, err := New(loadClientConfig(t, cfgPath), slog.Default())
+	require.NoError(t, err)
+	defer cl.Close()
+
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+	cl.mu.Lock()
+	cl.controlConn = local
+	cl.mu.Unlock()
+
+	updateCh := make(chan *control.Update, 1)
+	go func() {
+		msg, err := control.ReadMessage(remote)
+		if err != nil {
+			updateCh <- nil
+			return
+		}
+		update, _ := msg.(*control.Update)
+		updateCh <- update
+	}()
+
+	cl.markConnected()
+	require.NoError(t, cl.DeleteMapping("m1"))
+
+	var update *control.Update
+	select {
+	case update = <-updateCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("delete did not send an update")
+	}
+	require.NotNil(t, update)
+	require.Equal(t, int64(4), update.Revision)
+	require.NotNil(t, update.Mappings,
+		"deleting the last mapping must send an explicit empty list, not an omitted one")
+	require.Empty(t, update.Mappings)
+}
+
 func TestHelloAckPreservesConcurrentLocalEdit(t *testing.T) {
 	tests := []struct {
 		name             string

@@ -130,7 +130,10 @@ func (c *Client) afterLocalEdit() {
 func (c *Client) sendUpdate() {
 	c.configMu.Lock()
 	revision := c.cfg.Client.Revision
-	mappings := append([]config.Mapping(nil), c.cfg.Mappings...)
+	// Copy into a non-nil slice even when empty: an explicit empty list clears
+	// all server mappings, while a nil list means "no mapping change".
+	mappings := make([]config.Mapping, len(c.cfg.Mappings))
+	copy(mappings, c.cfg.Mappings)
 	c.configMu.Unlock()
 
 	c.mu.Lock()

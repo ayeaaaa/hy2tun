@@ -300,14 +300,35 @@ func TestCredentialAckIsForwardedToSession(t *testing.T) {
 		OK:         true,
 	}))
 	select {
-	case generation := <-sess.credentialAck:
-		require.Equal(t, int64(2), generation)
+	case ack := <-sess.credentialAck:
+		require.NotNil(t, ack)
+		require.Equal(t, int64(2), ack.Generation)
+		require.True(t, ack.OK)
+		require.Empty(t, ack.Error)
 	case <-time.After(2 * time.Second):
 		t.Fatal("credential ack was not forwarded to the session")
 	}
+
+	// A failed ack must reach the waiter with OK=false so rotation can report
+	// the failure instead of treating it as synced.
+	require.NoError(t, control.WriteMessage(conn, &control.CredentialAck{
+		Type:       control.TypeCredentialAck,
+		Generation: 2,
+		OK:         false,
+		Error:      "write_failed",
+	}))
+	select {
+	case ack := <-sess.credentialAck:
+		require.NotNil(t, ack)
+		require.Equal(t, int64(2), ack.Generation)
+		require.False(t, ack.OK)
+		require.Equal(t, "write_failed", ack.Error)
+	case <-time.After(2 * time.Second):
+		t.Fatal("failed credential ack was not forwarded to the session")
+	}
 }
 
-func TestNameOnlyUpdatePersists(t *testing.T) {
+func TestUpdateNameOnlyKeepsMappingsAndPersists(t *testing.T) {
 	srv, stop := startTestServer(t)
 	defer stop()
 
@@ -324,12 +345,21 @@ func TestNameOnlyUpdatePersists(t *testing.T) {
 		Name:     "before",
 		Version:  "test",
 		Revision: 0,
+		Mappings: []config.Mapping{
+			{ID: "keep", Type: "tcp", RemotePort: 0, LocalAddr: "127.0.0.1:9001", Enabled: true},
+		},
 	}))
 	msg, err := control.ReadMessage(conn)
 	require.NoError(t, err)
-	_, ok := msg.(*control.HelloAck)
+	helloAck, ok := msg.(*control.HelloAck)
 	require.True(t, ok)
+	require.Len(t, helloAck.Results, 1)
+	require.True(t, helloAck.Results[0].OK)
+	assignedPort := helloAck.Results[0].AssignedPort
+	require.NotZero(t, assignedPort)
 
+	// A nil Mappings field means "no mapping change", so a name-only update
+	// must leave the live listener running.
 	require.NoError(t, control.WriteMessage(conn, &control.Update{
 		Type:     control.TypeUpdate,
 		Revision: 1,
@@ -340,13 +370,70 @@ func TestNameOnlyUpdatePersists(t *testing.T) {
 	ack, ok := msg.(*control.UpdateAck)
 	require.True(t, ok)
 	require.Equal(t, int64(1), ack.Revision)
+	require.Len(t, ack.Results, 1)
+	require.Equal(t, "keep", ack.Results[0].ID)
+	require.True(t, ack.Results[0].OK)
+	require.Equal(t, assignedPort, ack.Results[0].AssignedPort)
 
-	require.NoError(t, waitFor(t, 5*time.Second, func() bool {
-		client, ok := srv.Client("rename-client")
-		return ok && client.Name == "after"
-	}))
+	client, ok := srv.Client("rename-client")
+	require.True(t, ok)
+	require.Equal(t, "after", client.Name)
+	require.Len(t, client.Mappings, 1)
+	require.Equal(t, "keep", client.Mappings[0].ID)
+	require.Equal(t, "running", client.Mappings[0].Status)
+	require.Equal(t, assignedPort, client.Mappings[0].AssignedPort)
+
 	snapshot := srv.store.Snapshot()
 	require.Equal(t, "after", snapshot.Clients["rename-client"].Name)
+	require.Len(t, snapshot.Clients["rename-client"].Mappings, 1)
+}
+
+func TestUpdateNameWithExplicitEmptyMappingsClearsMappings(t *testing.T) {
+	srv, stop := startTestServer(t)
+	defer stop()
+
+	hy := newHY2Client(t, srv, "pw", nil)
+	conn, err := hy.TCP("_hy2tun_control_:0")
+	require.NoError(t, err)
+	defer conn.Close()
+
+	require.NoError(t, control.WriteMessage(conn, &control.Hello{
+		Type:     control.TypeHello,
+		Protocol: control.ProtocolVersion,
+		Token:    "0123456789abcdef0123456789abcdef",
+		ClientID: "clear-client",
+		Name:     "before",
+		Version:  "test",
+		Revision: 0,
+		Mappings: []config.Mapping{
+			{ID: "remove", Type: "tcp", RemotePort: 0, LocalAddr: "127.0.0.1:9001", Enabled: true},
+		},
+	}))
+	msg, err := control.ReadMessage(conn)
+	require.NoError(t, err)
+	helloAck, ok := msg.(*control.HelloAck)
+	require.True(t, ok)
+	require.Len(t, helloAck.Results, 1)
+	require.True(t, helloAck.Results[0].OK)
+
+	// An explicit empty slice is authoritative and clears every mapping.
+	require.NoError(t, control.WriteMessage(conn, &control.Update{
+		Type:     control.TypeUpdate,
+		Revision: 1,
+		Name:     "after",
+		Mappings: []config.Mapping{},
+	}))
+	msg, err = control.ReadMessage(conn)
+	require.NoError(t, err)
+	ack, ok := msg.(*control.UpdateAck)
+	require.True(t, ok)
+	require.Equal(t, int64(1), ack.Revision)
+	require.Empty(t, ack.Results)
+
+	client, ok := srv.Client("clear-client")
+	require.True(t, ok)
+	require.Equal(t, "after", client.Name)
+	require.Empty(t, client.Mappings)
 }
 
 func TestServerViews(t *testing.T) {
