@@ -781,7 +781,8 @@ When hopping is enabled the client logs a warning at startup:
 port hopping enabled; server must redirect the entire UDP range to the HY2 listen port
 ```
 
-The warning is expected. The client cannot verify the server's firewall rules.
+The warning is logged at `Warn`, so `log.level: error` suppresses it. When
+shown, it is expected: the client cannot verify the server's firewall rules.
 
 ### Server redirect
 
@@ -896,8 +897,9 @@ at least one change across several intervals.
 
 If hopping does not work, check in this order:
 
-- The client startup log contains the port hopping warning; without it,
-  `server` is still a single port.
+- The client startup log contains the port hopping warning. A missing warning
+  means either `server` is a single port or `log.level` / `log.file` hides it;
+  check both `server` and `log.level`.
 - The cloud security group allows the whole UDP range and the host firewall
   allows the listen port.
 - The redirect target matches `listen`, and the rule is in the `nat`

@@ -702,7 +702,8 @@ transport:
 port hopping enabled; server must redirect the entire UDP range to the HY2 listen port
 ```
 
-这条 warning 是预期行为；客户端无法验证服务端防火墙规则。
+这条 warning 以 `Warn` 级别记录，因此 `log.level: error` 会将其抑制。出现时
+属于预期行为：客户端无法验证服务端防火墙规则。
 
 ### 服务端重定向
 
@@ -809,7 +810,9 @@ nftables 和 iptables 只选一种。如果两者同时存在，确保重定向�
 
 如果跳跃不工作，按以下顺序检查：
 
-- 客户端启动日志中应有端口跳跃 warning；没有则说明 `server` 仍是单端口。
+- 客户端启动日志中应有端口跳跃 warning。没有 warning 时，可能是 `server`
+  仍是单端口，也可能是 `log.level` 或 `log.file` 把这条日志隐藏了；请同时
+  检查 `server` 和 `log.level`。
 - 云安全组放行整个 UDP 范围，主机防火墙放行监听端口。
 - 重定向目标与 `listen` 一致，且规则位于 `nat` 表的 PREROUTING 钩子。
 - `conntrack` 中 reply 元组的源端口是监听端口。

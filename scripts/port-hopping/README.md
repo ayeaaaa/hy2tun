@@ -47,13 +47,14 @@ table inet hy2tun_porthop {
 nft -f /etc/nftables.d/hy2tun-porthop.nft
 ```
 
-Use either the incremental commands or the file, not both: loading the file
-when the table and chain already exist fails with an "exists" error. The
-`counter` statement is optional, but it makes the verification step below
-possible; remove it if you do not want counters. The incremental commands are
-not idempotent: re-running `nft add table` or `nft add chain` fails, and
-re-running `nft add rule` adds another rule. Delete the table before recreating
-it.
+Use either the incremental commands or the file, not both. `nft add table` and
+`nft add chain` are idempotent: re-running them succeeds and leaves the existing
+object unchanged. `nft add rule` and reloading the file are not: each run
+appends another rule, so duplicates accumulate silently. Use `nft create`
+instead of `nft add` if an existing table or chain should be an error; `create`
+returns "File exists". The `counter` statement is optional, but it makes the
+verification step below possible; remove it if you do not want counters. Delete
+the table before recreating it from scratch.
 
 List and delete:
 
@@ -198,7 +199,8 @@ release.
    port hopping enabled; server must redirect the entire UDP range to the HY2 listen port
    ```
 
-   A missing warning means `server` is still a single port.
+   A missing warning means either `server` is a single port or `log.level` /
+   `log.file` hides the warning; check both `server` and `log.level`.
 3. **Conntrack.** On the server, run:
 
    ```bash
@@ -242,6 +244,8 @@ one change across several intervals.
   group does not allow IPv6.
 - **A UDP reverse mapping broke.** Its port is inside the hop range. Move the
   mapping or choose a different range.
-- **`nft -f` reports "File exists".** The table or chain was already created by
-  the incremental commands. Delete the table and load the file, or keep using
-  the incremental commands.
+- **`nft -f` reports "File exists".** The file uses `create table` or `create
+  chain` for an object that already exists. The documented file uses `table`
+  and does not produce this error; loading it again appends a duplicate rule
+  instead. Check `nft list table inet hy2tun_porthop` for duplicates and delete
+  the table before reloading if needed.
