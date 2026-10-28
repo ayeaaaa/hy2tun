@@ -525,6 +525,7 @@ type LoginHandler struct {
 	OnError    LoginErrorFunc
 
 	trustMu sync.RWMutex
+	adminMu sync.RWMutex
 }
 
 // SetTrustProxy updates whether forwarded headers are trusted. It is safe to
@@ -536,6 +537,29 @@ func (h *LoginHandler) SetTrustProxy(trust bool) {
 	h.trustMu.Lock()
 	h.TrustProxy = trust
 	h.trustMu.Unlock()
+}
+
+// SetAdmin updates the static fallback credentials. The session manager's
+// live administrator takes precedence, but embedded callers that never call
+// UpdateAdmin keep using these fields. It is safe to call while logins are in
+// flight.
+func (h *LoginHandler) SetAdmin(username, passwordHash string) {
+	if h == nil {
+		return
+	}
+	h.adminMu.Lock()
+	h.Username = username
+	h.PasswordHash = passwordHash
+	h.adminMu.Unlock()
+}
+
+func (h *LoginHandler) staticAdmin() (string, string) {
+	if h == nil {
+		return "", ""
+	}
+	h.adminMu.RLock()
+	defer h.adminMu.RUnlock()
+	return h.Username, h.PasswordHash
 }
 
 func (h *LoginHandler) trustProxyEnabled() bool {
@@ -619,10 +643,7 @@ func (h *LoginHandler) adminCredentials() (string, string) {
 			return username, hash
 		}
 	}
-	if h == nil {
-		return "", ""
-	}
-	return h.Username, h.PasswordHash
+	return h.staticAdmin()
 }
 
 func (h *LoginHandler) credentials(r *http.Request) (string, string, error) {

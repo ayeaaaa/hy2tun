@@ -680,3 +680,31 @@ func TestLoginHandlerUsesUpdatedAdminCredentials(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, attempt("admin", "second-password").Code)
 	require.Equal(t, http.StatusNoContent, attempt("root", "second-password").Code)
 }
+
+func TestLoginHandlerSetAdminUpdatesStaticFallback(t *testing.T) {
+	sessions, err := NewSessionManager(testSecret(), time.Hour)
+	require.NoError(t, err)
+	oldHash, err := bcrypt.GenerateFromPassword([]byte("old-password"), bcrypt.MinCost)
+	require.NoError(t, err)
+	newHash, err := bcrypt.GenerateFromPassword([]byte("new-password"), bcrypt.MinCost)
+	require.NoError(t, err)
+
+	handler := &LoginHandler{
+		Sessions:     sessions,
+		Username:     "admin",
+		PasswordHash: string(oldHash),
+	}
+	attempt := func(username, password string) int {
+		body := url.Values{"username": {username}, "password": {password}}.Encode()
+		req := httptest.NewRequest(http.MethodPost, "http://example.com/api/login", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, req)
+		return recorder.Code
+	}
+
+	require.Equal(t, http.StatusNoContent, attempt("admin", "old-password"))
+	handler.SetAdmin("root", string(newHash))
+	require.Equal(t, http.StatusUnauthorized, attempt("admin", "old-password"))
+	require.Equal(t, http.StatusNoContent, attempt("root", "new-password"))
+}

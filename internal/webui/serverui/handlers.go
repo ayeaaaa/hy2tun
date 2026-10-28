@@ -54,11 +54,11 @@ type Server struct {
 	cfg config.WebConfig
 	log *slog.Logger
 
-	sessions      *shared.SessionManager
-	limiter       *shared.LoginLimiter
-	revealLimiter *shared.LoginLimiter
-	login         *shared.LoginHandler
-	trustProxy    atomic.Bool
+	sessions        *shared.SessionManager
+	limiter         *shared.LoginLimiter
+	settingsLimiter *shared.LoginLimiter
+	login           *shared.LoginHandler
+	trustProxy      atomic.Bool
 
 	pages    map[string]*template.Template
 	handler  http.Handler
@@ -68,6 +68,7 @@ type Server struct {
 	done          chan struct{}
 
 	adminMu    sync.RWMutex
+	webAdminMu sync.Mutex
 	mu         sync.Mutex
 	started    bool
 	closed     bool
@@ -114,15 +115,15 @@ func New(api API, cfg config.WebConfig, sessionKey []byte, log *slog.Logger) (*S
 	}
 
 	s := &Server{
-		api:           api,
-		cfg:           cfg,
-		log:           log,
-		sessions:      sessions,
-		limiter:       shared.NewLoginLimiter(5, time.Minute, time.Minute),
-		revealLimiter: shared.NewLoginLimiter(5, time.Minute, time.Minute),
-		staticFS:      staticFS,
-		eventInterval: 2 * time.Second,
-		done:          make(chan struct{}),
+		api:             api,
+		cfg:             cfg,
+		log:             log,
+		sessions:        sessions,
+		limiter:         shared.NewLoginLimiter(5, time.Minute, time.Minute),
+		settingsLimiter: shared.NewLoginLimiter(5, time.Minute, time.Minute),
+		staticFS:        staticFS,
+		eventInterval:   2 * time.Second,
+		done:            make(chan struct{}),
 	}
 	s.login = &shared.LoginHandler{
 		Sessions:     sessions,
@@ -177,8 +178,8 @@ func (s *Server) Addr() string {
 	return s.cfg.Listen
 }
 
-// SetTrustProxy updates whether the login and reveal rate limiters trust
-// forwarded client IP headers. It takes effect for subsequent requests without
+// SetTrustProxy updates whether the login and settings-confirmation rate
+// limiters trust forwarded client IP headers. It takes effect for subsequent requests without
 // a restart.
 func (s *Server) SetTrustProxy(trust bool) {
 	if s == nil {
@@ -191,7 +192,9 @@ func (s *Server) SetTrustProxy(trust bool) {
 }
 
 // SetAdmin replaces the live web administrator credentials and revokes every
-// existing session. The caller must validate and hash the password first.
+// existing session. It also keeps the console's config copy and the login
+// handler's static fallback in sync. The caller must validate and hash the
+// password first.
 func (s *Server) SetAdmin(username, passwordHash string) {
 	if s == nil || s.sessions == nil {
 		return
@@ -201,6 +204,10 @@ func (s *Server) SetAdmin(username, passwordHash string) {
 	s.cfg.PasswordHash = passwordHash
 	s.adminMu.Unlock()
 	s.sessions.UpdateAdmin(username, passwordHash)
+	s.sessions.RevokeAll()
+	if s.login != nil {
+		s.login.SetAdmin(username, passwordHash)
+	}
 }
 
 // Start binds the web listener and serves in the background. It returns once
@@ -536,11 +543,21 @@ func decodeSettingsBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 }
 
 // confirmCurrentPassword implements the re-authentication required by every
-// sensitive settings mutation. The submitted value is never logged.
-func (s *Server) confirmCurrentPassword(w http.ResponseWriter, password string) bool {
+// sensitive settings mutation. Failed attempts are rate-limited per client IP
+// so a stolen session cannot brute-force the web password. The submitted value
+// is never logged.
+func (s *Server) confirmCurrentPassword(w http.ResponseWriter, r *http.Request, password string) bool {
+	ip := shared.ClientIPWithProxy(r, s.trustProxy.Load())
+	if !s.settingsLimiter.Allow(ip) {
+		w.Header().Set("Retry-After", "60")
+		writeJSONErrorCode(w, http.StatusTooManyRequests, "rate_limited", "尝试次数过多，请稍后再试")
+		return false
+	}
 	if s.sessions.VerifyPassword(password) {
+		s.settingsLimiter.Success(ip)
 		return true
 	}
+	s.settingsLimiter.Failure(ip)
 	writeJSONErrorCode(w, http.StatusForbidden, "invalid_password", "当前密码不正确")
 	return false
 }
@@ -569,7 +586,13 @@ func (s *Server) handleUpdateWebSettings(w http.ResponseWriter, r *http.Request)
 	if !decodeSettingsBody(w, r, &request) {
 		return
 	}
-	if !s.confirmCurrentPassword(w, request.secret()) {
+	// Serialize the complete verify -> hash -> persist -> session-update
+	// sequence. The server's UpdateWebConfig also serializes its persist and
+	// SetAdmin step; this lock prevents two handler requests from verifying
+	// the same old password and racing each other's session updates.
+	s.webAdminMu.Lock()
+	defer s.webAdminMu.Unlock()
+	if !s.confirmCurrentPassword(w, r, request.secret()) {
 		return
 	}
 	username := strings.TrimSpace(request.Username)
@@ -595,11 +618,9 @@ func (s *Server) handleUpdateWebSettings(w http.ResponseWriter, r *http.Request)
 		s.writeSettingsMutationError(w, err, "invalid_web_config", "更新 Web 管理员失败")
 		return
 	}
-	// UpdateWebConfig persists before returning. Only now replace the live
-	// credentials and revoke every session, including the caller's cookie.
-	s.sessions.UpdateAdmin(username, string(hash))
-	s.sessions.RevokeAll()
-	s.log.Info("web administrator updated", "username", username)
+	// UpdateWebConfig persists and updates the live login credentials under
+	// the server's settings lock. The handler must not update sessions itself:
+	// doing so could overwrite a newer concurrent update.
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -615,7 +636,7 @@ func (s *Server) handleUpdatePorts(w http.ResponseWriter, r *http.Request) {
 	if !decodeSettingsBody(w, r, &request) {
 		return
 	}
-	if !s.confirmCurrentPassword(w, request.secret()) {
+	if !s.confirmCurrentPassword(w, r, request.secret()) {
 		return
 	}
 	if request.OfflineReserveSeconds < 0 {
@@ -637,15 +658,15 @@ func (s *Server) handleUpdateTrustProxy(w http.ResponseWriter, r *http.Request) 
 	if !decodeSettingsBody(w, r, &request) {
 		return
 	}
-	if !s.confirmCurrentPassword(w, request.secret()) {
+	if !s.confirmCurrentPassword(w, r, request.secret()) {
 		return
 	}
 	if err := s.api.SetTrustProxy(request.TrustProxy); err != nil {
 		s.writeSettingsMutationError(w, err, "invalid_proxy_config", "更新代理信任失败")
 		return
 	}
-	// Update the live login/reveal limiters only after the configuration write
-	// succeeded.
+	// Update the live login/settings-confirmation limiters only after the
+	// configuration write succeeded.
 	s.SetTrustProxy(request.TrustProxy)
 	writeJSON(w, http.StatusOK, s.api.Settings())
 }
@@ -665,7 +686,7 @@ func (s *Server) handleRotateCredentials(w http.ResponseWriter, r *http.Request)
 	if !decodeSettingsBody(w, r, &request) {
 		return
 	}
-	if !s.confirmCurrentPassword(w, request.secret()) {
+	if !s.confirmCurrentPassword(w, r, request.secret()) {
 		return
 	}
 	syncMode := strings.TrimSpace(request.SyncMode)
@@ -700,7 +721,7 @@ func (s *Server) handleRevokeCredentials(w http.ResponseWriter, r *http.Request)
 	if !decodeSettingsBody(w, r, &request) {
 		return
 	}
-	if !s.confirmCurrentPassword(w, request.secret()) {
+	if !s.confirmCurrentPassword(w, r, request.secret()) {
 		return
 	}
 	if err := s.api.RevokePreviousCredentials(); err != nil {
@@ -729,18 +750,9 @@ func (s *Server) handleRevealCredentials(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	ip := shared.ClientIPWithProxy(r, s.trustProxy.Load())
-	if !s.revealLimiter.Allow(ip) {
-		w.Header().Set("Retry-After", "60")
-		writeJSONErrorCode(w, http.StatusTooManyRequests, "rate_limited", "尝试次数过多，请稍后再试")
+	if !s.confirmCurrentPassword(w, r, request.secret()) {
 		return
 	}
-	if !s.sessions.VerifyPassword(request.secret()) {
-		s.revealLimiter.Failure(ip)
-		writeJSONErrorCode(w, http.StatusForbidden, "invalid_password", "当前密码不正确")
-		return
-	}
-	s.revealLimiter.Success(ip)
 
 	set := s.api.CredentialsSnapshot()
 	if set == nil {

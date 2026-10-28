@@ -444,27 +444,27 @@ func (s *Server) UpdateWebConfig(username, passwordHash string) error {
 	}
 
 	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
+
 	next := cloneConfig(s.cfg)
 	if next == nil {
-		s.settingsMu.Unlock()
 		return fmt.Errorf("update web config: server config is nil")
 	}
 	next.Web.Username = username
 	next.Web.PasswordHash = passwordHash
 	if err := next.Validate(); err != nil {
-		s.settingsMu.Unlock()
 		return fmt.Errorf("update web config: %w", err)
 	}
 	if err := s.persistConfig(next); err != nil {
-		s.settingsMu.Unlock()
 		return fmt.Errorf("update web config: %w", err)
 	}
 	s.cfg = next
-	web := s.web
-	s.settingsMu.Unlock()
-
-	if web != nil {
-		web.SetAdmin(username, passwordHash)
+	// Update the live console credentials while still holding settingsMu.
+	// Concurrent updates therefore serialize on the same lock: the last
+	// successful write is the one reflected by both the config file and the
+	// session manager.
+	if s.web != nil {
+		s.web.SetAdmin(username, passwordHash)
 	}
 	s.log.Info("web administrator updated", "username", username)
 	return nil

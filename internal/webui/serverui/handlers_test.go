@@ -54,6 +54,7 @@ type fakeServerAPI struct {
 	updateWebUsername string
 	updateWebHash     string
 	updateWebErr      error
+	updateWebHook     func(username, passwordHash string)
 
 	updatePortsCalls   int
 	updatePortsAllow   []string
@@ -173,11 +174,22 @@ func (f *fakeServerAPI) Settings() SettingsView {
 
 func (f *fakeServerAPI) UpdateWebConfig(username, passwordHash string) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.updateWebCalls++
 	f.updateWebUsername = username
 	f.updateWebHash = passwordHash
-	return f.updateWebErr
+	err := f.updateWebErr
+	hook := f.updateWebHook
+	f.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	// Production's server.UpdateWebConfig updates the live console
+	// credentials. The hook lets handler tests model that without importing
+	// the server package (which imports serverui).
+	if hook != nil {
+		hook(username, passwordHash)
+	}
+	return nil
 }
 
 func (f *fakeServerAPI) UpdatePorts(allow, deny []string, autoRange string, offlineReserve time.Duration) error {
@@ -1245,7 +1257,12 @@ func TestServerSettingsRevealRequiresPasswordAndNoStore(t *testing.T) {
 
 func TestServerSettingsWebUpdateRevokesSession(t *testing.T) {
 	api := &fakeServerAPI{}
-	_, ts := newTestWeb(t, api)
+	web, ts := newTestWeb(t, api)
+	api.mu.Lock()
+	api.updateWebHook = func(username, passwordHash string) {
+		web.SetAdmin(username, passwordHash)
+	}
+	api.mu.Unlock()
 	cookie := login(t, ts)
 
 	body := `{"username":"root","current_password":"pw","new_password":"new-password"}`
@@ -1363,5 +1380,99 @@ func TestServerSettingsWebUpdateFailureKeepsSession(t *testing.T) {
 	resp = doRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/login",
 		`{"username":"admin","password":"pw"}`, nil, map[string]string{"Content-Type": "application/json"})
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	resp.Body.Close()
+}
+
+func TestServerSettingsReauthRateLimitsMutations(t *testing.T) {
+	cases := []struct {
+		name        string
+		path        string
+		wrongBody   string
+		correctBody string
+		apiCalls    func(*fakeServerAPI) int
+	}{
+		{
+			name:        "web admin",
+			path:        "/api/settings/web",
+			wrongBody:   `{"username":"root","current_password":"wrong","new_password":"new-password"}`,
+			correctBody: `{"username":"root","current_password":"pw","new_password":"new-password"}`,
+			apiCalls:    func(api *fakeServerAPI) int { return api.updateWebCalls },
+		},
+		{
+			name:        "rotate credentials",
+			path:        "/api/settings/credentials",
+			wrongBody:   `{"current_password":"wrong","auth":"new-auth-password","sync_mode":"manual"}`,
+			correctBody: `{"current_password":"pw","auth":"new-auth-password","sync_mode":"manual"}`,
+			apiCalls:    func(api *fakeServerAPI) int { return api.rotateCalls },
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &fakeServerAPI{}
+			_, ts := newTestWeb(t, api)
+			cookie := login(t, ts)
+
+			for attempt := 1; attempt <= 5; attempt++ {
+				resp := doRequest(t, ts.Client(), http.MethodPut, ts.URL+tc.path, tc.wrongBody, cookie, csrfHeaders(ts.URL))
+				require.Equal(t, http.StatusForbidden, resp.StatusCode, "attempt %d", attempt)
+				resp.Body.Close()
+			}
+
+			resp := doRequest(t, ts.Client(), http.MethodPut, ts.URL+tc.path, tc.wrongBody, cookie, csrfHeaders(ts.URL))
+			require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+			require.Equal(t, "60", resp.Header.Get("Retry-After"))
+			resp.Body.Close()
+
+			// Even a correct password is rejected while the IP is locked.
+			resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+tc.path, tc.correctBody, cookie, csrfHeaders(ts.URL))
+			require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+			resp.Body.Close()
+
+			require.Zero(t, tc.apiCalls(api), "a wrong or rate-limited confirmation must not reach the API")
+		})
+	}
+}
+
+func TestServerSettingsReauthCorrectPasswordBeforeLimit(t *testing.T) {
+	api := &fakeServerAPI{}
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	correct := `{"current_password":"pw","allow":[],"deny":[],"auto_range":"20000-29999","offline_reserve_seconds":60}`
+	resp := doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/ports", correct, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	resp.Body.Close()
+	require.Equal(t, 1, api.updatePortsCalls)
+
+	wrong := `{"username":"root","current_password":"wrong","new_password":"new-password"}`
+	for attempt := 1; attempt <= 5; attempt++ {
+		resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/web", wrong, cookie, csrfHeaders(ts.URL))
+		require.Equal(t, http.StatusForbidden, resp.StatusCode, "attempt %d", attempt)
+		resp.Body.Close()
+	}
+	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/web", wrong, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+	resp.Body.Close()
+	require.Zero(t, api.updateWebCalls)
+}
+
+func TestServerSettingsWebUpdateDefersSessionUpdateToAPI(t *testing.T) {
+	// The fake does not implement the server's live session update. A
+	// successful handler call must therefore leave the old session intact:
+	// exactly one layer (server.UpdateWebConfig in production) owns session
+	// invalidation.
+	api := &fakeServerAPI{}
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	body := `{"username":"root","current_password":"pw","new_password":"new-password"}`
+	resp := doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/web", body, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	resp.Body.Close()
+	require.Equal(t, 1, api.updateWebCalls)
+
+	resp = doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/api/settings", "", cookie, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 	resp.Body.Close()
 }

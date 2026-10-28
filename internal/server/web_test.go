@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -139,4 +141,98 @@ func TestUpdateWebConfigHotUpdatesWebLogin(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "root", loaded.Web.Username)
 	require.NoError(t, bcrypt.CompareHashAndPassword([]byte(loaded.Web.PasswordHash), []byte("new-password")))
+}
+
+func TestUpdateWebConfigConcurrentKeepsConfigAndSessionsConsistent(t *testing.T) {
+	cert, err := testutil.SelfSignedCert("localhost")
+	require.NoError(t, err)
+	cfg := validServerConfig(cert)
+	dir := t.TempDir()
+	cfg.ConfigPath = filepath.Join(dir, "server.yaml")
+
+	oldHash, err := bcrypt.GenerateFromPassword([]byte("old-password"), bcrypt.MinCost)
+	require.NoError(t, err)
+	cfg.Web = config.WebConfig{
+		Listen:       "127.0.0.1:0",
+		Username:     "admin",
+		PasswordHash: string(oldHash),
+	}
+
+	srv, err := New(cfg, slog.Default())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Close() })
+	require.NotNil(t, srv.web)
+
+	ts := httptest.NewServer(srv.web.Handler())
+	t.Cleanup(ts.Close)
+
+	const writers = 8
+	type write struct {
+		username string
+		password string
+		hash     string
+	}
+	writes := make([]write, writers)
+	for i := range writes {
+		password := fmt.Sprintf("password-%d", i)
+		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+		require.NoError(t, err)
+		writes[i] = write{
+			username: fmt.Sprintf("user-%d", i),
+			password: password,
+			hash:     string(hash),
+		}
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for i := range writes {
+		wg.Add(1)
+		go func(w write) {
+			defer wg.Done()
+			<-start
+			errs <- srv.UpdateWebConfig(w.username, w.hash)
+		}(writes[i])
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	loaded, err := config.LoadServer(cfg.ConfigPath)
+	require.NoError(t, err)
+	winner := -1
+	for i, w := range writes {
+		if loaded.Web.Username != w.username {
+			continue
+		}
+		if bcrypt.CompareHashAndPassword([]byte(loaded.Web.PasswordHash), []byte(w.password)) == nil {
+			winner = i
+			break
+		}
+	}
+	require.NotEqual(t, -1, winner, "persisted config must match exactly one successful writer")
+
+	summary := srv.ConfigSummary()
+	require.Equal(t, writes[winner].username, summary.WebUsername)
+	require.True(t, summary.WebPasswordConfigured)
+
+	login := func(username, password string) int {
+		resp, err := ts.Client().PostForm(ts.URL+"/api/login", url.Values{
+			"username": {username},
+			"password": {password},
+		})
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// The live session manager must accept the credentials from the last
+	// successful write, not a losing concurrent write.
+	require.Equal(t, http.StatusNoContent, login(writes[winner].username, writes[winner].password))
+	other := (winner + 1) % writers
+	require.Equal(t, http.StatusUnauthorized, login(writes[other].username, writes[other].password))
 }
