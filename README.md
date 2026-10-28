@@ -31,6 +31,15 @@ do not need a database, Node.js, a CDN, or any runtime dependency.
   and offline port reservations.
 - Server and client web consoles with login, CSRF protection, live status,
   mapping management, and logs.
+- Hot configuration editing from both consoles: web administrator, HY2
+  credentials, server port policy, server trust-proxy, and client name are
+  validated, written atomically, and applied without restarting the process.
+- Generation-based credential rotation with a retained previous pair,
+  automatic push to capable online clients or manual sync from the client
+  console, and explicit revoke.
+- Authenticated secret reveal for the current (and, on the server, previous)
+  HY2 credential pair; values are masked by default and responses are
+  `no-store`.
 - Optional local SOCKS5 and HTTP CONNECT proxies on the client, using the same
   HY2 connection.
 - Linux, OpenWrt, and Windows client builds from one source tree.
@@ -38,18 +47,24 @@ do not need a database, Node.js, a CDN, or any runtime dependency.
 ## What it does not do (v1)
 
 - No multi-user accounts, approval workflow, tenant isolation, quotas, or
-  billing. There is one HY2 credential set and one control token per server.
+  billing. There is one HY2 authentication configuration and one control token
+  per server; password auth also retains the previous pair during rotation.
 - No P2P, Hysteria Realms, or UDP hole punching. The client always connects to
   the server.
 - No TUN mode, transparent proxy, domain-based routing, ACLs, load balancing,
   or CDN fronting.
 - One client connects to one server. One client cannot register with several
   servers at once.
-- The server console does not edit the full server YAML; change the file and
-  restart `hy2tund`.
-- The client console does not edit the server address, TLS, obfs, or control
-  token; those stay in `client.yaml`.
-- Offline clients are read-only in the server console.
+- The server console edits only the settings listed in
+  [Hot configuration editing](#hot-configuration-editing); listen addresses,
+  TLS, obfs, bandwidth, QUIC, web listener/TLS, logging, the state file, and
+  the authentication mode/user table still require a file edit and restart.
+- The client console does not edit the server address, TLS, obfs, bandwidth,
+  client ID, proxy listeners, or web listener/TLS; those stay in
+  `client.yaml`. It can rename the client and rotate the HY2 pair through
+  manual sync.
+- Offline clients are read-only in the server console, but their credentials
+  can still be updated locally on the client host.
 - No automatic update, tray application, or native Windows service. Windows
   uses Task Scheduler.
 - SOCKS5 UDP ASSOCIATE is not implemented; the local SOCKS5 proxy supports
@@ -195,6 +210,9 @@ tls:
 control:
   token: "a-different-long-random-token"   # openssl rand -hex 32
 
+credentials:
+  generation: 1   # advanced automatically by credential rotation
+
 ports:
   allow: ["2222", "8000-8100", "51820"]
   auto_range: "20000-29999"
@@ -235,6 +253,9 @@ tls:
 control:
   token: "a-different-long-random-token"
 
+credentials:
+  generation: 1   # updated by server push or manual sync
+
 client:
   id: ""
   name: "home-router"
@@ -269,6 +290,10 @@ sudo ./bin/hy2tun -c /etc/hy2tun/client.yaml   # release archive: ./hy2tun
 Open `http://<client-lan-ip>:7501/` and `http://127.0.0.1:7500/` on the server
 (or use an SSH tunnel, see below). The first console login uses the generated
 password printed at startup.
+
+Both consoles have a **Settings** section for hot updates. See
+[Hot configuration editing](#hot-configuration-editing) before changing
+credentials or port policy.
 
 ### 4. Install as a service
 
@@ -346,6 +371,10 @@ Task Scheduler instructions and firewall notes.
 | `bandwidth.ignore_client` | Ignore the client's bandwidth settings. |
 | `quic.*` | QUIC stream/connection windows, idle timeout, and incoming stream limit. |
 | `control.token` | Shared control secret, at least 16 bytes. Use 32 random bytes. |
+| `credentials.generation` | Current credential generation. Missing or `0` means `1`; rotation writes it. |
+| `credentials.previous_generation` | Previous generation retained during rotation; `0` means none. |
+| `credentials.previous_auth` | Previous HY2 password accepted until revoke. Required with `previous_generation`. |
+| `credentials.previous_control_token` | Previous control token accepted until revoke. Required with `previous_generation`. |
 | `ports.allow` | Ports or ranges clients may request. Empty means all free ports. |
 | `ports.deny` | Ports or ranges that are always rejected. Deny wins over allow. |
 | `ports.auto_range` | Range used for `remote_port: 0` when `allow` is empty. Default `20000-29999`. |
@@ -372,6 +401,7 @@ Task Scheduler instructions and firewall notes.
 | `obfs.type` | Must match the server. Empty or `salamander`. |
 | `bandwidth.up`, `bandwidth.down` | Optional client-side HY2 limits. |
 | `control.token` | Must match `control.token` on the server. |
+| `credentials.generation` | Client credential generation. Missing or `0` means `1`; server push or manual sync writes it. The client does not store previous credentials. |
 | `client.id` | Stable client ID. Empty generates one on first start. |
 | `client.name` | Display name in the server console. |
 | `client.revision` | Configuration revision. The client updates it automatically. |
@@ -385,6 +415,13 @@ Task Scheduler instructions and firewall notes.
 | `proxy.http` | Optional local HTTP CONNECT listen address. |
 | `proxy.http_auth` | Optional `user:password` for HTTP CONNECT. |
 | `log.level`, `log.file` | Logging configuration. |
+
+`credentials.generation` is a status label, not an authentication factor; do
+not decrement it. The server's `credentials.previous_*` fields are maintained
+by rotation and revoke. They may be set by hand to pre-seed a pair, but the
+server requires `previous_generation` to be `0` or a positive value less than
+`generation`, and requires both previous secrets when it is non-zero. Like the
+current secrets, they live in `server.yaml` and its `.bak`, both mode `0600`.
 
 ### Mapping fields
 
@@ -458,6 +495,215 @@ colons are accepted). Pinning does not replace normal certificate
 verification: keep `tls.ca` configured, or set `tls.insecure: true` only if you
 understand the trade-off. When both a CA and a pin are configured, both must
 match.
+
+## Hot configuration editing
+
+Both web consoles have a **Settings** section. A change is validated, written
+to the YAML file atomically with mode `0600` (the previous file is kept as
+`.bak`), and only then applied to the running process. If the write fails, the
+running configuration is unchanged and the API returns an error. No restart is
+needed for the settings marked online below.
+
+Every sensitive settings change requires the current web administrator
+password. Failed confirmations are rate-limited to five per minute per client
+IP. Mutations also require the CSRF header and same-origin `Origin` described
+in [Security model](#security-model).
+
+### Which settings are online-editable
+
+**Server (`hy2tund`)**
+
+| Setting | Online editing |
+| --- | --- |
+| `web.username`, `web.password_hash` | Yes. The password can only be reset, never shown. Saving revokes every web session. |
+| `auth.password`, `control.token` | Yes, when `auth.type: password`. Rotation only; see below. |
+| `ports.allow`, `ports.deny`, `ports.auto_range`, `ports.offline_reserve` | Yes. Mappings already running are not closed when a new allow list no longer covers them. |
+| `web.trust_proxy` | Yes. Applies immediately to login and settings-confirmation rate limiting. |
+| Mappings of online clients | Yes. Push an authoritative list or delete a mapping. Offline clients stay read-only. |
+| `credentials.generation`, `credentials.previous_*` | Managed by rotation and revoke. Not edited directly in the console. |
+| `listen`, `listen_host` | No. Edit the file and restart. |
+| `tls.*`, `obfs.*`, `bandwidth.*`, `quic.*` | No. Edit the file and restart. |
+| `web.listen`, `web.tls.*` | No. Edit the file and restart. |
+| `auth.type`, `auth.users` | No. `userpass` cannot rotate credentials online; edit the file and restart. |
+| `state_file`, `log.*` | No. Edit the file and restart. |
+
+**Client (`hy2tun`)**
+
+| Setting | Online editing |
+| --- | --- |
+| `web.username`, `web.password_hash` | Yes. Password reset only; saving revokes every web session. |
+| `client.name` | Yes. Written to `client.yaml`, revision bumped, and sent to the server immediately. |
+| `auth`, `control.token` | Yes, through manual credential sync only. The new generation must be greater than the local one; the client reconnects. |
+| `mappings` | Yes. Add, update, and delete; the server can also push a list. |
+| `client.revision` | Updated automatically when mappings, assigned ports, or the client name change. |
+| `credentials.generation` | Managed by server push or manual sync. |
+| `server`, `tls.*`, `obfs.*`, `bandwidth.*`, `client.id` | No. Edit the file and restart. |
+| `web.listen`, `web.trust_proxy`, `web.tls.*` | No. Edit the file and restart. |
+| `proxy.*`, `log.*` | No. Edit the file and restart. |
+
+The client `web.trust_proxy` setting is file-only in this release; only the
+server console can toggle trust-proxy at runtime.
+
+### Web administrator password
+
+The web administrator username is shown in the console. The password is stored
+only as a bcrypt hash and cannot be revealed; the console can only reset it.
+A reset requires the current password, a new password of at least 8 characters,
+and confirmation. Saving updates `web.password_hash`, keeps the YAML file and
+live login in sync, and revokes all existing web sessions, so log in again with
+the new credentials. Changing the username has the same session effect.
+
+### Credential generations
+
+For password authentication, the server's current HY2 pair is
+`auth.password` plus `control.token`, and the client's current pair is `auth`
+plus `control.token`. `credentials.generation` labels that pair. A missing or
+`0` generation is treated as `1`; this keeps older configuration files
+working.
+
+When the server rotates credentials it increments `generation` by one and
+moves the old current pair into `credentials.previous_generation`,
+`credentials.previous_auth`, and `credentials.previous_control_token`. The
+server accepts both the current and the previous HY2 password and control
+token until the previous pair is revoked. On the server, the generation is
+used only for status reporting and for closing stale control sessions; it is
+not an authentication factor. A capable client that reports the previous
+generation is reported as `pending`.
+
+The client only tracks `credentials.generation`; it does not retain previous
+credentials. A pushed or manually applied rotation replaces its current pair.
+The previous pair is accepted for authentication only; it is never pushed to
+clients.
+
+### Rotating credentials from the server console
+
+1. Open **Settings → HY2 凭据**.
+2. Enter a new HY2 password, a new control token, or both. A blank field keeps
+   the current value. The HY2 password must be at least 8 bytes; the control
+   token must be at least 16 bytes.
+3. Choose a sync mode:
+   - **自动推送 / auto** sends a `credential_update` to each online client that
+     advertises `credential_update_v1`, waits up to five seconds per client for
+     its acknowledgement, and returns a result per client.
+   - **手动同步 / manual** sends no push. Every online client stays `pending`
+     until it is updated from its own console.
+4. Confirm with the current web administrator password.
+
+The server writes the new generation to `server.yaml` before swapping the live
+credentials, so a failed write leaves the old pair active. A rotation with both
+fields blank, or with values identical to the current pair, is rejected as
+`no_change`. Rotating only one field is allowed; the retained previous pair is
+the old current pair.
+
+Auto-push results are:
+
+- `synced` — the client wrote the new pair and acknowledged it; the server
+  then closes the old control stream so the client reconnects.
+- `pending` — the client has not confirmed the new generation (manual mode,
+  not ready, or a write/ack failure).
+- `unsupported` — the client did not advertise `credential_update_v1`; it was
+  not sent the message and must be updated manually.
+- `timeout` — no matching acknowledgement arrived within five seconds.
+
+Auto-push never retries automatically. The settings page polls
+`GET /api/settings` and shows the current status of every online client; offline
+clients are listed with an unknown generation. Offline clients are not pushed;
+clients still on the previous generation keep working until it is revoked.
+
+A second rotation while a previous pair exists replaces that previous pair.
+Control sessions on generations older than the new previous generation are
+closed immediately, because those clients can no longer authenticate after a
+reconnect; update them manually.
+
+### Manual client sync
+
+If a client is offline, old, or was not auto-pushed, update it from its own
+console:
+
+1. On the server **Settings → HY2 凭据**, note the current generation (or
+   reveal the current pair).
+2. On the client **Settings → HY2 凭据**, enter a new generation greater than
+   the local generation, plus the new HY2 password and control token.
+3. Confirm with the client's current web administrator password. The client
+   writes `client.yaml` atomically, closes the current connection, and
+   reconnects with the new pair.
+
+The client page shows the server generation from the last `hello_ack` as a
+hint. A value that does not match is allowed, but the sync badge may stay
+`pending` until the next handshake reports the server's current generation.
+The generation is display-only; authentication still depends on the password
+and token matching.
+
+You can also edit `auth`, `control.token`, and `credentials.generation`
+directly in `client.yaml` and restart the client.
+
+### Revoking the previous pair
+
+**撤销旧凭据 / Revoke previous credentials** clears
+`credentials.previous_generation`, `credentials.previous_auth`, and
+`credentials.previous_control_token` from `server.yaml` and makes only the
+current pair valid. The server closes every control session that is not on the
+current generation. Those clients keep trying to reconnect with the old pair
+and fail until they are updated manually.
+
+For the standard Hysteria 2 proxy path, a new connection using the old password
+fails immediately after revoke. A connection that was already authenticated
+can continue until it closes naturally, because Hysteria authenticates per
+connection. This is expected.
+
+### Revealing secrets
+
+The settings pages show only a fixed mask (`********` on the server and
+`••••••••` on the client); the mask does not reveal the secret's length.
+`GET /api/settings` never contains plaintext passwords or tokens.
+
+To show the plaintext:
+
+1. Enter the current web administrator password in the reveal field.
+2. Click **显示凭据 / Show credentials**.
+
+The server returns its current pair and, when present, the previous pair; the
+client returns only its current pair. Reveal requires a valid web session and
+the current password, returns `Cache-Control: no-store`, is never written to
+logs or URLs, and is rate-limited after five failed password confirmations per
+minute per client IP. The page automatically re-masks after 30 seconds, and
+plaintext is not kept after a refresh.
+
+The web administrator password is not part of this endpoint and can never be
+shown.
+
+### Compatibility and old clients
+
+New clients send `credential_generation` and
+`capabilities: ["credential_update_v1"]` in the control `hello`. The server
+uses the capability only to decide whether auto-push is safe:
+
+- **Old client, new server** — after a rotation, a client that omits
+  `credential_update_v1` is never sent a `credential_update` message, so it
+  does not disconnect on an unknown message. It is marked `unsupported` and
+  keeps working with the previous credentials until they are revoked. Update
+  the client binary, or edit `client.yaml` manually and restart it.
+- **Old client, missing generation** — a `hello` without
+  `credential_generation` is treated as generation `1`. If the server is still
+  on generation `1`, the client is reported as `synced`.
+- **New client, old server** — the old server ignores the new `hello` fields
+  and its `hello_ack` has no generation. The client shows the server generation
+  as unknown and stays `pending`; the tunnel still works, but server-driven
+  rotation is unavailable. Edit both files manually.
+- **Old configuration files** — a missing `credentials` section is generation
+  `1` with no previous pair, so existing deployments upgrade in place.
+- **Standard Hysteria 2 clients** — they do not use the hy2tun control protocol
+  and are unaffected except that the server accepts the current or previous
+  HY2 password until revoke, as described above.
+
+### Write order and failure behavior
+
+Every hot update follows the same order: validate the input, build a new
+configuration, write it atomically (temporary file, fsync, rename, and `.bak`),
+then swap the runtime state. If validation or the file write fails, the
+running configuration, credential set, port policy, and web login are left
+unchanged. A client credential update is written to `client.yaml` before the
+`credential_ack` is sent, so an acknowledged rotation is durable.
 
 ## Deployment notes
 
@@ -549,6 +795,19 @@ the password and session cookie in transit.
   `HttpOnly`, and `SameSite=Lax`, and are marked `Secure` (with HSTS) when the
   request is HTTPS directly or through a TLS reverse proxy; mutating APIs
   require `X-Requested-With: hy2tun` and a matching `Origin`.
+- Web administrator passwords are reset-only and never returned by any API.
+  A reset requires the current password and revokes every web session.
+- HY2 credentials are masked in `GET /api/settings`. The reveal endpoint
+  requires the current web administrator password, returns `Cache-Control:
+  no-store`, never writes plaintext to logs or URLs, and rate-limits failed
+  confirmations.
+- Hot settings are persisted before they take effect. A failed validation or
+  file write leaves the running credential set, port policy, and web login
+  unchanged.
+- Rotation keeps the previous HY2 pair valid until an explicit revoke; revoke
+  closes control sessions that are not on the current generation. Standard
+  Hysteria 2 proxy connections that were already authenticated can survive
+  until they close naturally, because HY2 authenticates per connection.
 - Login rate limiting keys on the direct peer by default. Set
   `web.trust_proxy: true` only behind a proxy that overwrites both
   `X-Forwarded-For` and `X-Real-IP`; otherwise forwarded headers are ignored so
@@ -640,6 +899,30 @@ with a smaller MTU can drop large datagrams before they arrive.
   start. Delete it and restart to generate a new key; this invalidates all
   existing web sessions. Check that the configuration directory is writable
   by the process user.
+
+### Credential rotation and sync
+
+- `unsupported` in the server sync table means the client predates
+  `credential_update_v1`. It was not sent the new pair and stays connected on
+  the previous credentials. Update the client, or edit `client.yaml` and
+  restart it.
+- `pending` or `timeout` after auto-push means the client did not confirm the
+  new generation (not ready, a config write/ack failure, or no acknowledgement
+  within five seconds). The previous pair is still valid, so the tunnel keeps
+  working. Check the client log for a config write error, then retry the
+  rotation or use manual sync. Auto-push is not retried automatically.
+- `no_change` means both fields were blank or matched the current pair; no new
+  generation was created.
+- `unsupported_auth_type` means the server uses `auth.type: userpass`, which
+  cannot rotate online. Edit `server.yaml` and restart.
+- `credential generation ... must be greater than current generation` on the
+  client means the manual sync form did not advance the generation. Enter the
+  server's current generation (or any larger number).
+- An offline client is shown as `pending` with an unknown generation because
+  the state file does not persist the last credential generation. Reconnect it
+  to refresh the status.
+- After revoke, an old client cannot reconnect. This is expected; update its
+  `auth`, `control.token`, and `credentials.generation` and restart it.
 
 ### Ports and restarts
 
@@ -754,8 +1037,11 @@ go test ./internal/e2e -v     # only the acceptance test
 
 The end-to-end test starts a real server and client with a self-signed
 certificate, verifies reverse TCP and UDP, connects a standard HY2 core client,
-then logs in to the server console to push and delete a mapping and confirm the
-public port closes. It uses only loopback addresses and ephemeral ports.
+then logs in to the server console to push and delete a mapping, rotate both
+credentials with auto-push, confirm the client persists the new pair and
+reconnects, and revoke the previous pair. It also confirms that a new client
+using the revoked credentials is rejected. It uses only loopback addresses and
+ephemeral ports.
 
 The repository intentionally does not use a Node/CDN build. Web templates,
 CSS, and JavaScript are embedded with `go:embed`.

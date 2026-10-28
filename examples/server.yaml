@@ -52,6 +52,17 @@ quic:
 control:
   token: "replace-with-a-random-32-byte-hex-string"
 
+# Credential generation. The server maintains this automatically when the HY2
+# password or control token is rotated from the web console. Missing or 0
+# means generation 1. The previous pair remains valid until it is revoked.
+credentials:
+  generation: 1
+  # Written by the server during rotation. Both previous values are required
+  # when previous_generation is set, and must be empty when it is 0.
+  # previous_generation: 0
+  # previous_auth: ""
+  # previous_control_token: ""
+
 # Public ports that clients may request. An empty allow list permits every
 # free port; deny always wins. Each entry is a single port or an inclusive
 # range. remote_port: 0 on the client allocates from allow when it is

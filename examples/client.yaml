@@ -38,6 +38,12 @@ bandwidth:
 control:
   token: "replace-with-the-server-control-token"
 
+# Credential generation. A server push or manual sync from the client web
+# console updates it; missing or 0 means generation 1. The client does not
+# store previous credentials.
+credentials:
+  generation: 1
+
 client:
   # Empty means the client generates an ID on first start and writes it back.
   id: ""
