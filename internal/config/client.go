@@ -175,10 +175,11 @@ func parseClientServer(value string) (string, []ports.Range, bool, error) {
 	if strings.TrimSpace(value) == "" {
 		return "", nil, false, fmt.Errorf("server is required")
 	}
-	host, portStr, err := net.SplitHostPort(value)
+	host, portStr, err := net.SplitHostPort(strings.TrimSpace(value))
 	if err != nil {
 		return "", nil, false, fmt.Errorf("server must be a valid host:port or port range: %w", err)
 	}
+	host = strings.TrimSpace(host)
 	if host == "" {
 		return "", nil, false, fmt.Errorf("server must include a host")
 	}

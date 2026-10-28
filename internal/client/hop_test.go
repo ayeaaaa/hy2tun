@@ -54,6 +54,13 @@ func TestResolveServerAddrNormalizesHopWhitespace(t *testing.T) {
 			require.Equal(t, []uint16{30000, 30001}, hopAddr.Ports)
 		})
 	}
+	t.Run("whitespace-only host", func(t *testing.T) {
+		cfg := validTestClientConfig()
+		cfg.Server = " :443,8443"
+		addr, err := resolveServerAddr(cfg)
+		require.Nil(t, addr)
+		require.ErrorContains(t, err, "server must include a host")
+	})
 }
 
 func TestBuildConnFactorySelectsHop(t *testing.T) {

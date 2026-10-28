@@ -824,6 +824,9 @@ func normalizeHopServer(value string) (string, error) {
 		return "", err
 	}
 	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", fmt.Errorf("server must include a host")
+	}
 	portStr = strings.Join(strings.Fields(portStr), "")
 	return net.JoinHostPort(host, portStr), nil
 }

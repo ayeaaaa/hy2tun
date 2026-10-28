@@ -592,6 +592,7 @@ func TestClientConfigRejectsBadPortHoppingServer(t *testing.T) {
 		"127.0.0.1:443,",
 		"127.0.0.1:443-442",
 		":443",
+		" :443,8443",
 	} {
 		cfg := validClientConfig()
 		cfg.Server = server
