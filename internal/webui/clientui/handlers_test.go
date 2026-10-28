@@ -749,6 +749,46 @@ func TestClientWebRotateCredentialsRejectsShortAuth(t *testing.T) {
 	require.Zero(t, api.rotation.Generation, "the handler must reject before writing config")
 }
 
+func TestHealthAndMetrics(t *testing.T) {
+	api := &fakeClientAPI{
+		status: view.ClientStatus{
+			Connected:                  true,
+			TxBytes:                    100,
+			RxBytes:                    200,
+			Uptime:                     90 * time.Second,
+			CredentialGeneration:       2,
+			ServerCredentialGeneration: 2,
+			CredentialSynced:           true,
+		},
+		mappings: []view.MappingView{
+			{Mapping: config.Mapping{ID: "m1"}},
+			{Mapping: config.Mapping{ID: "m2"}},
+		},
+	}
+	_, ts := newTestClientWeb(t, api)
+
+	resp, err := ts.Client().Get(ts.URL + "/healthz")
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "ok\n", string(body))
+
+	resp, err = ts.Client().Get(ts.URL + "/metrics")
+	require.NoError(t, err)
+	body, err = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Contains(t, string(body), "hy2tun_client_connected 1")
+	require.Contains(t, string(body), "hy2tun_client_mappings 2")
+	require.Contains(t, string(body), "hy2tun_client_tx_bytes_total 100")
+	require.Contains(t, string(body), "hy2tun_client_rx_bytes_total 200")
+	require.Contains(t, string(body), "hy2tun_client_uptime_seconds 90")
+	require.Contains(t, string(body), "hy2tun_client_credential_synced 1")
+}
+
 func TestClientWebSettingsJSONAndPage(t *testing.T) {
 	api := &fakeClientAPI{
 		status: view.ClientStatus{Name: "home", Server: "example.com:443", Connected: true},

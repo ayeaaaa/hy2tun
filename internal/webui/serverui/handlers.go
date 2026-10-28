@@ -343,6 +343,9 @@ func (s *Server) newHandler() http.Handler {
 	mux.Handle("GET /api/events", s.auth(http.HandlerFunc(s.handleEvents)))
 	mux.Handle("GET /api/config/summary", s.auth(http.HandlerFunc(s.handleConfigSummaryJSON)))
 
+	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
+
 	mux.Handle("GET /api/settings", s.auth(http.HandlerFunc(s.handleSettingsJSON)))
 	mux.Handle("PUT /api/settings/web", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateWebSettings))))
 	mux.Handle("PUT /api/settings/ports", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdatePorts))))
@@ -470,6 +473,38 @@ func (s *Server) handleMappingsPage(w http.ResponseWriter, r *http.Request) {
 		pageBase: s.base("全部映射", "mappings"),
 		Rows:     mappingRows(s.api.Clients()),
 	})
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok\n"))
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	overview := s.api.Overview()
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = fmt.Fprintf(w, `# HELP hy2tun_server_up Whether the server process is serving this request.
+# TYPE hy2tun_server_up gauge
+hy2tun_server_up 1
+# HELP hy2tun_server_online_clients Number of currently online hy2tun clients.
+# TYPE hy2tun_server_online_clients gauge
+hy2tun_server_online_clients %d
+# HELP hy2tun_server_active_mappings Number of active reverse mappings.
+# TYPE hy2tun_server_active_mappings gauge
+hy2tun_server_active_mappings %d
+# HELP hy2tun_server_tx_bytes_total Total bytes sent to clients.
+# TYPE hy2tun_server_tx_bytes_total counter
+hy2tun_server_tx_bytes_total %d
+# HELP hy2tun_server_rx_bytes_total Total bytes received from clients.
+# TYPE hy2tun_server_rx_bytes_total counter
+hy2tun_server_rx_bytes_total %d
+# HELP hy2tun_server_uptime_seconds Server process uptime in seconds.
+# TYPE hy2tun_server_uptime_seconds gauge
+hy2tun_server_uptime_seconds %.0f
+`, overview.OnlineClients, overview.ActiveMappings, overview.TxBytes, overview.RxBytes, overview.Uptime.Seconds())
 }
 
 func (s *Server) handleSettingsPage(w http.ResponseWriter, r *http.Request) {

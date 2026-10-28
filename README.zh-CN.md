@@ -161,6 +161,17 @@ hy2tun --check-config -c /etc/hy2tun/client.yaml
 会检查 YAML、必填字段、TLS 证书/私钥、Web TLS、bcrypt 哈希以及日志/状态目录。
 成功时输出 `configuration OK`。
 
+## 健康检查与指标
+
+启用 Web 控制台后，两个二进制都提供：
+
+- `GET /healthz` —— 进程正常时返回 `200` 和 `ok`。
+- `GET /metrics` —— Prometheus 文本指标，包含聚合流量、映射数、连接状态、
+  凭据代际和运行时间。
+
+这两个端点有意不要求登录，方便本机监控。请把 Web 监听保持在回环地址、VPN
+或可信反向代理后面，不要直接暴露到公网。
+
 ## 快速开始
 
 完整示例文件在 [`examples/`](examples)。它们是合法配置，但包含占位符；

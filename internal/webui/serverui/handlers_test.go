@@ -1093,6 +1093,37 @@ func TestServerWebNewValidation(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestHealthAndMetrics(t *testing.T) {
+	api := &fakeServerAPI{overview: view.Overview{
+		OnlineClients:  2,
+		ActiveMappings: 3,
+		TxBytes:        100,
+		RxBytes:        200,
+		Uptime:         90 * time.Second,
+	}}
+	_, ts := newTestWeb(t, api)
+
+	resp, err := ts.Client().Get(ts.URL + "/healthz")
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "ok\n", string(body))
+
+	resp, err = ts.Client().Get(ts.URL + "/metrics")
+	require.NoError(t, err)
+	body, err = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Contains(t, string(body), "hy2tun_server_online_clients 2")
+	require.Contains(t, string(body), "hy2tun_server_active_mappings 3")
+	require.Contains(t, string(body), "hy2tun_server_tx_bytes_total 100")
+	require.Contains(t, string(body), "hy2tun_server_rx_bytes_total 200")
+	require.Contains(t, string(body), "hy2tun_server_uptime_seconds 90")
+}
+
 func TestServerSettingsAPIReturnsMaskedValues(t *testing.T) {
 	api := &fakeServerAPI{
 		settings: SettingsView{

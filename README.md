@@ -188,6 +188,18 @@ The check validates YAML, required fields, TLS certificate/key pairs, web TLS,
 bcrypt hashes, and log/state parent directories. It prints `configuration OK`
 on success.
 
+## Health and metrics
+
+When the web console is enabled, both binaries expose:
+
+- `GET /healthz` — returns `200` and `ok` when the process is serving.
+- `GET /metrics` — Prometheus text metrics for aggregate traffic, mappings,
+  connection state, credential generation, and uptime.
+
+These endpoints are intentionally unauthenticated for local monitoring. Keep
+the web listener on loopback, a VPN, or a trusted reverse proxy; do not expose
+it directly to the public internet.
+
 ## Quick start
 
 The complete example files are in [`examples/`](examples). They are valid

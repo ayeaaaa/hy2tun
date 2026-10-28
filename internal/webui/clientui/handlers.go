@@ -308,6 +308,9 @@ func (s *Server) newHandler() http.Handler {
 	mux.Handle("GET /api/logs", s.auth(http.HandlerFunc(s.handleLogsJSON)))
 	mux.Handle("GET /api/events", s.auth(http.HandlerFunc(s.handleEvents)))
 
+	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
+
 	mux.Handle("GET /api/settings", s.auth(http.HandlerFunc(s.handleSettingsJSON)))
 	mux.Handle("PUT /api/settings/web", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateWebSettings))))
 	mux.Handle("PUT /api/settings/name", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateName))))
@@ -487,6 +490,56 @@ func (s *Server) handleLogsJSON(w http.ResponseWriter, r *http.Request) {
 		entries = []view.LogEntry{}
 	}
 	writeJSON(w, http.StatusOK, entries)
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok\n"))
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	status := s.api.Status()
+	mappings := s.api.Mappings()
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	connected := 0
+	if status.Connected {
+		connected = 1
+	}
+	synced := 0
+	if status.CredentialSynced {
+		synced = 1
+	}
+	_, _ = fmt.Fprintf(w, `# HELP hy2tun_client_up Whether the client process is serving this request.
+# TYPE hy2tun_client_up gauge
+hy2tun_client_up 1
+# HELP hy2tun_client_connected Whether the HY2 control connection is established.
+# TYPE hy2tun_client_connected gauge
+hy2tun_client_connected %d
+# HELP hy2tun_client_mappings Number of configured reverse mappings.
+# TYPE hy2tun_client_mappings gauge
+hy2tun_client_mappings %d
+# HELP hy2tun_client_tx_bytes_total Total bytes sent to the server.
+# TYPE hy2tun_client_tx_bytes_total counter
+hy2tun_client_tx_bytes_total %d
+# HELP hy2tun_client_rx_bytes_total Total bytes received from the server.
+# TYPE hy2tun_client_rx_bytes_total counter
+hy2tun_client_rx_bytes_total %d
+# HELP hy2tun_client_uptime_seconds Client process uptime in seconds.
+# TYPE hy2tun_client_uptime_seconds gauge
+hy2tun_client_uptime_seconds %.0f
+# HELP hy2tun_client_credential_generation Local credential generation.
+# TYPE hy2tun_client_credential_generation gauge
+hy2tun_client_credential_generation %d
+# HELP hy2tun_client_server_credential_generation Server credential generation from the last handshake.
+# TYPE hy2tun_client_server_credential_generation gauge
+hy2tun_client_server_credential_generation %d
+# HELP hy2tun_client_credential_synced Whether the last handshake confirmed credential sync.
+# TYPE hy2tun_client_credential_synced gauge
+hy2tun_client_credential_synced %d
+`, connected, len(mappings), status.TxBytes, status.RxBytes, status.Uptime.Seconds(), status.CredentialGeneration, status.ServerCredentialGeneration, synced)
 }
 
 func (s *Server) handleSettingsJSON(w http.ResponseWriter, r *http.Request) {
