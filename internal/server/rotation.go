@@ -64,20 +64,6 @@ func (s *Server) RotateCredentials(auth, controlToken, syncMode string) (int64, 
 		s.settingsMu.Unlock()
 		return 0, nil, ErrUnsupportedAuthType
 	}
-	if auth == "" && controlToken == "" {
-		s.settingsMu.Unlock()
-		return 0, nil, ErrNoCredentialChange
-	}
-	// Only fields that actually change are length-checked. Historical values
-	// are not revalidated when the other field rotates.
-	if auth != "" && len(auth) < 8 {
-		s.settingsMu.Unlock()
-		return 0, nil, fmt.Errorf("auth password must be at least 8 bytes")
-	}
-	if controlToken != "" && len(controlToken) < 16 {
-		s.settingsMu.Unlock()
-		return 0, nil, fmt.Errorf("control token must be at least 16 bytes")
-	}
 
 	currentGeneration := current.Generation
 	if currentGeneration < 1 {
@@ -91,9 +77,20 @@ func (s *Server) RotateCredentials(auth, controlToken, syncMode string) (int64, 
 	if controlToken != "" {
 		nextToken = controlToken
 	}
+	// No-op checks run before length validation. A historical value may be
+	// shorter than the current minimum, and an unchanged field must not be
+	// revalidated when only the other field rotates.
 	if nextAuth == current.Auth && nextToken == current.ControlToken {
 		s.settingsMu.Unlock()
 		return 0, nil, ErrNoCredentialChange
+	}
+	if nextAuth != current.Auth && len(nextAuth) < 8 {
+		s.settingsMu.Unlock()
+		return 0, nil, fmt.Errorf("auth password must be at least 8 bytes")
+	}
+	if nextToken != current.ControlToken && len(nextToken) < 16 {
+		s.settingsMu.Unlock()
+		return 0, nil, fmt.Errorf("control token must be at least 16 bytes")
 	}
 
 	nextGeneration := currentGeneration + 1
@@ -348,18 +345,33 @@ func (s *Server) pushCredentials(sess *clientSession, clientID, name string, gen
 	defer sess.setCredentialWait(0)
 	sess.drainCredentialAcks()
 
+	// The write and the ack wait share one budget. A client that stops reading
+	// must not be able to hold rotationMu for the 10s generic write deadline
+	// plus the 5s ack timeout.
+	deadline := time.Now().Add(credentialAckTimeout)
 	update := &control.CredentialUpdate{
 		Type:         control.TypeCredentialUpdate,
 		Generation:   generation,
 		Auth:         auth,
 		ControlToken: controlToken,
 	}
-	if err := sess.write(update); err != nil {
-		result.Error = "write_failed"
+	if err := sess.writeWithDeadline(update, deadline); err != nil {
+		if !time.Now().Before(deadline) {
+			result.Status = credentialStatusTimeout
+			result.Error = "ack_timeout"
+		} else {
+			result.Error = "write_failed"
+		}
 		return result
 	}
 
-	timer := time.NewTimer(credentialAckTimeout)
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		result.Status = credentialStatusTimeout
+		result.Error = "ack_timeout"
+		return result
+	}
+	timer := time.NewTimer(remaining)
 	defer timer.Stop()
 	for {
 		select {

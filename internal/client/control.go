@@ -17,6 +17,11 @@ import (
 
 const controlHandshakeTimeout = 10 * time.Second
 
+// credentialAckFlushGrace gives the transport a moment to flush a
+// credential_ack before the control stream is closed. Closing the QUIC
+// connection immediately after the write can discard the ack.
+const credentialAckFlushGrace = 50 * time.Millisecond
+
 // errClientClosed is used internally when Close wins a race with connection
 // setup. Start treats it as a normal shutdown.
 var errClientClosed = errors.New("client closed")
@@ -560,17 +565,50 @@ func (c *Client) handleCredentialUpdate(conn net.Conn, msg *control.CredentialUp
 	c.configMu.Unlock()
 
 	ack.OK = true
-	c.writeCredentialAck(conn, ack)
+	if err := c.writeCredentialAck(conn, ack); err != nil {
+		return
+	}
 	c.log.Info("credentials updated", "generation", msg.Generation)
-	// The server closes the control stream after processing the ack, which
-	// makes runOnce return and Start reconnect with the new pair. Closing the
-	// stream here would race the ack write and can discard it on the wire.
+	c.forceReconnectAfterCredentialAck(conn)
 }
 
-func (c *Client) writeCredentialAck(conn net.Conn, ack *control.CredentialAck) {
+// forceReconnectAfterCredentialAck closes the control stream so runOnce
+// reconnects with the new credentials. The short grace period lets the
+// transport flush the ack; closing the QUIC connection immediately after the
+// write can discard the ack before the server reads it.
+func (c *Client) forceReconnectAfterCredentialAck(conn net.Conn) {
+	if conn == nil {
+		return
+	}
+	// Capture the HY2 client that owns this control stream. If a newer
+	// connection has already replaced it, leave that connection alone.
+	c.mu.Lock()
+	var hy hyclient.Client
+	if c.controlConn == conn {
+		hy = c.hy
+	}
+	c.mu.Unlock()
+
+	go func() {
+		timer := time.NewTimer(credentialAckFlushGrace)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			_ = conn.Close()
+			if hy != nil {
+				_ = hy.Close()
+			}
+		case <-c.closed:
+		}
+	}()
+}
+
+func (c *Client) writeCredentialAck(conn net.Conn, ack *control.CredentialAck) error {
 	if err := c.writeControl(conn, ack); err != nil {
 		c.log.Warn("send credential ack", "error", err)
+		return err
 	}
+	return nil
 }
 
 // applyRejectedUpdateResults marks mappings that are not already running as

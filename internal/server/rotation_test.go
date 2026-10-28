@@ -208,6 +208,73 @@ func TestSingleFieldRotation(t *testing.T) {
 	require.Equal(t, int64(3), srv.CredentialsSnapshot().Generation)
 }
 
+func TestRotateCredentialsUnchangedShortAuth(t *testing.T) {
+	srv, stop := startTestServer(t)
+	defer stop()
+
+	// The default test password is "pw", shorter than the 8-byte rotation
+	// minimum. An unchanged historical value must not be revalidated.
+	_, _, err := srv.RotateCredentials(defaultTestAuth, "", "manual")
+	require.ErrorIs(t, err, ErrNoCredentialChange)
+	require.Equal(t, int64(1), srv.CredentialsSnapshot().Generation)
+
+	// Rotating only the token must succeed even though the unchanged password
+	// is short.
+	gen, _, err := srv.RotateCredentials("", "new-token-0123456789abcdef", "manual")
+	require.NoError(t, err)
+	require.Equal(t, int64(2), gen)
+	snapshot := srv.CredentialsSnapshot()
+	require.Equal(t, defaultTestAuth, snapshot.Auth)
+	require.Equal(t, "new-token-0123456789abcdef", snapshot.ControlToken)
+	require.Equal(t, defaultTestAuth, snapshot.PreviousAuth)
+
+	// A changed short password is still rejected.
+	_, _, err = srv.RotateCredentials("short", "", "manual")
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrNoCredentialChange)
+	require.Equal(t, int64(2), srv.CredentialsSnapshot().Generation)
+}
+
+func TestRotateCredentialsPushWriteTimeout(t *testing.T) {
+	oldTimeout := credentialAckTimeout
+	credentialAckTimeout = 100 * time.Millisecond
+	defer func() { credentialAckTimeout = oldTimeout }()
+
+	srv, stop := startTestServer(t)
+	defer stop()
+
+	// A net.Pipe write blocks until the peer reads. The peer never reads, so
+	// the write must hit the shared credential deadline instead of the generic
+	// 10s control write deadline.
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	sess := &clientSession{
+		id:            "blocked-client",
+		name:          "blocked",
+		conn:          serverConn,
+		ready:         make(chan struct{}),
+		done:          make(chan struct{}),
+		credentialAck: make(chan *control.CredentialAck, 1),
+	}
+	sess.markReady()
+	sess.setCredentialState(1, true, true)
+	srv.mappings.mu.Lock()
+	srv.mappings.sessions[sess.id] = sess
+	srv.mappings.mu.Unlock()
+
+	start := time.Now()
+	gen, results, err := srv.RotateCredentials("new-password", "", "auto")
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	require.Equal(t, int64(2), gen)
+	require.Len(t, results, 1)
+	require.Contains(t, []string{credentialStatusTimeout, credentialStatusPending}, results[0].Status)
+	require.NotEmpty(t, results[0].Error)
+	require.Less(t, elapsed, time.Second, "rotation must be bounded by the credential deadline")
+}
+
 func TestRotateCredentialsUnsupportedAuthType(t *testing.T) {
 	cert, err := testutil.SelfSignedCert("localhost")
 	require.NoError(t, err)

@@ -299,15 +299,26 @@ func (s *clientSession) waitReady(timeout time.Duration) error {
 	}
 }
 
-// write sends one control frame with a bounded write deadline.
+// write sends one control frame with the default bounded write deadline.
 func (s *clientSession) write(msg any) error {
+	return s.writeWithDeadline(msg, time.Time{})
+}
+
+// writeWithDeadline sends one control frame with an absolute write deadline.
+// A zero deadline means the default 10s budget. Credential pushes use the same
+// deadline for the write and the ack wait so a client that stops reading cannot
+// extend the rotation past its budget.
+func (s *clientSession) writeWithDeadline(msg any, deadline time.Time) error {
 	if s.conn == nil {
 		return fmt.Errorf("control stream is closed")
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	_ = s.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	if deadline.IsZero() {
+		deadline = time.Now().Add(10 * time.Second)
+	}
+	_ = s.conn.SetWriteDeadline(deadline)
 	defer func() { _ = s.conn.SetWriteDeadline(time.Time{}) }()
 	return control.WriteMessage(s.conn, msg)
 }
