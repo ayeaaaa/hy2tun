@@ -31,6 +31,8 @@ do not need a database, Node.js, a CDN, or any runtime dependency.
   atomically, and acknowledges the new revision.
 - Port whitelist with single ports, ranges, deny rules, automatic allocation,
   and offline port reservations.
+- Optional client-side Hysteria 2 UDP port hopping across a port set, with a
+  documented manual server-side nftables/iptables redirect.
 - Server and client web consoles with login, CSRF protection, live status,
   mapping management, and logs.
 - Hot configuration editing from both consoles: web administrator, HY2
@@ -61,14 +63,17 @@ do not need a database, Node.js, a CDN, or any runtime dependency.
   [Hot configuration editing](#hot-configuration-editing); listen addresses,
   TLS, obfs, bandwidth, QUIC, web listener/TLS, logging, the state file, and
   the authentication mode/user table still require a file edit and restart.
-- The client console does not edit the server address, TLS, obfs, bandwidth,
-  client ID, proxy listeners, or web listener/TLS; those stay in
-  `client.yaml`. It can rename the client and rotate the HY2 pair through
-  manual sync.
+- The client console does not edit the server address, port-hopping transport,
+  TLS, obfs, bandwidth, client ID, proxy listeners, or web listener/TLS; those
+  stay in `client.yaml`. It can rename the client and rotate the HY2 pair
+  through manual sync.
 - Offline clients are read-only in the server console, but their credentials
   can still be updated locally on the client host.
 - No automatic update, tray application, or native Windows service. Windows
   uses Task Scheduler.
+- No automatic server-side port-range listening or firewall management. Port
+  hopping requires a manual redirect on the server; see
+  [Port hopping](#port-hopping).
 - SOCKS5 UDP ASSOCIATE is not implemented; the local SOCKS5 proxy supports
   TCP CONNECT only. HTTP CONNECT supports TCP only.
 - No UPX packing.
@@ -361,7 +366,7 @@ Task Scheduler instructions and firewall notes.
 
 | Field | Meaning |
 | --- | --- |
-| `listen` | HY2 UDP listen address, for example `:443`. |
+| `listen` | HY2 UDP listen address, for example `:443`. Port hopping keeps this a single port; see [Port hopping](#port-hopping). |
 | `listen_host` | Optional address for public mapping listeners; empty binds all interfaces. |
 | `auth.type` | `password` or `userpass`. |
 | `auth.password` | HY2 password for `password` auth. |
@@ -394,7 +399,7 @@ Task Scheduler instructions and firewall notes.
 
 | Field | Meaning |
 | --- | --- |
-| `server` | `host:port` of the server's HY2 listener. |
+| `server` | `host:port` of the server's HY2 listener, or a port set such as `host:443,8443` or `host:30000-40000` for port hopping. |
 | `auth` | HY2 password, or `user:password` for userpass auth. |
 | `tls.sni` | TLS server name. Empty uses the host part of `server`. |
 | `tls.insecure` | Skip certificate verification. Do not use on untrusted networks. |
@@ -402,6 +407,8 @@ Task Scheduler instructions and firewall notes.
 | `tls.ca` | CA certificate bundle for a private/self-signed server certificate. |
 | `obfs.type` | Must match the server. Empty or `salamander`. |
 | `bandwidth.up`, `bandwidth.down` | Optional client-side HY2 limits. |
+| `transport.udp.hop_interval` | Fixed port-hop interval for a multi-port `server`. Default 30s; minimum 5s. |
+| `transport.udp.min_hop_interval`, `max_hop_interval` | Random hop interval; both required, minimum 5s, mutually exclusive with `hop_interval`. |
 | `control.token` | Must match `control.token` on the server. |
 | `credentials.generation` | Client credential generation. Missing or `0` means `1`; server push or manual sync writes it. The client ignores the `previous_*` fields; they are reserved. |
 | `client.id` | Stable client ID. Empty generates one on first start. |
@@ -541,7 +548,7 @@ minute per client IP. Mutations also require the CSRF header and same-origin
 | `mappings` | Yes. Add, update, and delete; the server can also push a list. |
 | `client.revision` | Updated automatically when mappings, assigned ports, or the client name change. |
 | `credentials.generation` | Managed by server push or manual sync. |
-| `server`, `tls.*`, `obfs.*`, `bandwidth.*`, `client.id` | No. Edit the file and restart. |
+| `server`, `transport.*`, `tls.*`, `obfs.*`, `bandwidth.*`, `client.id` | No. Edit the file and restart. |
 | `web.listen`, `web.trust_proxy`, `web.tls.*` | No. Edit the file and restart. |
 | `proxy.*`, `log.*` | No. Edit the file and restart. |
 
@@ -715,6 +722,205 @@ running configuration, credential set, port policy, and web login are left
 unchanged. A client credential update is written to `client.yaml` before the
 `credential_ack` is sent, so an acknowledged rotation is durable.
 
+## Port hopping
+
+Hysteria 2 supports UDP port hopping: instead of a single fixed port, the
+client sends its HY2 connection to a set of UDP ports and moves to another port
+at a fixed or random interval. It helps with per-port UDP rate limiting or
+blocking; it does not hide the server, defeat a blanket UDP block, or replace
+TLS.
+
+Port hopping affects only the client-to-server HY2 UDP connection. The server's
+public reverse-mapping ports (for example `2222/tcp` and `51820/udp`) do not
+hop and keep their configured ports.
+
+### Client configuration
+
+`server` accepts the Hysteria 2 port-set syntax: a single port, a
+comma-separated list, an inclusive range, or a mix.
+
+```yaml
+server: "hy2tun.example.com:443"                  # single port, no hopping
+server: "hy2tun.example.com:443,8443"             # two ports
+server: "hy2tun.example.com:30000-40000"          # inclusive range
+server: "hy2tun.example.com:443,30000-30100,8443" # mixed list
+```
+
+Configure the interval under `transport.udp`:
+
+```yaml
+server: "hy2tun.example.com:30000-40000"
+
+transport:
+  udp:
+    hop_interval: "30s"        # fixed interval, minimum 5s
+
+# Or a random interval; both fields are required:
+# transport:
+#   udp:
+#     min_hop_interval: "15s"
+#     max_hop_interval: "45s"
+```
+
+- A multi-port `server` without an interval uses 30s. The default is applied at
+  runtime and is not written back to `client.yaml`.
+- `hop_interval`, `min_hop_interval`, and `max_hop_interval` must each be at
+  least 5s and use Go duration syntax (`30s`, `1m`, `1m30s`).
+- `hop_interval` is mutually exclusive with `min_hop_interval` and
+  `max_hop_interval`. The random form requires both fields and `min <= max`.
+- A single-port `server` with any interval is rejected. A port set that
+  normalizes to one unique port (`443-443`, `443,443`) is treated as a single
+  port.
+- `transport` is file-only; it is not editable from the web console. Restart
+  the client after changing `server` or `transport`.
+- Salamander obfs wraps every hop socket, so obfs configuration is unchanged.
+
+When hopping is enabled the client logs a warning at startup:
+
+```text
+port hopping enabled; server must redirect the entire UDP range to the HY2 listen port
+```
+
+The warning is expected. The client cannot verify the server's firewall rules.
+
+### Server redirect
+
+The server still listens on one UDP port (`listen`). On a Linux server, add a
+NAT redirect from the hop range to that port. The examples below use the hop
+range `30000-40000` and `listen: ":24443"`; replace `24443` with your own listen
+port.
+
+nftables:
+
+```nft
+table inet hy2tun_porthop {
+  chain prerouting {
+    type nat hook prerouting priority dstnat; policy accept;
+    udp dport 30000-40000 counter redirect to :24443
+  }
+}
+```
+
+Load the file with `nft -f`, or create the table, chain, and rule incrementally:
+
+```bash
+nft add table inet hy2tun_porthop
+nft add chain inet hy2tun_porthop prerouting \
+  '{ type nat hook prerouting priority dstnat; policy accept; }'
+nft add rule inet hy2tun_porthop prerouting \
+  udp dport 30000-40000 counter redirect to :24443
+nft list table inet hy2tun_porthop
+nft delete table inet hy2tun_porthop
+```
+
+iptables and ip6tables:
+
+```bash
+iptables -t nat -A PREROUTING -p udp --dport 30000:40000 \
+  -j REDIRECT --to-ports 24443
+ip6tables -t nat -A PREROUTING -p udp --dport 30000:40000 \
+  -j REDIRECT --to-ports 24443
+
+iptables -t nat -L PREROUTING -n -v
+ip6tables -t nat -L PREROUTING -n -v
+
+iptables -t nat -D PREROUTING -p udp --dport 30000:40000 \
+  -j REDIRECT --to-ports 24443
+ip6tables -t nat -D PREROUTING -p udp --dport 30000:40000 \
+  -j REDIRECT --to-ports 24443
+```
+
+Use nftables or iptables, not both. If both tools are present, install the
+redirect once; a duplicate rule is harmless but makes troubleshooting harder.
+
+Requirements:
+
+- A Linux server with nftables or iptables/ip6tables.
+- root or `CAP_NET_ADMIN` to install the rule.
+- The rule must be persisted across reboot (distribution firewall
+  configuration, `nftables.service`, `iptables-persistent`, or a systemd unit).
+- The cloud security group must allow the whole UDP range to the instance,
+  because it filters before the host's NAT. The host firewall only needs to
+  allow the final listen port (24443 here) in its INPUT chain, because
+  `REDIRECT` happens in PREROUTING.
+- If clients may use IPv4 and IPv6, allow the range and the listen port for
+  both protocols.
+
+### Port conflicts
+
+The hop range must not overlap any UDP port used for reverse mappings:
+
+- explicit UDP mappings (`type: udp`, including `remote_port: 0` allocations);
+- `ports.allow` entries that cover UDP ports;
+- `ports.auto_range`, whose default is `20000-29999`.
+
+With the default `auto_range`, use `30000-40000` rather than `20000-30000`.
+TCP mapping ports may overlap the UDP hop range because the protocols are
+independent, but keeping them separate is easier to audit. A UDP mapping inside
+the hop range would have its traffic redirected to the HY2 listener and stop
+working.
+
+This release does not reserve the range automatically. If the ranges would
+overlap, choose a different hop range or move the mappings; server-side
+`listen: ":range"` and automatic firewall management are planned for a later
+release.
+
+### Verifying the redirect
+
+1. Confirm the rule exists and its packet counter increases:
+   `nft list ruleset` or `iptables -t nat -L PREROUTING -n -v`.
+2. On the server, watch conntrack while the client runs:
+
+   ```bash
+   conntrack -L -p udp | grep 'sport=24443'
+   ```
+
+   The reply tuple's source port is 24443, while the original destination port
+   is from the hop range. Over several intervals you should see more than one
+   original destination port.
+3. Alternatively, capture arriving packets:
+
+   ```bash
+   tcpdump -ni any 'udp and dst portrange 30000-40000'
+   ```
+
+   `tcpdump` sees packets before NAT, so the destination port is the hop port.
+4. Keep a TCP mapping and a UDP mapping busy while hopping. Both should keep
+   working; only the HY2 connection changes ports.
+5. Remove the redirect and confirm the client eventually fails after moving to
+   an unredirected port; restore the rule to recover.
+
+`udphop` chooses a random port on every interval and may choose the current
+port again, so a single interval without a visible change is normal. Check for
+at least one change across several intervals.
+
+If hopping does not work, check in this order:
+
+- The client startup log contains the port hopping warning; without it,
+  `server` is still a single port.
+- The cloud security group allows the whole UDP range and the host firewall
+  allows the listen port.
+- The redirect target matches `listen`, and the rule is in the `nat`
+  PREROUTING hook.
+- `conntrack` shows reply tuples with the listen port as the source port.
+- IPv6 clients are not hitting an IPv4-only rule.
+
+### Compatibility
+
+- Single-port clients behave exactly as before; old configuration files need
+  no changes.
+- Standard Hysteria 2 clients can use the same `host:port,port-range` syntax
+  when the server has a redirect or range listener. hy2tun uses snake_case
+  interval fields; standard Hysteria 2 configuration uses `hopInterval`,
+  `minHopInterval`, and `maxHopInterval`, so do not copy that block verbatim.
+- A standard Hysteria 2 server with a manual redirect works with a hy2tun
+  client, and a standard Hysteria 2 client works against a hy2tun server with a
+  manual redirect.
+- Windows and OpenWrt clients can hop because they only make outbound UDP
+  connections; the server redirect still requires Linux.
+- With Salamander obfs enabled, every hop socket is wrapped; both ends must use
+  the same obfs password.
+
 ## Deployment notes
 
 ### Firewall and NAT
@@ -731,6 +937,11 @@ Automatic ports (from `allow`, or from `auto_range` when `allow` is empty) also
 need to be reachable. Open the whole range, or pin mappings to explicit ports
 and open only those. The client makes only outbound connections, so it does not
 need router port forwarding.
+
+With port hopping, also allow the whole UDP hop range in the cloud security
+group and install the redirect described in [Port hopping](#port-hopping). The
+host INPUT chain only needs the final `listen` port, because the redirect
+happens in PREROUTING.
 
 On the client host, allow outbound UDP to the server's HY2 port. Windows may
 show a firewall prompt for the client web console; allow it on private
@@ -873,6 +1084,10 @@ recommended). The token is never printed by either process.
   `port_in_use`, `port_not_allowed`, `port_reserved`, or `no_free_port`.
   `port_not_allowed` means the requested port is outside `ports.allow` or
   matched `ports.deny`.
+- With port hopping, a client that connects on one port but stalls after the
+  first hop usually has a missing or partial server redirect. Check the
+  `conntrack`/`tcpdump` steps in [Port hopping](#port-hopping) and the cloud
+  security group range.
 
 ### UDP MTU and large datagrams
 
