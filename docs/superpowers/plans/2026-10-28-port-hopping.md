@@ -1,5 +1,10 @@
 # hy2tun Port Hopping Implementation Plan
 
+> **Historical note:** This plan describes the v1.2 client-side implementation.
+> Server-side `listen` range parsing and automatic nftables/iptables redirects
+> were added later; where this document says the server stays on one port, the
+> current behavior is documented in `README.md` and `scripts/port-hopping/README.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add client-side Hysteria 2 UDP port hopping to `hy2tun`, with official port-set syntax, fixed/random hop intervals, Salamander obfs composition, and deployment documentation for server-side firewall redirects.

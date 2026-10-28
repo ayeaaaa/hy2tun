@@ -4,7 +4,7 @@ Thanks for considering a contribution.
 
 ## Requirements
 
-- Go 1.26 or newer.
+- Go 1.26.10 or newer.
 - Linux for the full test suite; Windows/OpenWrt changes should still compile.
 - No Node.js or CDN build step; web assets are embedded.
 

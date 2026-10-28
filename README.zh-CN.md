@@ -106,7 +106,7 @@ hy2tun 客户端 ────────── QUIC / HY2 ───────
 
 ## 环境要求
 
-- 构建需要 Go 1.26 或更高版本。`go.mod` 锁定 HY2 核心为 v2.13.0。
+- 构建需要 Go 1.26.10 或更高版本（包含标准库安全修复）。`go.mod` 锁定 HY2 核心为 v2.13.0。
 - 一台有 TLS 证书的公网服务端（支持自签名证书：客户端配置对应 CA，可选
   叠加证书固定）。
 - 到服务端 HY2 端口的 UDP 可达性；以及到每个公网映射端口的 TCP 可达性。
@@ -1193,6 +1193,23 @@ CSRF 防护，但 TLS 保护传输中的密码和会话 cookie。
 验收是对比性的，不是固定数字：TCP 反向映射吞吐量应接近同一路径上的原生
 HY2 代理，100 Mbps 的 UDP 不应出现持续丢包或明显抖动。记录客户端、服务端、
 内核、HY2 版本、MTU 和测试时间。
+
+### 调优清单
+
+- 从示例 QUIC 窗口开始（`initial_stream_receive_window` 和
+  `max_stream_receive_window` 约 8 MB，`max_connection_receive_window`
+  约 20 MB）。只有在路径带宽延迟积很大且两端内存充足时才调高；过大的窗口
+  会增加 bufferbloat 和内存占用。
+- `quic.max_incoming_streams` 限制并发 TCP 映射和控制流。没有实测需求时
+  保持默认值；每个流都会占用内存。
+- `bandwidth.up` 和 `bandwidth.down` 是服务端限速。线路速率测试时留空；
+  生产环境按公平性需求显式设置。
+- `bandwidth.ignore_client` 决定是否信任客户端上报的带宽。对比吞吐量时
+  两种设置都测试。
+- UDP 反向映射的数据报上限约为 4 KB，更大的载荷会被丢弃。大报文停滞时
+  降低隧道 MTU（例如 WireGuard 调到 1280）。
+- 数据面改动前后运行 `make bench`。控制帧和端口策略基准用于本机回归；
+  端到端吞吐请使用 iperf3。
 
 ## 手动验收清单（OpenWrt 和 Windows）
 

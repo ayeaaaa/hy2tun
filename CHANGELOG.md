@@ -12,8 +12,10 @@ All notable changes to this project are documented here.
 - Automatic Linux server-side nftables/iptables redirect when `listen` is a
   UDP port range; rules are removed on shutdown.
 - Dockerfile targets, Docker Compose example, and release install script.
-- CI workflow, Dependabot, security policy, issue/PR templates, and
-  contribution guidance.
+- CI workflow, Dependabot, security policy, issue/PR templates, contribution
+  guidance, and automatic tagged-release publishing.
+- Benchmarks for control frames and port policy, plus fuzz targets for frame,
+  range, and listen parsing.
 
 ### Changed
 
@@ -23,6 +25,8 @@ All notable changes to this project are documented here.
   `golang.org/x/text` to address known module vulnerabilities.
 - The client port-hopping warning now mentions range listening as well as
   redirects.
+- Split large server mapping and web handler files into focused files; behavior
+  is unchanged.
 
 ## v1.2.0 - 2026-10-28
 

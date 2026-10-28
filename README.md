@@ -128,7 +128,7 @@ standard HY2 client never opens them, so the wire protocol stays compatible.
 
 ## Requirements
 
-- Go 1.26 or newer to build. The `go.mod` file pins the HY2 core at v2.13.0.
+- Go 1.26.10 or newer to build (standard-library security fixes). The `go.mod` file pins the HY2 core at v2.13.0.
 - A public server with a TLS certificate (self-signed is supported when the
   client is configured with the matching CA, optionally combined with a
   certificate pin).
@@ -1336,6 +1336,27 @@ Acceptance is comparative, not a fixed number: TCP reverse-mapping throughput
 should be close to the native HY2 proxy on the same path, and UDP at 100 Mbps
 should not show sustained loss or obvious jitter. Record the client, server,
 kernel, HY2 version, MTU, and time of day with the results.
+
+### Tuning checklist
+
+- Start with the example QUIC windows (`initial_stream_receive_window` and
+  `max_stream_receive_window` around 8 MB, `max_connection_receive_window`
+  around 20 MB). Increase them only when the path has a high bandwidth-delay
+  product and both hosts have memory to spare; oversized windows increase
+  bufferbloat and memory use.
+- `quic.max_incoming_streams` bounds concurrent TCP mappings and control
+  streams. Keep the default unless you have measured a need; each stream
+  consumes memory.
+- `bandwidth.up` and `bandwidth.down` enforce server-side limits. Leave them
+  empty for line-rate testing; set them deliberately for production fairness.
+- `bandwidth.ignore_client` controls whether the client's advertised bandwidth
+  is trusted. Test both settings when comparing throughput.
+- UDP reverse mappings carry datagrams up to roughly 4 KB; larger payloads are
+  dropped. Lower the tunnel MTU (for example WireGuard to 1280) when large
+  packets stall.
+- Run `make bench` before and after data-plane changes. The control-frame and
+  port-policy benchmarks are local regression checks; use iperf3 for
+  end-to-end throughput.
 
 ## Manual acceptance checklist (OpenWrt and Windows)
 
