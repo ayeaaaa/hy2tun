@@ -7,6 +7,22 @@
 # Address and port of the hy2tund HY2 listener.
 server: "sg.example.com:443"
 
+# Optional Hysteria 2 UDP port hopping. The server must redirect every UDP
+# port in this set to its HY2 listen port; hy2tun cannot verify that firewall
+# rule. Use a range that does not overlap any UDP reverse-mapping port,
+# including ports.allow and ports.auto_range on the server.
+# server: "sg.example.com:30000-40000"
+#
+# transport:
+#   udp:
+#     hop_interval: "30s"       # fixed interval, minimum 5s
+#     # min_hop_interval: "15s" # or random interval
+#     # max_hop_interval: "45s"
+#
+# The default is 30s when a multi-port server is set without an interval.
+# An interval with a single-port server is rejected. Fixed and random
+# intervals are mutually exclusive.
+
 # The HY2 password from the server's auth section. For userpass auth use
 # "user:password" instead.
 auth: "change-me-to-the-server-password"

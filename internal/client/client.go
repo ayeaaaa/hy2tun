@@ -20,6 +20,7 @@ import (
 
 	hyclient "github.com/apernet/hysteria/core/v2/client"
 	"github.com/apernet/hysteria/extras/v2/obfs"
+	"github.com/apernet/hysteria/extras/v2/transport/udphop"
 
 	"hy2tun/internal/config"
 	"hy2tun/internal/control"
@@ -34,6 +35,10 @@ const (
 
 	initialBackoff = time.Second
 	maxBackoff     = 30 * time.Second
+
+	// defaultHopInterval mirrors udphop's default so startup diagnostics can
+	// report the interval that is actually used when none is configured.
+	defaultHopInterval = 30 * time.Second
 )
 
 // mappingTraffic holds the byte counters for one mapping. Tx is client-to-server
@@ -129,15 +134,15 @@ func New(cfg *config.ClientConfig, log *slog.Logger) (*Client, error) {
 		cfg.Client.ID = id
 	}
 
-	serverAddr, err := net.ResolveUDPAddr("udp", cfg.Server)
+	serverAddr, err := resolveServerAddr(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("resolve server address %s: %w", cfg.Server, err)
+		return nil, err
 	}
 	tlsConfig, err := buildTLSConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
-	connFactory, err := buildConnFactory(cfg)
+	connFactory, err := buildConnFactory(cfg, serverAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -182,6 +187,16 @@ func New(cfg *config.ClientConfig, log *slog.Logger) (*Client, error) {
 			_ = cl.web.Close()
 		}
 		return nil, err
+	}
+	if cfg.ServerPortHopping() {
+		minHop, maxHop, _ := cfg.HopInterval()
+		if minHop == 0 && maxHop == 0 {
+			// udphop applies this default internally; log the interval that
+			// will actually be used instead of 0s.
+			minHop, maxHop = defaultHopInterval, defaultHopInterval
+		}
+		log.Warn("port hopping enabled; server must redirect the entire UDP range to the HY2 listen port",
+			"server", cfg.Server, "hop_min_interval", minHop.String(), "hop_max_interval", maxHop.String())
 	}
 	return cl, nil
 }
@@ -741,8 +756,8 @@ func buildTLSConfig(cfg *config.ClientConfig) (hyclient.TLSConfig, error) {
 		InsecureSkipVerify: cfg.TLS.Insecure,
 	}
 	if tlsConfig.ServerName == "" {
-		if host, _, err := net.SplitHostPort(cfg.Server); err == nil {
-			tlsConfig.ServerName = host
+		if host, _, err := net.SplitHostPort(strings.TrimSpace(cfg.Server)); err == nil {
+			tlsConfig.ServerName = strings.TrimSpace(host)
 		}
 	}
 	if cfg.TLS.CA != "" {
@@ -786,19 +801,73 @@ func parsePin(value string) ([]byte, error) {
 	return pin, nil
 }
 
-func buildConnFactory(cfg *config.ClientConfig) (hyclient.ConnFactory, error) {
+func resolveServerAddr(cfg *config.ClientConfig) (net.Addr, error) {
+	normalized, hopping, err := cfg.NormalizedServer()
+	if err != nil {
+		return nil, err
+	}
+	if hopping {
+		hopServer, err := normalizeHopServer(normalized)
+		if err != nil {
+			return nil, fmt.Errorf("resolve server address %s: %w", normalized, err)
+		}
+		addr, err := udphop.ResolveUDPHopAddr(hopServer)
+		if err != nil {
+			return nil, fmt.Errorf("resolve server address %s: %w", normalized, err)
+		}
+		return addr, nil
+	}
+	addr, err := net.ResolveUDPAddr("udp", normalized)
+	if err != nil {
+		return nil, fmt.Errorf("resolve server address %s: %w", normalized, err)
+	}
+	return addr, nil
+}
+
+// normalizeHopServer canonicalizes a port-hopping server address. Config
+// validation trims whitespace around port tokens, but udphop's port parser
+// does not, so spaces accepted by validation must be removed before resolving.
+func normalizeHopServer(value string) (string, error) {
+	host, portStr, err := net.SplitHostPort(strings.TrimSpace(value))
+	if err != nil {
+		return "", err
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", fmt.Errorf("server must include a host")
+	}
+	portStr = strings.Join(strings.Fields(portStr), "")
+	return net.JoinHostPort(host, portStr), nil
+}
+
+func buildConnFactory(cfg *config.ClientConfig, serverAddr net.Addr) (hyclient.ConnFactory, error) {
+	var psk []byte
 	switch cfg.Obfs.Type {
 	case "":
-		return nil, nil
 	case "salamander":
-		psk := []byte(cfg.Obfs.Salamander.Password)
+		psk = []byte(cfg.Obfs.Salamander.Password)
 		if len(psk) < 4 {
 			return nil, fmt.Errorf("obfs.salamander.password must be at least 4 bytes")
 		}
-		return &salamanderConnFactory{psk: psk}, nil
 	default:
 		return nil, fmt.Errorf("unsupported obfs.type %q", cfg.Obfs.Type)
 	}
+
+	if hopAddr, ok := serverAddr.(*udphop.UDPHopAddr); ok {
+		minHop, maxHop, err := cfg.HopInterval()
+		if err != nil {
+			return nil, err
+		}
+		return &hopConnFactory{
+			addr:     hopAddr,
+			interval: udphop.HopIntervalConfig{Min: minHop, Max: maxHop},
+			psk:      psk,
+		}, nil
+	}
+	if len(psk) == 0 {
+		return nil, nil
+	}
+	return &salamanderConnFactory{psk: psk}, nil
 }
 
 // salamanderConnFactory wraps each new client UDP socket with Salamander
@@ -818,4 +887,38 @@ func (f *salamanderConnFactory) New(net.Addr) (net.PacketConn, error) {
 		return nil, err
 	}
 	return wrapped, nil
+}
+
+// hopConnFactory creates a new UDP hop packet connection for every HY2
+// connection. The factory itself is reusable across client reconnects.
+type hopConnFactory struct {
+	addr      *udphop.UDPHopAddr
+	interval  udphop.HopIntervalConfig
+	psk       []byte
+	listenUDP udphop.ListenUDPFunc
+}
+
+func (f *hopConnFactory) New(net.Addr) (net.PacketConn, error) {
+	open := f.listenUDP
+	if open == nil {
+		open = func() (net.PacketConn, error) {
+			return net.ListenUDP("udp", nil)
+		}
+	}
+	if len(f.psk) > 0 {
+		base := open
+		open = func() (net.PacketConn, error) {
+			conn, err := base()
+			if err != nil {
+				return nil, err
+			}
+			wrapped, err := obfs.WrapPacketConnSalamander(conn, f.psk)
+			if err != nil {
+				_ = conn.Close()
+				return nil, err
+			}
+			return wrapped, nil
+		}
+	}
+	return udphop.NewUDPHopPacketConn(f.addr, f.interval, open)
 }

@@ -27,6 +27,8 @@ Node.js、CDN 或任何运行时依赖。
 - 客户端配置是权威配置。服务端控制台可以向在线客户端推送映射变更；客户端
   应用变更、原子写入自己的 YAML 文件，并确认新的 revision。
 - 端口白名单支持单端口、范围、拒绝规则、自动分配和离线端口保留。
+- 客户端可选 HY2 UDP 端口跳跃，支持端口集合；服务端重定向需要手动配置
+  nftables/iptables。
 - 服务端和客户端都有 Web 控制台，支持登录、CSRF 防护、实时状态、映射管理
   和日志。
 - 两个控制台都支持热配置编辑：Web 管理员、HY2 凭据、服务端端口策略、
@@ -49,11 +51,13 @@ Node.js、CDN 或任何运行时依赖。
 - 服务端控制台只能编辑
   [热配置编辑](#热配置编辑) 中列出的设置；监听地址、TLS、obfs、带宽、QUIC、
   Web 监听/TLS、日志、状态文件和认证模式/用户表仍然需要修改文件并重启。
-- 客户端控制台不能编辑服务端地址、TLS、obfs、带宽、客户端 ID、代理监听或
-  Web 监听/TLS；这些仍然留在 `client.yaml`。客户端控制台可以重命名客户端，
-  并通过手动同步轮换 HY2 凭据。
+- 客户端控制台不能编辑服务端地址、端口跳跃 transport、TLS、obfs、带宽、
+  客户端 ID、代理监听或 Web 监听/TLS；这些仍然留在 `client.yaml`。客户端
+  控制台可以重命名客户端，并通过手动同步轮换 HY2 凭据。
 - 离线客户端在服务端控制台中只读，但仍可在客户端主机上本地更新其凭据。
 - 没有自动更新、托盘程序或原生 Windows 服务。Windows 使用任务计划程序。
+- 不自动解析服务端 `listen: ":range"`，也不管理防火墙规则。端口跳跃需要
+  手动配置服务端重定向；见 [端口跳跃](#端口跳跃)。
 - 没有实现 SOCKS5 UDP ASSOCIATE；本地 SOCKS5 代理只支持 TCP CONNECT。
   HTTP CONNECT 也只支持 TCP。
 - 没有 UPX 压缩。
@@ -330,7 +334,7 @@ MIPS 路由器使用 `linux/mipsle` 或 `linux/mips` 构建；ARM 路由器使�
 
 | 字段 | 含义 |
 | --- | --- |
-| `listen` | HY2 UDP 监听地址，例如 `:443`。 |
+| `listen` | HY2 UDP 监听地址，例如 `:443`。端口跳跃时仍保持单端口；见 [端口跳跃](#端口跳跃)。 |
 | `listen_host` | 公网映射监听的可选地址；留空绑定所有接口。 |
 | `auth.type` | `password` 或 `userpass`。 |
 | `auth.password` | `password` 认证使用的 HY2 密码。 |
@@ -363,7 +367,7 @@ MIPS 路由器使用 `linux/mipsle` 或 `linux/mips` 构建；ARM 路由器使�
 
 | 字段 | 含义 |
 | --- | --- |
-| `server` | 服务端 HY2 监听地址，`host:port`。 |
+| `server` | 服务端 HY2 监听地址，`host:port`；端口跳跃时可使用端口集合，例如 `host:443,8443` 或 `host:30000-40000`。 |
 | `auth` | HY2 密码；`userpass` 认证时为 `user:password`。 |
 | `tls.sni` | TLS 服务器名称。为空时使用 `server` 的主机部分。 |
 | `tls.insecure` | 跳过证书验证。不要在不可信网络使用。 |
@@ -371,6 +375,8 @@ MIPS 路由器使用 `linux/mipsle` 或 `linux/mips` 构建；ARM 路由器使�
 | `tls.ca` | 私有/自签名服务端证书的 CA 证书包。 |
 | `obfs.type` | 必须与服务端一致。空或 `salamander`。 |
 | `bandwidth.up`、`bandwidth.down` | 可选的客户端 HY2 限速。 |
+| `transport.udp.hop_interval` | 多端口 `server` 的固定跳跃间隔。默认 30s，最小 5s。 |
+| `transport.udp.min_hop_interval`、`max_hop_interval` | 随机跳跃间隔；两者必须同时配置，最小 5s，且与 `hop_interval` 互斥。 |
 | `control.token` | 必须与服务端的 `control.token` 一致。 |
 | `credentials.generation` | 客户端凭据代际。缺失或 `0` 表示 `1`；服务端推送或手动同步会写入。客户端忽略 `previous_*` 字段；这些字段保留。 |
 | `client.id` | 稳定的客户端 ID。为空时首次启动生成。 |
@@ -500,7 +506,7 @@ openssl x509 -in cert.pem -outform der | sha256sum
 | `mappings` | 可以。添加、更新、删除；服务端也可以推送列表。 |
 | `client.revision` | 映射、分配端口或客户端名称变化时自动更新。 |
 | `credentials.generation` | 由服务端推送或手动同步管理。 |
-| `server`、`tls.*`、`obfs.*`、`bandwidth.*`、`client.id` | 不可以。修改文件并重启。 |
+| `server`、`transport.*`、`tls.*`、`obfs.*`、`bandwidth.*`、`client.id` | 不可以。修改文件并重启。 |
 | `web.listen`、`web.trust_proxy`、`web.tls.*` | 不可以。修改文件并重启。 |
 | `proxy.*`、`log.*` | 不可以。修改文件并重启。 |
 
@@ -641,6 +647,215 @@ rename 和 `.bak`），然后切换运行时状态。如果校验或文件写入
 凭据集、端口策略和 Web 登录保持不变。客户端凭据更新会在发送
 `credential_ack` 之前写入 `client.yaml`，因此已确认的轮换是持久的。
 
+## 端口跳跃
+
+Hysteria 2 支持 UDP 端口跳跃：客户端把 HY2 连接发送到一组 UDP 端口，并按
+固定或随机间隔切换到另一个端口。它主要用于绕过针对单个 UDP 端口的限速或
+阻断，不能隐藏服务端、突破对整个 UDP 的封锁，也不能替代 TLS。
+
+端口跳跃只影响客户端到服务端的 HY2 UDP 连接。服务端的公网反向映射端口
+（例如 `2222/tcp`、`51820/udp`）不会跳跃，仍使用配置中的固定端口。
+
+### 客户端配置
+
+`server` 支持与 Hysteria 2 相同的端口集合语法，以下写法都有效：
+
+- `hy2tun.example.com:443` — 单端口，不启用跳跃
+- `hy2tun.example.com:443,8443` — 两个端口
+- `hy2tun.example.com:30000-40000` — 包含端点的范围
+- `hy2tun.example.com:443,30000-30100,8443` — 混合列表
+
+在 `transport.udp` 中配置跳跃间隔：
+
+```yaml
+server: "hy2tun.example.com:30000-40000"
+
+transport:
+  udp:
+    hop_interval: "30s"        # 固定间隔，最小 5s
+
+# 或者使用随机间隔；两个字段必须同时出现：
+# transport:
+#   udp:
+#     min_hop_interval: "15s"
+#     max_hop_interval: "45s"
+```
+
+- 多端口 `server` 未配置间隔时默认 30s。默认值只在运行时使用，不会写回
+  `client.yaml`。
+- `hop_interval`、`min_hop_interval`、`max_hop_interval` 的最小值都是 5s，
+  使用 Go duration 语法（`30s`、`1m`、`1m30s`）。
+- `hop_interval` 与 `min_hop_interval`/`max_hop_interval` 互斥；随机间隔
+  必须同时配置后两者，且 `min <= max`。
+- 单端口 `server` 配置任何间隔字段都会被拒绝。规范化后只剩一个唯一端口的
+  集合（例如 `443-443`、`443,443`）按单端口处理。
+- `transport` 只能通过配置文件修改，Web 控制台不支持热编辑。修改 `server`
+  或 `transport` 后重启客户端。
+- Salamander 混淆会包装每个跳跃 socket，obfs 配置无需改变。
+
+启用跳跃时客户端会在启动日志中记录一条 warning：
+
+```text
+port hopping enabled; server must redirect the entire UDP range to the HY2 listen port
+```
+
+这条 warning 以 `Warn` 级别记录，因此 `log.level: error` 会将其抑制。出现时
+属于预期行为：客户端无法验证服务端防火墙规则。
+
+### 服务端重定向
+
+服务端仍然只在单个 UDP 端口上监听（`listen`）。在 Linux 服务端上添加 NAT
+重定向，把跳跃范围转发到该端口。下面的示例使用跳跃范围 `30000-40000` 和
+`listen: ":24443"`；请把 `24443` 替换为实际的监听端口。
+
+nftables：
+
+```nft
+table inet hy2tun_porthop {
+  chain prerouting {
+    type nat hook prerouting priority dstnat; policy accept;
+    udp dport 30000-40000 counter redirect to :24443
+  }
+}
+```
+
+把规则保存到文件后用 `nft -f` 加载，或用增量命令创建表、链和规则。
+
+添加：
+
+```bash
+nft add table inet hy2tun_porthop
+nft add chain inet hy2tun_porthop prerouting \
+  '{ type nat hook prerouting priority dstnat; policy accept; }'
+nft add rule inet hy2tun_porthop prerouting \
+  udp dport 30000-40000 counter redirect to :24443
+```
+
+验证：
+
+```bash
+nft list table inet hy2tun_porthop
+```
+
+删除：
+
+```bash
+nft delete table inet hy2tun_porthop
+```
+
+iptables 和 ip6tables。上面的 `table inet` nftables 示例用一条规则同时覆盖
+IPv4 和 IPv6；iptables 方式需要分别执行两条命令。
+
+添加：
+
+```bash
+iptables -t nat -A PREROUTING -p udp --dport 30000:40000 \
+  -j REDIRECT --to-ports 24443
+ip6tables -t nat -A PREROUTING -p udp --dport 30000:40000 \
+  -j REDIRECT --to-ports 24443
+```
+
+验证：
+
+```bash
+iptables -t nat -L PREROUTING -n -v
+ip6tables -t nat -L PREROUTING -n -v
+```
+
+删除：
+
+```bash
+iptables -t nat -D PREROUTING -p udp --dport 30000:40000 \
+  -j REDIRECT --to-ports 24443
+ip6tables -t nat -D PREROUTING -p udp --dport 30000:40000 \
+  -j REDIRECT --to-ports 24443
+```
+
+nftables 和 iptables 只选一种。如果两者同时存在，确保重定向只安装一次；
+重复规则不会造成错误，但会增加排查难度。
+
+要求：
+
+- Linux 服务端，且安装了 nftables 或 iptables/ip6tables。
+- 具有 root 或 `CAP_NET_ADMIN` 才能安装规则。
+- 规则必须在重启后仍然生效（发行版防火墙配置、`nftables.service`、
+  `iptables-persistent` 或 systemd 单元）。
+- 云厂商安全组必须放行整个 UDP 范围，因为它在实例的 NAT 之前过滤。主机
+  防火墙的 INPUT 链只需要放行最终的监听端口（示例中的 24443），因为
+  `REDIRECT` 在 PREROUTING 阶段完成。
+- 如果客户端可能使用 IPv4 和 IPv6，两个协议都要放行该范围和监听端口。
+
+### 端口冲突
+
+跳跃范围必须避开服务端可能用于反向映射的每一个 UDP 端口：
+
+- 每一个显式 UDP 映射（`type: udp`，包括 `remote_port: 0` 自动分配的端口）；
+- `ports.allow` 中覆盖 UDP 端口的每一条条目。`ports.allow` 非空时它也是
+  `remote_port: 0` 自动分配端口的来源，因此整个列表都要避开；
+- `ports.auto_range`：`ports.allow` 为空时用于自动分配，默认值为
+  `20000-29999`。
+
+使用默认 `auto_range` 时，应使用 `30000-40000`，不要使用 `20000-30000`。
+服务端的 TCP 映射端口可以与 UDP 跳跃范围重叠，因为协议相互独立；但分开
+更便于审计。如果 UDP 映射落在跳跃范围内，它的流量会被重定向到 HY2 监听
+端口，映射将无法工作。
+
+本版本不会自动保留该范围。如果范围会重叠，请改用其他跳跃范围或移动映射；
+服务端 `listen: ":range"` 和自动防火墙管理将在后续版本实现。
+
+### 验证重定向
+
+1. 确认规则存在且数据包计数在增长：`nft list ruleset` 或
+   `iptables -t nat -L PREROUTING -n -v`。
+2. 客户端运行时在服务端查看 conntrack：
+
+   ```bash
+   conntrack -L -p udp | grep 'sport=24443'
+   ```
+
+   reply 元组的源端口是 24443，原始目的端口来自跳跃范围。观察多个间隔后，
+   应能看到不止一个原始目的端口。
+3. 或者抓取到达的报文：
+
+   ```bash
+   tcpdump -ni any 'udp and dst portrange 30000-40000'
+   ```
+
+   `tcpdump` 在 NAT 之前抓包，因此目的端口是跳跃端口。
+4. 在跳跃期间持续使用一个 TCP 映射和一个 UDP 映射，两者都应保持正常；
+   只有 HY2 连接会切换端口。UDP 不会重传，客户端切换 socket 时在途的数据报
+   可能丢失，因此 UDP 映射在跳跃瞬间可能出现短暂中断。TCP 流和 HY2 连接会
+   自行恢复。
+5. 删除重定向规则，确认客户端跳到未重定向端口后最终失败；恢复规则后恢复
+   正常。
+
+`udphop` 每个间隔随机选择端口，可能再次选中当前端口，因此某个间隔看不到
+变化是正常的。应在多个间隔内确认至少变化一次。
+
+如果跳跃不工作，按以下顺序检查：
+
+- 客户端启动日志中应有端口跳跃 warning。没有 warning 时，可能是 `server`
+  仍是单端口，也可能是 `log.level` 或 `log.file` 把这条日志隐藏了；请同时
+  检查 `server` 和 `log.level`。
+- 云安全组放行整个 UDP 范围，主机防火墙放行监听端口。
+- 重定向目标与 `listen` 一致，且规则位于 `nat` 表的 PREROUTING 钩子。
+- `conntrack` 中 reply 元组的源端口是监听端口。
+- IPv6 客户端没有被只处理 IPv4 的规则遗漏。
+
+### 兼容性
+
+- 单端口客户端的行为与之前完全一致，旧配置文件无需修改。
+- 标准 Hysteria 2 客户端在服务端有重定向或范围监听时，也可以使用相同的
+  `host:port,端口范围` 语法。hy2tun 的间隔字段是 snake_case；标准
+  Hysteria 2 配置使用 `hopInterval`、`minHopInterval`、`maxHopInterval`，
+  不要直接复制。
+- 标准 Hysteria 2 服务端 + 手动重定向可以与 hy2tun 客户端配合；标准
+  Hysteria 2 客户端也可以连接配置了手动重定向的 hy2tun 服务端。
+- Windows 和 OpenWrt 客户端只发起出站 UDP，因此也可以跳跃；服务端重定向
+  仍然要求 Linux。
+- 启用 Salamander obfs 时，每个跳跃 socket 都会被包装，两端必须使用相同
+  的 obfs 密码。
+
 ## 部署注意
 
 ### 防火墙与 NAT
@@ -656,6 +871,10 @@ rename 和 `.bak`），然后切换运行时状态。如果校验或文件写入
 自动端口（来自 `allow`，或 `allow` 为空时来自 `auto_range`）也需要可达。
 可以开放整个范围，或者把映射固定到显式端口并只开放这些端口。客户端只发起
 出站连接，因此不需要在路由器上做端口转发。
+
+使用端口跳跃时，还需要在云安全组放行整个 UDP 跳跃范围，并按
+[端口跳跃](#端口跳跃) 安装重定向。主机防火墙的 INPUT 链只需要放行最终的
+`listen` 端口，因为重定向在 PREROUTING 阶段完成。
 
 客户端主机需要允许到服务端 HY2 端口的出站 UDP。Windows 可能会为客户端
 Web 控制台弹出防火墙提示；只在专用网络允许。
@@ -777,6 +996,9 @@ CSRF 防护，但 TLS 保护传输中的密码和会话 cookie。
   `port_not_allowed`、`port_reserved` 或 `no_free_port`。
   `port_not_allowed` 表示请求端口不在 `ports.allow` 中，或匹配了
   `ports.deny`。
+- 启用端口跳跃时，如果客户端能在第一个端口连接、但第一次跳跃后停滞，通常
+  是服务端重定向缺失或不完整。检查 [端口跳跃](#端口跳跃) 中的
+  `conntrack`/`tcpdump` 步骤以及云安全组范围。
 
 ### UDP MTU 与大报文
 
