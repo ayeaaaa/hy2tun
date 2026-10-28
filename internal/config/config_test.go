@@ -262,6 +262,34 @@ func TestServerConfigAllowsEmptyWebListen(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 }
 
+func TestCheckClientAcceptsValidConfig(t *testing.T) {
+	require.NoError(t, CheckClient(validClientConfig()))
+}
+
+func TestCheckClientRejectsBadWebPasswordHash(t *testing.T) {
+	cfg := validClientConfig()
+	cfg.Web.PasswordHash = "not-a-bcrypt-hash"
+	require.ErrorContains(t, CheckClient(cfg), "bcrypt")
+}
+
+func TestCheckServerRejectsMissingTLS(t *testing.T) {
+	cfg := validServerConfig()
+	cfg.TLS = TLSConfig{}
+	require.ErrorContains(t, CheckServer(cfg), "tls.cert and tls.key")
+}
+
+func TestCheckClientRejectsBadWebTLS(t *testing.T) {
+	cfg := validClientConfig()
+	cfg.Web.TLS = WebTLSConfig{Cert: "missing.pem", Key: "missing.key"}
+	require.ErrorContains(t, CheckClient(cfg), "web TLS")
+}
+
+func TestCheckClientRejectsMissingLogDirectory(t *testing.T) {
+	cfg := validClientConfig()
+	cfg.Log.File = filepath.Join(t.TempDir(), "missing", "client.log")
+	require.ErrorContains(t, CheckClient(cfg), "log.file")
+}
+
 func TestClientConfigRejectsDuplicateMappingIDs(t *testing.T) {
 	cfg := validClientConfig()
 	cfg.Mappings = append(cfg.Mappings, Mapping{

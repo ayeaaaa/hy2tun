@@ -23,6 +23,7 @@ func main() {
 
 func run() error {
 	showVersion := flag.Bool("version", false, "print version and exit")
+	checkConfig := flag.Bool("check-config", false, "validate configuration and exit")
 	configPath := flag.String("c", "server.yaml", "path to server config")
 	flag.Parse()
 
@@ -34,6 +35,13 @@ func run() error {
 	cfg, err := config.LoadServer(*configPath)
 	if err != nil {
 		return err
+	}
+	if *checkConfig {
+		if err := config.CheckServer(cfg); err != nil {
+			return err
+		}
+		fmt.Println("configuration OK")
+		return nil
 	}
 	if cfg.Web.Listen != "" {
 		password, generated, err := config.EnsureWebPassword(&cfg.Web)

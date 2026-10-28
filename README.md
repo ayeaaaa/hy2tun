@@ -175,6 +175,19 @@ Windows) and contains:
 VERSION=1.0.0 make release
 ```
 
+## Configuration check
+
+Validate a configuration without binding sockets or writing state:
+
+```bash
+hy2tund --check-config -c /etc/hy2tun/server.yaml
+hy2tun --check-config -c /etc/hy2tun/client.yaml
+```
+
+The check validates YAML, required fields, TLS certificate/key pairs, web TLS,
+bcrypt hashes, and log/state parent directories. It prints `configuration OK`
+on success.
+
 ## Quick start
 
 The complete example files are in [`examples/`](examples). They are valid

@@ -149,6 +149,18 @@ make release    # ./scripts/release.sh，产物在 dist/
 VERSION=1.0.0 make release
 ```
 
+## 配置检查
+
+不绑定端口、不写状态文件，只校验配置：
+
+```bash
+hy2tund --check-config -c /etc/hy2tun/server.yaml
+hy2tun --check-config -c /etc/hy2tun/client.yaml
+```
+
+会检查 YAML、必填字段、TLS 证书/私钥、Web TLS、bcrypt 哈希以及日志/状态目录。
+成功时输出 `configuration OK`。
+
 ## 快速开始
 
 完整示例文件在 [`examples/`](examples)。它们是合法配置，但包含占位符；
