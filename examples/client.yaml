@@ -7,10 +7,11 @@
 # Address and port of the hy2tund HY2 listener.
 server: "sg.example.com:443"
 
-# Optional Hysteria 2 UDP port hopping. The server must redirect every UDP
-# port in this set to its HY2 listen port; hy2tun cannot verify that firewall
-# rule. Use a range that does not overlap any UDP reverse-mapping port,
-# including ports.allow and ports.auto_range on the server.
+# Optional Hysteria 2 UDP port hopping. The server must listen on the same
+# range (Linux can install the redirect automatically) or redirect every UDP
+# port in this set to its single HY2 listen port. hy2tun cannot verify that
+# firewall rule. Use a range that does not overlap any UDP reverse-mapping
+# port, including ports.allow and ports.auto_range on the server.
 # server: "sg.example.com:30000-40000"
 #
 # transport:

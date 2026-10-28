@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Added
+
+- `--check-config` for both binaries, including TLS, web TLS, bcrypt, and
+  runtime directory validation.
+- `/healthz` and Prometheus `/metrics` endpoints on both web consoles.
+- Automatic Linux server-side nftables/iptables redirect when `listen` is a
+  UDP port range; rules are removed on shutdown.
+- Dockerfile targets, Docker Compose example, and release install script.
+- CI workflow, Dependabot, security policy, issue/PR templates, and
+  contribution guidance.
+
+### Changed
+
+- Server `listen` now accepts `host:start-end` (and comma-separated ranges);
+  the first port is the actual bind port and all range ports are reserved.
+- Updated `golang.org/x/crypto`, `golang.org/x/net`, `golang.org/x/sys`, and
+  `golang.org/x/text` to address known module vulnerabilities.
+- The client port-hopping warning now mentions range listening as well as
+  redirects.
+
 ## v1.2.0 - 2026-10-28
 
 ### Added

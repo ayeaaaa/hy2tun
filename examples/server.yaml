@@ -6,18 +6,14 @@
 
 # Public HY2 listener. UDP 443 is the conventional choice because it survives
 # most restrictive networks. Use ":443" to listen on every interface.
+#
+# For client-side port hopping on Linux, use a range instead:
+#   listen: ":30000-40000"
+# The server binds the first port (30000) and automatically redirects
+# 30001-40000 to it with nftables or iptables. It reserves every port in the
+# range. On non-Linux systems, or when automatic firewall management is not
+# wanted, keep a single port and use scripts/port-hopping/README.md.
 listen: ":443"
-
-# Port hopping uses a single HY2 listen port plus an external firewall
-# redirect, for example:
-#   nft add rule inet hy2tun_porthop prerouting udp dport 30000-40000 \
-#     counter redirect to :24443
-# Replace 24443 with the port from listen (443 in this example), and create the
-# hy2tun_porthop table/chain first. Keep the redirected range outside
-# ports.allow, ports.auto_range, and every explicit UDP mapping (including
-# remote_port: 0 allocations); ports.allow is also the automatic-allocation
-# source when non-empty. See scripts/port-hopping/README.md for complete
-# nftables and iptables/ip6tables rules.
 
 # Optional address used for the public reverse-mapping listeners. An empty
 # value binds them on every interface.

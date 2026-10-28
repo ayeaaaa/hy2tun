@@ -195,7 +195,7 @@ func New(cfg *config.ClientConfig, log *slog.Logger) (*Client, error) {
 			// will actually be used instead of 0s.
 			minHop, maxHop = defaultHopInterval, defaultHopInterval
 		}
-		log.Warn("port hopping enabled; server must redirect the entire UDP range to the HY2 listen port",
+		log.Warn("port hopping enabled; server must listen on the range or redirect it to the HY2 listen port",
 			"server", cfg.Server, "hop_min_interval", minHop.String(), "hop_max_interval", maxHop.String())
 	}
 	return cl, nil

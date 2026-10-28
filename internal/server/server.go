@@ -9,9 +9,11 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,6 +26,7 @@ import (
 
 	"hy2tun/internal/config"
 	"hy2tun/internal/credentials"
+	"hy2tun/internal/firewall"
 	"hy2tun/internal/ports"
 	"hy2tun/internal/state"
 	"hy2tun/internal/version"
@@ -99,9 +102,14 @@ func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 		return nil, err
 	}
 
-	packetConn, err := net.ListenPacket("udp", cfg.Listen)
+	host, ranges, err := config.ParseListen(cfg.Listen)
 	if err != nil {
-		return nil, fmt.Errorf("listen UDP %s: %w", cfg.Listen, err)
+		return nil, fmt.Errorf("parse listen: %w", err)
+	}
+	bindAddr := net.JoinHostPort(host, strconv.Itoa(ranges[0].Start))
+	packetConn, err := net.ListenPacket("udp", bindAddr)
+	if err != nil {
+		return nil, fmt.Errorf("listen UDP %s: %w", bindAddr, err)
 	}
 
 	s := &Server{
@@ -116,12 +124,34 @@ func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 	}
 	s.trustProxy.Store(cfg.Web.TrustProxy)
 
+	var firewallCleanup io.Closer
+	needsRedirect := len(ranges) > 1 || (len(ranges) == 1 && ranges[0].Start != ranges[0].End)
+	if needsRedirect && !(len(ranges) == 1 && ranges[0].Start == 0) {
+		addr, ok := packetConn.LocalAddr().(*net.UDPAddr)
+		if !ok {
+			_ = packetConn.Close()
+			return nil, fmt.Errorf("unexpected UDP listen address %T", packetConn.LocalAddr())
+		}
+		firewallCleanup, err = firewall.SetupUDPPortRedirect(addr, ranges)
+		if err != nil {
+			_ = packetConn.Close()
+			return nil, fmt.Errorf("set up port range redirects: %w", err)
+		}
+	}
+	closeFirewall := func() {
+		if firewallCleanup != nil {
+			_ = firewallCleanup.Close()
+		}
+	}
+
 	policy, err := ports.NewPolicy(cfg.Ports.Allow, cfg.Ports.Deny, cfg.Ports.AutoRange)
 	if err != nil {
+		closeFirewall()
 		_ = packetConn.Close()
 		return nil, fmt.Errorf("create port policy: %w", err)
 	}
 	if err := s.initState(); err != nil {
+		closeFirewall()
 		_ = packetConn.Close()
 		return nil, err
 	}
@@ -132,17 +162,20 @@ func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 	conn := packetConn
 	if cfg.Obfs.Type != "" {
 		if cfg.Obfs.Type != "salamander" {
+			closeFirewall()
 			_ = packetConn.Close()
 			return nil, fmt.Errorf("unsupported obfs.type %q", cfg.Obfs.Type)
 		}
 		conn, err = obfs.WrapPacketConnSalamander(packetConn, []byte(cfg.Obfs.Salamander.Password))
 		if err != nil {
+			closeFirewall()
 			_ = packetConn.Close()
 			return nil, fmt.Errorf("configure salamander obfs: %w", err)
 		}
 	}
 
 	hyConfig := &hyserver.Config{
+		Cleanup: firewallCleanup,
 		TLSConfig: hyserver.TLSConfig{
 			Certificates: []tls.Certificate{cert},
 		},
@@ -167,6 +200,7 @@ func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 	}
 	hyServer, err := hyserver.NewServer(hyConfig)
 	if err != nil {
+		closeFirewall()
 		_ = packetConn.Close()
 		return nil, fmt.Errorf("create HY2 server: %w", err)
 	}
@@ -174,6 +208,7 @@ func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 	if cfg.Web.Listen != "" {
 		sessionKey, err := loadWebSessionKey(cfg, log)
 		if err != nil {
+			closeFirewall()
 			_ = hyServer.Close()
 			_ = packetConn.Close()
 			if s.store != nil {
@@ -183,6 +218,7 @@ func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 		}
 		web, err := serverui.New(s, cfg.Web, sessionKey, log)
 		if err != nil {
+			closeFirewall()
 			_ = hyServer.Close()
 			_ = packetConn.Close()
 			if s.store != nil {

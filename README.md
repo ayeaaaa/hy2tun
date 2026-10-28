@@ -34,8 +34,9 @@ do not need a database, Node.js, a CDN, or any runtime dependency.
   atomically, and acknowledges the new revision.
 - Port whitelist with single ports, ranges, deny rules, automatic allocation,
   and offline port reservations.
-- Optional client-side Hysteria 2 UDP port hopping across a port set, with a
-  documented manual server-side nftables/iptables redirect.
+- Optional client-side Hysteria 2 UDP port hopping across a port set, with
+  automatic Linux server-side nftables/iptables redirect when `listen` is a
+  range; a manual redirect remains supported for single-port listeners.
 - Server and client web consoles with login, CSRF protection, live status,
   mapping management, and logs.
 - Hot configuration editing from both consoles: web administrator, HY2
@@ -74,8 +75,9 @@ do not need a database, Node.js, a CDN, or any runtime dependency.
   can still be updated locally on the client host.
 - No automatic update, tray application, or native Windows service. Windows
   uses Task Scheduler.
-- No automatic server-side port-range listening or firewall management. Port
-  hopping requires a manual redirect on the server; see
+- Server-side range listening is Linux-only and requires root or
+  `CAP_NET_ADMIN` plus nftables or iptables. Non-Linux servers can use only a
+  single listen port with an external redirect; see
   [Port hopping](#port-hopping).
 - SOCKS5 UDP ASSOCIATE is not implemented; the local SOCKS5 proxy supports
   TCP CONNECT only. HTTP CONNECT supports TCP only.
@@ -430,7 +432,7 @@ Task Scheduler instructions and firewall notes.
 
 | Field | Meaning |
 | --- | --- |
-| `listen` | HY2 UDP listen address, for example `:443`. Port hopping keeps this a single port; see [Port hopping](#port-hopping). |
+| `listen` | HY2 UDP listen address, for example `:443`, or a range such as `:30000-40000`. For a range, the first port is bound and the remaining ports are redirected automatically on Linux; see [Port hopping](#port-hopping). |
 | `listen_host` | Optional address for public mapping listeners; empty binds all interfaces. |
 | `auth.type` | `password` or `userpass`. |
 | `auth.password` | HY2 password for `password` auth. |
@@ -839,18 +841,44 @@ transport:
 When hopping is enabled the client logs a warning at startup:
 
 ```text
-port hopping enabled; server must redirect the entire UDP range to the HY2 listen port
+port hopping enabled; server must listen on the range or redirect it to the HY2 listen port
 ```
 
 The warning is logged at `Warn`, so `log.level: error` suppresses it. When
 shown, it is expected: the client cannot verify the server's firewall rules.
 
-### Server redirect
+### Server listener and redirect
 
-The server still listens on one UDP port (`listen`). On a Linux server, add a
-NAT redirect from the hop range to that port. The examples below use the hop
-range `30000-40000` and `listen: ":24443"`; replace `24443` with your own listen
-port.
+Set `listen` to a single port or a range:
+
+```yaml
+listen: ":30000-40000"
+```
+
+The server binds the first port (`30000`) and redirects the remaining ports
+(`30001-40000`) to it at startup. On Linux it prefers nftables and falls back
+to iptables/ip6tables. Force a backend with
+`HY2TUN_FIREWALL_BACKEND=nft` or `HY2TUN_FIREWALL_BACKEND=iptables`. The rules
+are removed when the server closes. The server needs root or
+`CAP_NET_ADMIN`; if the redirect cannot be installed, startup fails.
+
+Point the client at the same range:
+
+```yaml
+server: "hy2tun.example.com:30000-40000"
+```
+
+The first port is the actual HY2 listener; the remaining ports are redirects.
+A single-port `listen: ":24443"` does not install any redirect. Use the manual
+fallback below if you want client-side hopping with a single listen port.
+
+On non-Linux systems, use a single listen port and an external redirect.
+
+#### Manual redirect fallback
+
+If you keep `listen: ":24443"` and want the client to hop over
+`30000-40000`, install the redirect yourself. Use nftables or iptables, not
+both.
 
 nftables:
 
@@ -915,21 +943,19 @@ ip6tables -t nat -D PREROUTING -p udp --dport 30000:40000 \
   -j REDIRECT --to-ports 24443
 ```
 
-Use nftables or iptables, not both. If both tools are present, install the
-redirect once; a duplicate rule is harmless but makes troubleshooting harder.
-
 Requirements:
 
 - A Linux server with nftables or iptables/ip6tables.
 - root or `CAP_NET_ADMIN` to install the rule.
-- The rule must be persisted across reboot (distribution firewall
-  configuration, `nftables.service`, `iptables-persistent`, or a systemd unit).
 - The cloud security group must allow the whole UDP range to the instance,
   because it filters before the host's NAT. The host firewall only needs to
-  allow the final listen port (24443 here) in its INPUT chain, because
-  `REDIRECT` happens in PREROUTING.
+  allow the first listen port in its INPUT chain, because `REDIRECT` happens in
+  PREROUTING.
 - If clients may use IPv4 and IPv6, allow the range and the listen port for
   both protocols.
+- Automatic redirects are runtime rules and do not need persistence. Manual
+  redirects must be persisted across reboot (distribution firewall
+  configuration, `nftables.service`, `iptables-persistent`, or a systemd unit).
 
 ### Port conflicts
 
@@ -950,24 +976,26 @@ independent, but keeping them separate is easier to audit. A UDP mapping inside
 the hop range would have its traffic redirected to the HY2 listener and stop
 working.
 
-This release does not reserve the range automatically. If the ranges would
-overlap, choose a different hop range or move the mappings; server-side
-`listen: ":range"` and automatic firewall management are planned for a later
-release.
+The server reserves every port in `listen`, including all ports in a range, and
+rejects mappings that try to use them. Keep the hop range outside
+`ports.allow` and `ports.auto_range` as well: reserved ports are skipped during
+automatic allocation, but a clean separation makes explicit mappings and audits
+predictable.
 
 ### Verifying the redirect
 
 1. Confirm the rule exists and its packet counter increases:
-   `nft list ruleset` or `iptables -t nat -L PREROUTING -n -v`.
+   `nft list tables | grep hy2tun_porthop_` for automatic redirects, or
+   `nft list ruleset` / `iptables -t nat -L PREROUTING -n -v` for manual rules.
 2. On the server, watch conntrack while the client runs:
 
    ```bash
-   conntrack -L -p udp | grep 'sport=24443'
+   conntrack -L -p udp | grep 'sport=30000'
    ```
 
-   The reply tuple's source port is 24443, while the original destination port
-   is from the hop range. Over several intervals you should see more than one
-   original destination port.
+   The reply tuple's source port is the first listen port (`30000` in the
+   example), while the original destination port is from the hop range. Over
+   several intervals you should see more than one original destination port.
 3. Alternatively, capture arriving packets:
 
    ```bash
@@ -994,8 +1022,8 @@ If hopping does not work, check in this order:
   check both `server` and `log.level`.
 - The cloud security group allows the whole UDP range and the host firewall
   allows the listen port.
-- The redirect target matches `listen`, and the rule is in the `nat`
-  PREROUTING hook.
+- The redirect target matches the first port in `listen`, and the rule is in
+  the `nat` PREROUTING hook.
 - `conntrack` shows reply tuples with the listen port as the source port.
 - IPv6 clients are not hitting an IPv4-only rule.
 
@@ -1009,9 +1037,10 @@ If hopping does not work, check in this order:
   `minHopInterval`, and `maxHopInterval`, so do not copy that block verbatim.
 - A standard Hysteria 2 server with a manual redirect works with a hy2tun
   client, and a standard Hysteria 2 client works against a hy2tun server with a
-  manual redirect.
+  range listener or a manual redirect.
 - Windows and OpenWrt clients can hop because they only make outbound UDP
-  connections; the server redirect still requires Linux.
+  connections; automatic server redirect management requires Linux, while a
+  manual redirect can be provided by any Linux NAT host.
 - With Salamander obfs enabled, every hop socket is wrapped; both ends must use
   the same obfs password.
 
@@ -1033,9 +1062,10 @@ and open only those. The client makes only outbound connections, so it does not
 need router port forwarding.
 
 With port hopping, also allow the whole UDP hop range in the cloud security
-group and install the redirect described in [Port hopping](#port-hopping). The
-host INPUT chain only needs the final `listen` port, because the redirect
-happens in PREROUTING.
+group. Let the server install the redirect with a range `listen`, or install a
+manual redirect as described in [Port hopping](#port-hopping). The host INPUT
+chain only needs the first `listen` port, because the redirect happens in
+PREROUTING.
 
 On the client host, allow outbound UDP to the server's HY2 port. Windows may
 show a firewall prompt for the client web console; allow it on private

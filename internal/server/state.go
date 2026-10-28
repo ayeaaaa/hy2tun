@@ -48,6 +48,13 @@ func (s *Server) reservedPorts() map[int]struct{} {
 	if port := addrPort(s.listenAddr); port > 0 {
 		reserved[port] = struct{}{}
 	}
+	for _, portRange := range s.cfg.ListenRanges {
+		for port := portRange.Start; port <= portRange.End; port++ {
+			if port > 0 {
+				reserved[port] = struct{}{}
+			}
+		}
+	}
 	if _, portText, err := net.SplitHostPort(s.cfg.Web.Listen); err == nil {
 		if port, err := strconv.Atoi(portText); err == nil && port > 0 {
 			reserved[port] = struct{}{}

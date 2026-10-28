@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
+
+	"hy2tun/internal/ports"
 )
 
 func validServerConfig() *ServerConfig {
@@ -243,6 +245,38 @@ func TestServerConfigRejectsBadListen(t *testing.T) {
 	cfg := validServerConfig()
 	cfg.Listen = "443"
 	require.ErrorContains(t, cfg.Validate(), "listen")
+}
+
+func TestParseListen(t *testing.T) {
+	host, ranges, err := ParseListen("127.0.0.1:30000-30002")
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.1", host)
+	require.Equal(t, []ports.Range{{Start: 30000, End: 30002}}, ranges)
+
+	host, ranges, err = ParseListen(":0")
+	require.NoError(t, err)
+	require.Empty(t, host)
+	require.Equal(t, []ports.Range{{Start: 0, End: 0}}, ranges)
+
+	_, _, err = ParseListen(":30002-30000")
+	require.Error(t, err)
+}
+
+func TestServerConfigAcceptsListenRange(t *testing.T) {
+	cfg := validServerConfig()
+	cfg.Listen = ":20000-20010"
+	require.NoError(t, cfg.Validate())
+	require.Len(t, cfg.ListenRanges, 1)
+	require.Equal(t, 20000, cfg.ListenRanges[0].Start)
+	require.Equal(t, 20010, cfg.ListenRanges[0].End)
+}
+
+func TestServerConfigRejectsBadListenRange(t *testing.T) {
+	for _, listen := range []string{":20000-", ":20010-20000", ":0-10", ":20000-20010,"} {
+		cfg := validServerConfig()
+		cfg.Listen = listen
+		require.Error(t, cfg.Validate(), listen)
+	}
 }
 
 func TestServerConfigRejectsBadAuth(t *testing.T) {

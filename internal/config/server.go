@@ -5,22 +5,25 @@ import (
 	"os"
 
 	"gopkg.in/yaml.v3"
+
+	"hy2tun/internal/ports"
 )
 
 // ServerConfig is the hy2tund configuration.
 type ServerConfig struct {
-	Listen     string          `yaml:"listen" json:"listen"`
-	ListenHost string          `yaml:"listen_host" json:"listen_host"`
-	Auth       AuthConfig      `yaml:"auth" json:"auth"`
-	TLS        TLSConfig       `yaml:"tls" json:"tls"`
-	Obfs       ObfsConfig      `yaml:"obfs" json:"obfs"`
-	Bandwidth  BandwidthConfig `yaml:"bandwidth" json:"bandwidth"`
-	QUIC       QUICConfig      `yaml:"quic" json:"quic"`
-	Control    ControlConfig   `yaml:"control" json:"control"`
-	Ports      PortsConfig     `yaml:"ports" json:"ports"`
-	Web        WebConfig       `yaml:"web" json:"web"`
-	StateFile  string          `yaml:"state_file" json:"state_file"`
-	Log        LogConfig       `yaml:"log" json:"log"`
+	Listen       string          `yaml:"listen" json:"listen"`
+	ListenHost   string          `yaml:"listen_host" json:"listen_host"`
+	ListenRanges []ports.Range   `yaml:"-" json:"-"`
+	Auth         AuthConfig      `yaml:"auth" json:"auth"`
+	TLS          TLSConfig       `yaml:"tls" json:"tls"`
+	Obfs         ObfsConfig      `yaml:"obfs" json:"obfs"`
+	Bandwidth    BandwidthConfig `yaml:"bandwidth" json:"bandwidth"`
+	QUIC         QUICConfig      `yaml:"quic" json:"quic"`
+	Control      ControlConfig   `yaml:"control" json:"control"`
+	Ports        PortsConfig     `yaml:"ports" json:"ports"`
+	Web          WebConfig       `yaml:"web" json:"web"`
+	StateFile    string          `yaml:"state_file" json:"state_file"`
+	Log          LogConfig       `yaml:"log" json:"log"`
 	// Credentials tracks the credential generation and previous pair.
 	Credentials CredentialsConfig `yaml:"credentials" json:"credentials"`
 
@@ -64,9 +67,11 @@ func SaveServer(path string, cfg *ServerConfig) error {
 func (c *ServerConfig) Validate() error {
 	c.applyDefaults()
 
-	if err := validateHostPort("listen", c.Listen, true, true); err != nil {
+	_, ranges, err := ParseListen(c.Listen)
+	if err != nil {
 		return err
 	}
+	c.ListenRanges = ranges
 	if err := c.Auth.validate(); err != nil {
 		return err
 	}

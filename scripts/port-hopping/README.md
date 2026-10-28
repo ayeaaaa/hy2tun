@@ -1,16 +1,34 @@
 # Port hopping redirect rules
 
-hy2tun does not install or remove firewall rules. Port hopping uses one HY2
-listen port on the server plus an external NAT redirect that sends a UDP range
-to that port. This directory contains deployment notes only; no script here
-changes the firewall.
+hy2tun can install and remove the redirect automatically when the server's
+`listen` is a range. This directory documents the automatic behavior and the
+manual fallback for single-port listeners, non-Linux hosts, or environments
+where the process must not manage the host firewall.
 
-## Prerequisites
+## Automatic management
+
+On Linux, set a range in `server.yaml`:
+
+```yaml
+listen: ":30000-40000"
+```
+
+The server binds the first port (`30000`) and redirects `30001-40000` to it at
+startup. It prefers nftables and falls back to iptables/ip6tables. Override the
+backend with `HY2TUN_FIREWALL_BACKEND=nft` or
+`HY2TUN_FIREWALL_BACKEND=iptables`. The rules are removed on shutdown; a stale
+nftables table with the same derived name is removed at the next startup.
+
+Requirements are the same as below: Linux, root or `CAP_NET_ADMIN`, and the
+firewall tools. If rule installation fails, the server fails to start. Do not
+add a second manual redirect for the same range.
+
+## Manual fallback prerequisites
 
 - A Linux server with nftables or iptables/ip6tables.
 - root or `CAP_NET_ADMIN`.
-- The HY2 `listen` port. The examples use `24443`; replace it with your own
-  value. The server still listens on a single port.
+- A single HY2 `listen` port for the manual path. The examples use `24443`;
+  replace it with your own value.
 - A UDP hop range outside `ports.allow`, `ports.auto_range`, and every explicit
   UDP mapping (including `remote_port: 0` allocations). The examples use
   `30000-40000`, which is outside the default `auto_range: "20000-29999"`.
@@ -204,20 +222,23 @@ With the default `auto_range`, do not redirect `20000-30000`; use
 HY2 traffic instead of its own datagrams and stop working. TCP mapping ports are
 independent of the UDP redirect, but keeping ranges separate avoids confusion.
 
-This release does not reserve the range automatically and does not manage
-firewall rules. Server-side `listen: ":range"` support is planned for a later
-release.
+The server reserves every port in `listen`, including all ports in a range,
+and rejects mappings that try to use them. Automatic allocation also skips
+reserved ports. Keeping the hop range outside the policy ranges makes explicit
+mappings and audits easier.
 
 ## Verification checklist
 
-1. **Rule present.** `nft list table inet hy2tun_porthop` (with `counter`) or
-   `iptables -t nat -L PREROUTING -n -v` shows the redirect. Send traffic and
-   confirm the packet counter increases.
+1. **Rule present.** For automatic redirects, `nft list tables | grep
+   hy2tun_porthop_` or `iptables -t nat -L PREROUTING -n -v` shows the rules.
+   For manual redirects, `nft list table inet hy2tun_porthop` (with `counter`)
+   or the iptables listing shows them. Send traffic and confirm the packet
+   counter increases.
 2. **Client warning.** Start the client with a multi-port `server`. The log
    contains:
 
    ```text
-   port hopping enabled; server must redirect the entire UDP range to the HY2 listen port
+   port hopping enabled; server must listen on the range or redirect it to the HY2 listen port
    ```
 
    A missing warning means either `server` is a single port or `log.level` /
@@ -228,7 +249,7 @@ release.
    conntrack -L -p udp | grep 'sport=24443'
    ```
 
-   The reply tuple's source port is the listen port; the original destination
+   The reply tuple's source port is the first listen port; the original destination
    port is from the hop range. Over several intervals, more than one original
    destination port should appear. Install `conntrack-tools` if the command is
    missing.
