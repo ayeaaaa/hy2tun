@@ -2,44 +2,214 @@
 <div class="page-head">
   <div>
     <h1>设置</h1>
-    <p class="page-sub">只读配置摘要。修改配置文件后重启服务生效。</p>
+    <p class="page-sub">热更新配置：保存后立即生效，无需重启。敏感操作需要当前 Web 密码确认。</p>
   </div>
-  <div class="page-head-meta"><span class="pill pill-muted">只读</span></div>
+  <div class="page-head-meta"><span class="pill pill-ok">可在线编辑</span></div>
 </div>
 
 <div class="grid-2">
   <section class="panel">
-    <div class="panel-head"><h2>服务端</h2></div>
-    <dl class="kv">
-      <div><dt>HY2 监听</dt><dd class="mono">{{if .Summary.Listen}}{{.Summary.Listen}}{{else}}—{{end}}</dd></div>
-      <div><dt>绑定地址</dt><dd class="mono">{{if .Summary.ListenHost}}{{.Summary.ListenHost}}{{else}}全部地址{{end}}</dd></div>
-      <div><dt>Web 监听</dt><dd class="mono">{{if .Summary.WebListen}}{{.Summary.WebListen}}{{else}}未启用{{end}}</dd></div>
-      <div><dt>Web 用户名</dt><dd class="mono">{{.Summary.WebUsername}}</dd></div>
-      <div><dt>Web TLS</dt><dd>{{if .Summary.WebTLS}}已启用{{else}}未启用（HTTP）{{end}}</dd></div>
-      <div><dt>HY2 TLS</dt><dd>{{if .Summary.TLS}}已启用{{else}}未启用{{end}}</dd></div>
-      <div><dt>运行时长</dt><dd>{{duration .Overview.Uptime}}</dd></div>
-      <div><dt>状态文件</dt><dd class="mono">{{if .Summary.StateFile}}{{.Summary.StateFile}}{{else}}未配置{{end}}</dd></div>
-      <div><dt>配置文件</dt><dd class="mono copyable"><span data-copy-text>{{if .Summary.ConfigPath}}{{.Summary.ConfigPath}}{{else}}—{{end}}</span>{{if .Summary.ConfigPath}}<button type="button" class="btn btn-quiet btn-xs" data-copy>复制</button>{{end}}</dd></div>
-      <div><dt>日志级别</dt><dd class="mono">{{.Summary.LogLevel}}</dd></div>
-      <div><dt>版本</dt><dd class="mono">{{.Summary.Version}}</dd></div>
-    </dl>
+    <div class="panel-head"><h2>Web 管理员</h2></div>
+    <form id="settings-web-form" class="settings-form" autocomplete="off">
+      <div class="field">
+        <label class="field-label" for="web-username">用户名</label>
+        <input class="input" id="web-username" name="username" value="{{.Settings.WebUsername}}" autocomplete="username" required>
+      </div>
+      <div class="field">
+        <label class="field-label" for="web-current-password">当前密码</label>
+        <input class="input" id="web-current-password" name="current_password" type="password" autocomplete="current-password" required>
+      </div>
+      <div class="grid-2">
+        <div class="field">
+          <label class="field-label" for="web-new-password">新密码</label>
+          <input class="input" id="web-new-password" name="new_password" type="password" minlength="8" autocomplete="new-password" required>
+        </div>
+        <div class="field">
+          <label class="field-label" for="web-confirm-password">确认新密码</label>
+          <input class="input" id="web-confirm-password" type="password" minlength="8" autocomplete="new-password" required>
+        </div>
+      </div>
+      <p class="field-hint">保存后会立即退出所有 Web 会话，请使用新用户名和密码重新登录。</p>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">保存 Web 管理员</button>
+      </div>
+    </form>
   </section>
 
   <section class="panel">
-    <div class="panel-head"><h2>端口策略</h2></div>
+    <div class="panel-head"><h2>代理信任</h2></div>
+    <form id="settings-proxy-form" class="settings-form" autocomplete="off">
+      <label class="check">
+        <input type="checkbox" id="trust-proxy" {{if .Settings.TrustProxy}}checked{{end}}>
+        信任反向代理的 X-Forwarded-For / X-Real-IP
+      </label>
+      <p class="field-hint">仅当反向代理会覆盖这些请求头时启用；否则客户端可以伪造来源 IP，绕过登录和显示凭据的限速。</p>
+      <div class="field">
+        <label class="field-label" for="proxy-current-password">当前密码</label>
+        <input class="input" id="proxy-current-password" type="password" autocomplete="current-password" required>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">保存代理信任</button>
+      </div>
+    </form>
+  </section>
+</div>
+
+<section class="panel settings-section">
+  <div class="panel-head">
+    <h2>HY2 凭据</h2>
+    <span class="pill pill-muted">当前代际 <span data-settings-generation>{{.Settings.Credentials.Generation}}</span></span>
+  </div>
+
+  <dl class="kv">
+    <div><dt>当前代际</dt><dd class="mono" data-settings-generation>{{.Settings.Credentials.Generation}}</dd></div>
+    <div><dt>上一代际</dt><dd class="mono" data-settings-previous-generation>{{if .Settings.Credentials.PreviousGeneration}}{{.Settings.Credentials.PreviousGeneration}}{{else}}—{{end}}</dd></div>
+    <div><dt>当前 HY2 密码</dt><dd class="mono secret-value" data-secret="current-auth">{{if .Settings.Credentials.CurrentAuthMasked}}{{.Settings.Credentials.CurrentAuthMasked}}{{else}}未设置{{end}}</dd></div>
+    <div><dt>当前 control token</dt><dd class="mono secret-value" data-secret="current-token">{{if .Settings.Credentials.CurrentControlTokenMasked}}{{.Settings.Credentials.CurrentControlTokenMasked}}{{else}}未设置{{end}}</dd></div>
+    <div><dt>上一代 HY2 密码</dt><dd class="mono secret-value" data-secret="previous-auth">{{if .Settings.Credentials.PreviousAuthMasked}}{{.Settings.Credentials.PreviousAuthMasked}}{{else}}—{{end}}</dd></div>
+    <div><dt>上一代 control token</dt><dd class="mono secret-value" data-secret="previous-token">{{if .Settings.Credentials.PreviousControlTokenMasked}}{{.Settings.Credentials.PreviousControlTokenMasked}}{{else}}—{{end}}</dd></div>
+  </dl>
+
+  <div class="settings-inline">
+    <div class="field">
+      <label class="field-label" for="credentials-reveal-password">当前密码（显示凭据）</label>
+      <input class="input" id="credentials-reveal-password" type="password" autocomplete="current-password">
+    </div>
+    <button type="button" class="btn btn-quiet" data-reveal-credentials>显示凭据</button>
+    <button type="button" class="btn btn-quiet" data-hide-secrets hidden>隐藏凭据</button>
+  </div>
+  <p class="field-hint settings-hint">凭据默认打码。显示结果不会写入缓存，30 秒后自动恢复打码。</p>
+
+  {{if not .Settings.Credentials.Rotatable}}
+  <div class="notice">当前 HY2 认证方式不是 password，无法在线轮换凭据；请编辑配置文件并重启 hy2tund。</div>
+  {{end}}
+  <form id="settings-credentials-form" class="settings-form" autocomplete="off">
+    <div class="grid-2">
+      <div class="field">
+        <label class="field-label" for="credentials-auth">新 HY2 密码</label>
+        <input class="input" id="credentials-auth" type="password" autocomplete="new-password" placeholder="留空保持不变，至少 8 个字符">
+      </div>
+      <div class="field">
+        <label class="field-label" for="credentials-token">新 control token</label>
+        <input class="input" id="credentials-token" type="password" autocomplete="new-password" placeholder="留空保持不变，至少 16 个字符">
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="field">
+        <label class="field-label" for="credentials-sync">同步方式</label>
+        <select class="input select" id="credentials-sync">
+          <option value="auto">自动推送（等待在线客户端确认）</option>
+          <option value="manual">手动同步（客户端稍后自行更新）</option>
+        </select>
+      </div>
+      <div class="field">
+        <label class="field-label" for="credentials-current-password">当前密码</label>
+        <input class="input" id="credentials-current-password" type="password" autocomplete="current-password" required>
+      </div>
+    </div>
+    <div class="notice">
+      轮换后旧凭据仍然有效，直到点击“撤销旧凭据”。自动推送最多等待每个客户端 5 秒；未确认的客户端保持待同步。旧客户端不支持推送时会显示“不支持”。
+    </div>
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary" {{if not .Settings.Credentials.Rotatable}}disabled{{end}}>保存并轮换</button>
+    </div>
+  </form>
+
+  <div class="settings-inline">
+    <div class="field">
+      <label class="field-label" for="credentials-revoke-password">当前密码（撤销确认）</label>
+      <input class="input" id="credentials-revoke-password" type="password" autocomplete="current-password">
+    </div>
+    <button type="button" class="btn btn-danger" data-revoke-credentials {{if not .Settings.Credentials.PreviousGeneration}}disabled{{end}}>撤销旧凭据</button>
+  </div>
+  <p class="field-hint settings-hint">撤销后上一代密码和 token 立即失效，仍在使用旧代际的客户端会失去连接。</p>
+
+  <div class="panel-head panel-head-sub">
+    <h2>客户端同步状态</h2>
+    <span class="pill pill-muted" data-credential-client-count>{{len .Settings.Clients}} 个客户端</span>
+  </div>
+  <div class="table-wrap">
+    <table class="table" id="credential-clients-table">
+      <thead>
+        <tr>
+          <th>客户端</th>
+          <th>在线</th>
+          <th>代际</th>
+          <th>状态</th>
+          <th>最后在线</th>
+        </tr>
+      </thead>
+      <tbody data-credential-clients>
+        {{range .Settings.Clients}}
+        <tr data-credential-client="{{.ClientID}}">
+          <td>
+            <div>{{.Name}}</div>
+            <div class="note mono">{{.ClientID}}</div>
+          </td>
+          <td>{{if .Online}}<span class="badge badge-ok">在线</span>{{else}}<span class="badge badge-muted">离线</span>{{end}}</td>
+          <td class="mono" data-credential-generation="{{.ClientID}}">{{if .Generation}}{{.Generation}}{{else}}—{{end}}</td>
+          <td>
+            {{if eq .Status "synced"}}<span class="badge badge-ok">已同步</span>
+            {{else if eq .Status "pending"}}<span class="badge badge-muted">待同步</span>
+            {{else if eq .Status "unsupported"}}<span class="badge badge-bad">不支持推送</span>
+            {{else if eq .Status "timeout"}}<span class="badge badge-bad">超时</span>
+            {{else}}<span class="badge badge-muted">未知</span>{{end}}
+            {{if .Error}}<span class="note mono">{{.Error}}</span>{{end}}
+          </td>
+          <td class="mono">{{time .LastSeen}}</td>
+        </tr>
+        {{else}}
+        <tr><td colspan="5" class="empty-inline">暂无客户端</td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div class="grid-2">
+  <section class="panel">
+    <div class="panel-head"><h2>端口白名单（端口策略）</h2></div>
+    <form id="settings-ports-form" class="settings-form" autocomplete="off">
+      <div class="field">
+        <label class="field-label" for="ports-allow">允许端口</label>
+        <textarea class="input textarea" id="ports-allow" rows="3" placeholder="例如 2222, 8000-8100；留空表示全部允许">{{join .Settings.Ports.Allow ", "}}</textarea>
+      </div>
+      <div class="field">
+        <label class="field-label" for="ports-deny">拒绝端口</label>
+        <textarea class="input textarea" id="ports-deny" rows="2" placeholder="例如 9000-9100">{{join .Settings.Ports.Deny ", "}}</textarea>
+      </div>
+      <div class="grid-2">
+        <div class="field">
+          <label class="field-label" for="ports-auto-range">自动分配范围</label>
+          <input class="input" id="ports-auto-range" value="{{.Settings.Ports.AutoRange}}" placeholder="例如 20000-29999">
+        </div>
+        <div class="field">
+          <label class="field-label" for="ports-offline-reserve">离线预留（秒）</label>
+          <input class="input" id="ports-offline-reserve" type="number" min="0" step="1" value="{{.Settings.Ports.OfflineReserveSeconds}}">
+          <span class="field-hint">当前：{{duration .Settings.Ports.OfflineReserve}}</span>
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label" for="ports-current-password">当前密码</label>
+        <input class="input" id="ports-current-password" type="password" autocomplete="current-password" required>
+      </div>
+      <div class="notice">已运行的映射不会因为被移出白名单而关闭；新注册和更新会立即使用新策略。</div>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">保存端口策略</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>只读项</h2></div>
     <dl class="kv">
-      <div><dt>允许</dt><dd class="mono">{{if .Summary.PortsAllow}}{{join .Summary.PortsAllow ", "}}{{else}}全部{{end}}</dd></div>
-      <div><dt>拒绝</dt><dd class="mono">{{if .Summary.PortsDeny}}{{join .Summary.PortsDeny ", "}}{{else}}无{{end}}</dd></div>
-      <div><dt>自动分配</dt><dd class="mono">{{.Summary.PortsAutoRange}}</dd></div>
-      <div><dt>离线预留</dt><dd>{{duration .Summary.OfflineReserve}}</dd></div>
+      {{range .Settings.ReadOnly}}
+      <div><dt>{{.Label}}</dt><dd class="mono">{{if .Value}}{{.Value}}{{else}}—{{end}}</dd></div>
+      {{else}}
+      <div><dt>配置</dt><dd class="mono">—</dd></div>
+      {{end}}
     </dl>
-    <div class="panel-head panel-head-sub"><h2>安全</h2></div>
-    <dl class="kv">
-      <div><dt>控制令牌</dt><dd>{{if .Summary.ControlTokenConfigured}}<span class="badge badge-ok">已配置</span>{{else}}<span class="badge badge-bad">未配置</span>{{end}}</dd></div>
-      <div><dt>Web 密码</dt><dd>{{if .Summary.WebPasswordConfigured}}<span class="badge badge-ok">已配置</span>{{else}}<span class="badge badge-bad">未配置</span>{{end}}</dd></div>
-      <div><dt>会话</dt><dd>HMAC 签名 Cookie · 7 天</dd></div>
-    </dl>
-    <div class="notice">服务端配置不支持在线编辑。修改配置文件后重启 hy2tund。</div>
+    <div class="notice">监听地址、TLS、obfs、QUIC、Web 监听、日志和状态文件需要编辑配置文件并重启 hy2tund。</div>
   </section>
 </div>
 {{end}}

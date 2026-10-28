@@ -70,8 +70,64 @@ type mappingsPage struct {
 
 type settingsPage struct {
 	pageBase
-	Summary  ConfigSummary
-	Overview view.Overview
+	Settings SettingsView
+}
+
+// MaskedSecret is the fixed placeholder shown instead of a stored secret.
+// It deliberately reveals neither the value nor its length.
+const MaskedSecret = "********"
+
+// SettingsView is the secret-free settings snapshot used by the settings page
+// and GET /api/settings. It never contains a plaintext password or token.
+type SettingsView struct {
+	WebUsername           string                 `json:"web_username"`
+	WebPasswordConfigured bool                   `json:"web_password_configured"`
+	AuthType              string                 `json:"auth_type"`
+	TrustProxy            bool                   `json:"trust_proxy"`
+	Ports                 PortSettingsView       `json:"ports"`
+	Credentials           CredentialSettingsView `json:"credentials"`
+	Clients               []ClientCredentialView `json:"clients"`
+	ReadOnly              []ReadOnlySetting      `json:"read_only"`
+}
+
+// PortSettingsView is the hot-reloadable port policy.
+type PortSettingsView struct {
+	Allow                 []string      `json:"allow"`
+	Deny                  []string      `json:"deny"`
+	AutoRange             string        `json:"auto_range"`
+	OfflineReserveSeconds int64         `json:"offline_reserve_seconds"`
+	OfflineReserve        time.Duration `json:"-"`
+}
+
+// CredentialSettingsView describes the current and previous credential
+// generations. Secrets are represented only by a fixed mask.
+type CredentialSettingsView struct {
+	Generation                 int64  `json:"generation"`
+	PreviousGeneration         int64  `json:"previous_generation"`
+	CurrentAuthMasked          string `json:"current_auth_masked"`
+	CurrentControlTokenMasked  string `json:"current_control_token_masked"`
+	PreviousAuthMasked         string `json:"previous_auth_masked"`
+	PreviousControlTokenMasked string `json:"previous_control_token_masked"`
+	Rotatable                  bool   `json:"rotatable"`
+}
+
+// ClientCredentialView is one row of the credential sync table. Offline
+// clients are included with their last known generation and last-seen time.
+type ClientCredentialView struct {
+	ClientID   string    `json:"client_id"`
+	Name       string    `json:"name"`
+	Online     bool      `json:"online"`
+	Generation int64     `json:"generation"`
+	Status     string    `json:"status"`
+	Error      string    `json:"error,omitempty"`
+	LastSeen   time.Time `json:"last_seen"`
+}
+
+// ReadOnlySetting is a configuration field that still requires a file edit
+// and restart.
+type ReadOnlySetting struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
 }
 
 type loginPage struct {
@@ -181,7 +237,7 @@ func (s *Server) base(title, active string) pageBase {
 	return pageBase{
 		Title:    title,
 		Active:   active,
-		Username: s.cfg.Username,
+		Username: s.sessions.AdminUsername(),
 		Version:  version.Version,
 	}
 }
@@ -190,11 +246,15 @@ func (s *Server) configSummary() ConfigSummary {
 	if provider, ok := s.api.(interface{ ConfigSummary() ConfigSummary }); ok {
 		return provider.ConfigSummary()
 	}
+	s.adminMu.RLock()
+	username := s.cfg.Username
+	passwordHash := s.cfg.PasswordHash
+	s.adminMu.RUnlock()
 	return ConfigSummary{
 		WebListen:             s.cfg.Listen,
-		WebUsername:           s.cfg.Username,
+		WebUsername:           username,
 		WebTLS:                s.cfg.TLS.Cert != "",
-		WebPasswordConfigured: s.cfg.PasswordHash != "",
+		WebPasswordConfigured: passwordHash != "",
 		Version:               version.Version,
 	}
 }

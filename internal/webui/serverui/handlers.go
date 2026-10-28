@@ -17,12 +17,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
 	"hy2tun/internal/config"
 	"hy2tun/internal/control"
+	"hy2tun/internal/credentials"
 	"hy2tun/internal/view"
 	"hy2tun/internal/webui/shared"
 )
@@ -33,7 +35,18 @@ type API interface {
 	Clients() []view.ClientView
 	Client(id string) (view.ClientView, bool)
 	PushMappings(id string, baseRevision int64, mappings []config.Mapping) (int64, error)
+	Settings() SettingsView
+	UpdateWebConfig(username, passwordHash string) error
+	UpdatePorts(allow, deny []string, autoRange string, offlineReserve time.Duration) error
+	RotateCredentials(auth, controlToken, syncMode string) (int64, []view.CredentialResult, error)
+	RevokePreviousCredentials() error
+	CredentialsSnapshot() *credentials.Set
+	SetTrustProxy(bool) error
 }
+
+// ServerAPI is an alias for API, kept for callers that use the descriptive
+// name from the design documents.
+type ServerAPI = API
 
 // Server is an authenticated HTTP server for the hy2tund web console.
 type Server struct {
@@ -41,9 +54,11 @@ type Server struct {
 	cfg config.WebConfig
 	log *slog.Logger
 
-	sessions *shared.SessionManager
-	limiter  *shared.LoginLimiter
-	login    *shared.LoginHandler
+	sessions      *shared.SessionManager
+	limiter       *shared.LoginLimiter
+	revealLimiter *shared.LoginLimiter
+	login         *shared.LoginHandler
+	trustProxy    atomic.Bool
 
 	pages    map[string]*template.Template
 	handler  http.Handler
@@ -52,6 +67,7 @@ type Server struct {
 	eventInterval time.Duration
 	done          chan struct{}
 
+	adminMu    sync.RWMutex
 	mu         sync.Mutex
 	started    bool
 	closed     bool
@@ -88,6 +104,10 @@ func New(api API, cfg config.WebConfig, sessionKey []byte, log *slog.Logger) (*S
 	if err != nil {
 		return nil, fmt.Errorf("serverui: %w", err)
 	}
+	// The session manager owns the live administrator credentials. The login
+	// handler reads them on every attempt so a hot web-admin update applies
+	// without restarting the console.
+	sessions.UpdateAdmin(cfg.Username, cfg.PasswordHash)
 	staticFS, err := fs.Sub(assets, "static")
 	if err != nil {
 		return nil, fmt.Errorf("serverui: static assets: %w", err)
@@ -99,6 +119,7 @@ func New(api API, cfg config.WebConfig, sessionKey []byte, log *slog.Logger) (*S
 		log:           log,
 		sessions:      sessions,
 		limiter:       shared.NewLoginLimiter(5, time.Minute, time.Minute),
+		revealLimiter: shared.NewLoginLimiter(5, time.Minute, time.Minute),
 		staticFS:      staticFS,
 		eventInterval: 2 * time.Second,
 		done:          make(chan struct{}),
@@ -119,12 +140,13 @@ func New(api API, cfg config.WebConfig, sessionKey []byte, log *slog.Logger) (*S
 		},
 		OnError: func(w http.ResponseWriter, r *http.Request, status int, message string) {
 			if wantsHTML(r) {
-				s.render(w, status, "login", loginPage{Username: s.cfg.Username, Error: message})
+				s.render(w, status, "login", loginPage{Username: s.sessions.AdminUsername(), Error: message})
 				return
 			}
 			writeJSONErrorCode(w, status, "", message)
 		},
 	}
+	s.trustProxy.Store(cfg.TrustProxy)
 
 	if err := s.parseTemplates(); err != nil {
 		return nil, err
@@ -155,13 +177,30 @@ func (s *Server) Addr() string {
 	return s.cfg.Listen
 }
 
-// SetTrustProxy updates whether the login rate limiter trusts forwarded client
-// IP headers. It takes effect for subsequent requests without a restart.
+// SetTrustProxy updates whether the login and reveal rate limiters trust
+// forwarded client IP headers. It takes effect for subsequent requests without
+// a restart.
 func (s *Server) SetTrustProxy(trust bool) {
-	if s == nil || s.login == nil {
+	if s == nil {
 		return
 	}
-	s.login.SetTrustProxy(trust)
+	s.trustProxy.Store(trust)
+	if s.login != nil {
+		s.login.SetTrustProxy(trust)
+	}
+}
+
+// SetAdmin replaces the live web administrator credentials and revokes every
+// existing session. The caller must validate and hash the password first.
+func (s *Server) SetAdmin(username, passwordHash string) {
+	if s == nil || s.sessions == nil {
+		return
+	}
+	s.adminMu.Lock()
+	s.cfg.Username = username
+	s.cfg.PasswordHash = passwordHash
+	s.adminMu.Unlock()
+	s.sessions.UpdateAdmin(username, passwordHash)
 }
 
 // Start binds the web listener and serves in the background. It returns once
@@ -297,6 +336,14 @@ func (s *Server) newHandler() http.Handler {
 	mux.Handle("GET /api/events", s.auth(http.HandlerFunc(s.handleEvents)))
 	mux.Handle("GET /api/config/summary", s.auth(http.HandlerFunc(s.handleConfigSummaryJSON)))
 
+	mux.Handle("GET /api/settings", s.auth(http.HandlerFunc(s.handleSettingsJSON)))
+	mux.Handle("PUT /api/settings/web", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateWebSettings))))
+	mux.Handle("PUT /api/settings/ports", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdatePorts))))
+	mux.Handle("PUT /api/settings/proxy", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateTrustProxy))))
+	mux.Handle("PUT /api/settings/credentials", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleRotateCredentials))))
+	mux.Handle("POST /api/settings/credentials/revoke", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleRevokeCredentials))))
+	mux.Handle("POST /api/settings/credentials/reveal", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleRevealCredentials))))
+
 	mux.Handle("GET /static/", http.StripPrefix("/static/", cacheStatic(http.FileServer(http.FS(s.staticFS)))))
 
 	return s.withSecurityHeaders(mux)
@@ -341,7 +388,7 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	case "invalid":
 		message = "用户名或密码错误。"
 	}
-	s.render(w, http.StatusOK, "login", loginPage{Username: s.cfg.Username, Error: message})
+	s.render(w, http.StatusOK, "login", loginPage{Username: s.sessions.AdminUsername(), Error: message})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -421,8 +468,7 @@ func (s *Server) handleMappingsPage(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, http.StatusOK, "settings", settingsPage{
 		pageBase: s.base("设置", "settings"),
-		Summary:  s.configSummary(),
-		Overview: s.api.Overview(),
+		Settings: s.api.Settings(),
 	})
 }
 
@@ -453,6 +499,272 @@ func (s *Server) handleMappingsJSON(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleConfigSummaryJSON(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.configSummary())
+}
+
+func (s *Server) handleSettingsJSON(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.api.Settings())
+}
+
+// passwordRequest accepts either "password" (the reveal API shape) or
+// "current_password" (the form-oriented mutations). Both are the current web
+// administrator password and are never logged.
+type passwordRequest struct {
+	Password        string `json:"password"`
+	CurrentPassword string `json:"current_password"`
+}
+
+func (p passwordRequest) secret() string {
+	if p.CurrentPassword != "" {
+		return p.CurrentPassword
+	}
+	return p.Password
+}
+
+func decodeSettingsBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(dst); err != nil {
+		writeJSONErrorCode(w, http.StatusBadRequest, "invalid_body", "请求体不是有效的 JSON")
+		return false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		writeJSONErrorCode(w, http.StatusBadRequest, "invalid_body", "请求体包含多余内容")
+		return false
+	}
+	return true
+}
+
+// confirmCurrentPassword implements the re-authentication required by every
+// sensitive settings mutation. The submitted value is never logged.
+func (s *Server) confirmCurrentPassword(w http.ResponseWriter, password string) bool {
+	if s.sessions.VerifyPassword(password) {
+		return true
+	}
+	writeJSONErrorCode(w, http.StatusForbidden, "invalid_password", "当前密码不正确")
+	return false
+}
+
+func (s *Server) writeSettingsMutationError(w http.ResponseWriter, err error, code, message string) {
+	status := http.StatusBadRequest
+	if strings.Contains(err.Error(), "save server config") || strings.Contains(err.Error(), "save config") {
+		status = http.StatusInternalServerError
+		code = "internal"
+		message = "写入配置文件失败"
+	}
+	if message == "" {
+		message = err.Error()
+	}
+	s.log.Warn("settings mutation failed", "code", code, "error", err)
+	writeJSONErrorCode(w, status, code, message)
+}
+
+func (s *Server) handleUpdateWebSettings(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		passwordRequest
+		Username        string `json:"username"`
+		NewPassword     string `json:"new_password"`
+		ConfirmPassword string `json:"confirm_password"`
+	}
+	if !decodeSettingsBody(w, r, &request) {
+		return
+	}
+	if !s.confirmCurrentPassword(w, request.secret()) {
+		return
+	}
+	username := strings.TrimSpace(request.Username)
+	if username == "" {
+		writeJSONErrorCode(w, http.StatusBadRequest, "username_required", "用户名不能为空")
+		return
+	}
+	if len([]rune(request.NewPassword)) < 8 {
+		writeJSONErrorCode(w, http.StatusBadRequest, "weak_password", "新密码至少需要 8 个字符")
+		return
+	}
+	if request.ConfirmPassword != "" && request.ConfirmPassword != request.NewPassword {
+		writeJSONErrorCode(w, http.StatusBadRequest, "password_mismatch", "两次输入的新密码不一致")
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(request.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		s.log.Error("hash web password", "error", err)
+		writeJSONErrorCode(w, http.StatusInternalServerError, "internal", "无法保存新密码")
+		return
+	}
+	if err := s.api.UpdateWebConfig(username, string(hash)); err != nil {
+		s.writeSettingsMutationError(w, err, "invalid_web_config", "更新 Web 管理员失败")
+		return
+	}
+	// UpdateWebConfig persists before returning. Only now replace the live
+	// credentials and revoke every session, including the caller's cookie.
+	s.sessions.UpdateAdmin(username, string(hash))
+	s.sessions.RevokeAll()
+	s.log.Info("web administrator updated", "username", username)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleUpdatePorts(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		passwordRequest
+		Allow                 []string `json:"allow"`
+		Deny                  []string `json:"deny"`
+		AutoRange             string   `json:"auto_range"`
+		OfflineReserveSeconds int64    `json:"offline_reserve_seconds"`
+	}
+	if !decodeSettingsBody(w, r, &request) {
+		return
+	}
+	if !s.confirmCurrentPassword(w, request.secret()) {
+		return
+	}
+	if request.OfflineReserveSeconds < 0 {
+		writeJSONErrorCode(w, http.StatusBadRequest, "invalid_ports", "离线预留时间不能为负数")
+		return
+	}
+	if err := s.api.UpdatePorts(request.Allow, request.Deny, request.AutoRange, time.Duration(request.OfflineReserveSeconds)*time.Second); err != nil {
+		s.writeSettingsMutationError(w, err, "invalid_ports", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, s.api.Settings())
+}
+
+func (s *Server) handleUpdateTrustProxy(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		passwordRequest
+		TrustProxy bool `json:"trust_proxy"`
+	}
+	if !decodeSettingsBody(w, r, &request) {
+		return
+	}
+	if !s.confirmCurrentPassword(w, request.secret()) {
+		return
+	}
+	if err := s.api.SetTrustProxy(request.TrustProxy); err != nil {
+		s.writeSettingsMutationError(w, err, "invalid_proxy_config", "更新代理信任失败")
+		return
+	}
+	// Update the live login/reveal limiters only after the configuration write
+	// succeeded.
+	s.SetTrustProxy(request.TrustProxy)
+	writeJSON(w, http.StatusOK, s.api.Settings())
+}
+
+type rotateCredentialsResponse struct {
+	Generation int64                   `json:"generation"`
+	Results    []view.CredentialResult `json:"results"`
+}
+
+func (s *Server) handleRotateCredentials(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		passwordRequest
+		Auth         string `json:"auth"`
+		ControlToken string `json:"control_token"`
+		SyncMode     string `json:"sync_mode"`
+	}
+	if !decodeSettingsBody(w, r, &request) {
+		return
+	}
+	if !s.confirmCurrentPassword(w, request.secret()) {
+		return
+	}
+	syncMode := strings.TrimSpace(request.SyncMode)
+	switch syncMode {
+	case "":
+		syncMode = "manual"
+	case "auto", "manual":
+	default:
+		writeJSONErrorCode(w, http.StatusBadRequest, "invalid_sync_mode", "同步方式必须是 auto 或 manual")
+		return
+	}
+	generation, results, err := s.api.RotateCredentials(request.Auth, request.ControlToken, syncMode)
+	if err != nil {
+		code := "invalid_credentials"
+		switch err.Error() {
+		case "unsupported_auth_type":
+			code = "unsupported_auth_type"
+		case "no_change":
+			code = "no_change"
+		}
+		s.writeSettingsMutationError(w, err, code, err.Error())
+		return
+	}
+	if results == nil {
+		results = []view.CredentialResult{}
+	}
+	writeJSON(w, http.StatusOK, rotateCredentialsResponse{Generation: generation, Results: results})
+}
+
+func (s *Server) handleRevokeCredentials(w http.ResponseWriter, r *http.Request) {
+	var request passwordRequest
+	if !decodeSettingsBody(w, r, &request) {
+		return
+	}
+	if !s.confirmCurrentPassword(w, request.secret()) {
+		return
+	}
+	if err := s.api.RevokePreviousCredentials(); err != nil {
+		s.writeSettingsMutationError(w, err, "revoke_failed", "撤销旧凭据失败")
+		return
+	}
+	s.log.Info("previous credentials revoked from web console")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type revealedCredential struct {
+	Generation   int64  `json:"generation"`
+	Auth         string `json:"auth"`
+	ControlToken string `json:"control_token"`
+}
+
+type revealCredentialsResponse struct {
+	Current  *revealedCredential `json:"current"`
+	Previous *revealedCredential `json:"previous,omitempty"`
+}
+
+func (s *Server) handleRevealCredentials(w http.ResponseWriter, r *http.Request) {
+	var request passwordRequest
+	if !decodeSettingsBody(w, r, &request) {
+		return
+	}
+
+	ip := shared.ClientIPWithProxy(r, s.trustProxy.Load())
+	if !s.revealLimiter.Allow(ip) {
+		w.Header().Set("Retry-After", "60")
+		writeJSONErrorCode(w, http.StatusTooManyRequests, "rate_limited", "尝试次数过多，请稍后再试")
+		return
+	}
+	if !s.sessions.VerifyPassword(request.secret()) {
+		s.revealLimiter.Failure(ip)
+		writeJSONErrorCode(w, http.StatusForbidden, "invalid_password", "当前密码不正确")
+		return
+	}
+	s.revealLimiter.Success(ip)
+
+	set := s.api.CredentialsSnapshot()
+	if set == nil {
+		writeJSONErrorCode(w, http.StatusInternalServerError, "internal", "凭据不可用")
+		return
+	}
+	payload := revealCredentialsResponse{
+		Current: &revealedCredential{
+			Generation:   set.Generation,
+			Auth:         set.Auth,
+			ControlToken: set.ControlToken,
+		},
+	}
+	if set.PreviousGeneration > 0 {
+		payload.Previous = &revealedCredential{
+			Generation:   set.PreviousGeneration,
+			Auth:         set.PreviousAuth,
+			ControlToken: set.PreviousControlToken,
+		}
+	}
+	// writeJSON sets this too; set it before the body is written so even a
+	// later encoder error cannot downgrade the cache policy.
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, payload)
 }
 
 type pushRequest struct {

@@ -50,8 +50,11 @@ type SessionManager struct {
 	ttl    time.Duration
 	now    func() time.Time
 
-	mu       sync.Mutex
-	sessions map[string]time.Time
+	mu           sync.Mutex
+	sessions     map[string]time.Time
+	username     string
+	passwordHash string
+	adminSet     bool
 }
 
 // NewSessionManager returns a manager using secret. The secret must be at
@@ -78,6 +81,74 @@ type sessionClaims struct {
 	IssuedAt  int64  `json:"iat"`
 	ExpiresAt int64  `json:"exp"`
 	SessionID string `json:"sid"`
+}
+
+// UpdateAdmin replaces the administrator credentials used by the login
+// handler and revokes every existing session. The password hash must already
+// be a bcrypt hash; callers validate it before calling UpdateAdmin.
+func (m *SessionManager) UpdateAdmin(username, passwordHash string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.username = username
+	m.passwordHash = passwordHash
+	m.adminSet = true
+	m.sessions = make(map[string]time.Time)
+	m.mu.Unlock()
+}
+
+// RevokeAll invalidates every issued session cookie. It does not change the
+// administrator credentials.
+func (m *SessionManager) RevokeAll() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.sessions = make(map[string]time.Time)
+	m.mu.Unlock()
+}
+
+// VerifyPassword reports whether password matches the current administrator
+// password hash. It never logs or returns the hash.
+func (m *SessionManager) VerifyPassword(password string) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	hash := m.passwordHash
+	m.mu.Unlock()
+	if hash == "" {
+		return false
+	}
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+}
+
+// AdminUsername returns the current administrator username, or an empty
+// string when no administrator has been configured.
+func (m *SessionManager) AdminUsername() string {
+	if m == nil {
+		return ""
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.username
+}
+
+// Admin returns the current administrator username and bcrypt hash. ok is
+// false until UpdateAdmin has configured an administrator, which lets embedded
+// login handlers keep using their own static fields. The hash is only intended
+// for the login handler; it must never be exposed by an API.
+func (m *SessionManager) Admin() (username, passwordHash string, ok bool) {
+	if m == nil {
+		return "", "", false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.adminSet {
+		return "", "", false
+	}
+	return m.username, m.passwordHash, true
 }
 
 // Issue signs a session cookie for username and writes it to w. The random
@@ -499,13 +570,18 @@ func (h *LoginHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, http.StatusBadRequest, "invalid login request")
 		return
 	}
-	if h.Sessions == nil || h.PasswordHash == "" {
+	if h.Sessions == nil {
+		h.fail(w, r, http.StatusInternalServerError, "login is not configured")
+		return
+	}
+	adminUser, adminHash := h.adminCredentials()
+	if adminHash == "" {
 		h.fail(w, r, http.StatusInternalServerError, "login is not configured")
 		return
 	}
 
-	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(h.Username)) == 1
-	passOK := bcrypt.CompareHashAndPassword([]byte(h.PasswordHash), []byte(password)) == nil
+	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(adminUser)) == 1
+	passOK := bcrypt.CompareHashAndPassword([]byte(adminHash), []byte(password)) == nil
 	if !userOK || !passOK {
 		if h.Limiter != nil {
 			h.Limiter.Failure(ip)
@@ -520,17 +596,33 @@ func (h *LoginHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.Limiter != nil {
 		h.Limiter.Success(ip)
 	}
-	if err := h.Sessions.Issue(w, r, h.Username); err != nil {
+	if err := h.Sessions.Issue(w, r, adminUser); err != nil {
 		h.log().Error("issue web session", "error", err)
 		h.fail(w, r, http.StatusInternalServerError, "could not create session")
 		return
 	}
-	h.log().Debug("web login succeeded", "ip", ip, "username", h.Username)
+	h.log().Debug("web login succeeded", "ip", ip, "username", adminUser)
 	if h.OnSuccess != nil {
 		h.OnSuccess(w, r)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// adminCredentials returns the live administrator credentials. A session
+// manager with a configured admin takes precedence so hot web-admin updates
+// apply immediately; the handler fields remain a fallback for embedded users
+// that only configure the handler.
+func (h *LoginHandler) adminCredentials() (string, string) {
+	if h != nil && h.Sessions != nil {
+		if username, hash, ok := h.Sessions.Admin(); ok {
+			return username, hash
+		}
+	}
+	if h == nil {
+		return "", ""
+	}
+	return h.Username, h.PasswordHash
 }
 
 func (h *LoginHandler) credentials(r *http.Request) (string, string, error) {

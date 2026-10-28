@@ -1379,3 +1379,54 @@ select {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Settings forms */
+.settings-section {
+  margin-top: 12px;
+}
+
+.settings-form {
+  padding: 12px 14px 2px;
+}
+
+.settings-form .grid-2 {
+  gap: 12px;
+}
+
+.settings-inline {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 12px 14px 2px;
+}
+
+.settings-inline .field {
+  flex: 1 1 240px;
+  margin-bottom: 0;
+}
+
+.settings-hint {
+  margin: 6px 14px 12px;
+}
+
+.form-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0 12px;
+}
+
+.textarea {
+  height: auto;
+  min-height: 64px;
+  padding: 6px 9px;
+  resize: vertical;
+  font-family: inherit;
+  line-height: 1.5;
+}
+
+.secret-value {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 1px;
+}

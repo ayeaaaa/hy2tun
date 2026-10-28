@@ -613,3 +613,70 @@ func TestClientIPWithProxyDefaultIgnoresForwardedHeaders(t *testing.T) {
 
 	require.Equal(t, "10.0.0.5", ClientIPWithProxy(req, false))
 }
+
+func TestUpdateAdminRevokesOldSessions(t *testing.T) {
+	manager, err := NewSessionManager(testSecret(), time.Hour)
+	require.NoError(t, err)
+
+	issueRecorder := httptest.NewRecorder()
+	require.NoError(t, manager.Issue(issueRecorder, httptest.NewRequest(http.MethodPost, "http://example.com/login", nil), "admin"))
+	cookie := issueRecorder.Result().Cookies()[0]
+
+	hash, err := bcrypt.GenerateFromPassword([]byte("new-password"), bcrypt.MinCost)
+	require.NoError(t, err)
+	manager.UpdateAdmin("root", string(hash))
+	manager.RevokeAll()
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	req.AddCookie(cookie)
+	require.False(t, manager.Valid(req))
+	require.True(t, manager.VerifyPassword("new-password"))
+	require.False(t, manager.VerifyPassword("old-password"))
+	require.Equal(t, "root", manager.AdminUsername())
+}
+
+func TestUpdateAdminRevokesSessionsWithoutExplicitRevoke(t *testing.T) {
+	manager, err := NewSessionManager(testSecret(), time.Hour)
+	require.NoError(t, err)
+
+	issueRecorder := httptest.NewRecorder()
+	require.NoError(t, manager.Issue(issueRecorder, httptest.NewRequest(http.MethodGet, "http://example.com/", nil), "admin"))
+	cookie := issueRecorder.Result().Cookies()[0]
+
+	hash, err := bcrypt.GenerateFromPassword([]byte("new-password"), bcrypt.MinCost)
+	require.NoError(t, err)
+	manager.UpdateAdmin("root", string(hash))
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	req.AddCookie(cookie)
+	require.False(t, manager.Valid(req), "UpdateAdmin must revoke every existing session")
+}
+
+func TestLoginHandlerUsesUpdatedAdminCredentials(t *testing.T) {
+	manager, err := NewSessionManager(testSecret(), time.Hour)
+	require.NoError(t, err)
+	firstHash, err := bcrypt.GenerateFromPassword([]byte("first-password"), bcrypt.MinCost)
+	require.NoError(t, err)
+	manager.UpdateAdmin("admin", string(firstHash))
+
+	handler := &LoginHandler{Sessions: manager, Limiter: NewLoginLimiter(10, time.Minute, time.Minute)}
+
+	attempt := func(username, password string) *httptest.ResponseRecorder {
+		body := url.Values{"username": {username}, "password": {password}}.Encode()
+		req := httptest.NewRequest(http.MethodPost, "http://example.com/api/login", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	require.Equal(t, http.StatusNoContent, attempt("admin", "first-password").Code)
+
+	secondHash, err := bcrypt.GenerateFromPassword([]byte("second-password"), bcrypt.MinCost)
+	require.NoError(t, err)
+	manager.UpdateAdmin("root", string(secondHash))
+
+	require.Equal(t, http.StatusUnauthorized, attempt("admin", "first-password").Code)
+	require.Equal(t, http.StatusUnauthorized, attempt("admin", "second-password").Code)
+	require.Equal(t, http.StatusNoContent, attempt("root", "second-password").Code)
+}

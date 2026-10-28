@@ -25,6 +25,7 @@ import (
 
 	"hy2tun/internal/config"
 	"hy2tun/internal/control"
+	"hy2tun/internal/credentials"
 	"hy2tun/internal/testutil"
 	"hy2tun/internal/view"
 )
@@ -46,6 +47,37 @@ type fakeServerAPI struct {
 	pushID       string
 	pushBase     int64
 	pushMappings []config.Mapping
+
+	settings SettingsView
+
+	updateWebCalls    int
+	updateWebUsername string
+	updateWebHash     string
+	updateWebErr      error
+
+	updatePortsCalls   int
+	updatePortsAllow   []string
+	updatePortsDeny    []string
+	updatePortsAuto    string
+	updatePortsReserve time.Duration
+	updatePortsErr     error
+
+	rotateCalls      int
+	rotateAuth       string
+	rotateToken      string
+	rotateSync       string
+	rotateGeneration int64
+	rotateResults    []view.CredentialResult
+	rotateErr        error
+
+	revokeCalls int
+	revokeErr   error
+
+	snapshot *credentials.Set
+
+	setTrustProxyCalls int
+	setTrustProxyValue bool
+	setTrustProxyErr   error
 }
 
 func (f *fakeServerAPI) Overview() view.Overview {
@@ -110,6 +142,84 @@ func (f *fakeServerAPI) PushMappings(id string, baseRevision int64, mappings []c
 		}
 	}
 	return revision, nil
+}
+
+func (f *fakeServerAPI) Settings() SettingsView {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	settings := f.settings
+	if settings.WebUsername == "" {
+		settings.WebUsername = f.summary.WebUsername
+	}
+	if settings.Ports.Allow == nil {
+		settings.Ports.Allow = append([]string(nil), f.summary.PortsAllow...)
+	}
+	if settings.Ports.Deny == nil {
+		settings.Ports.Deny = append([]string(nil), f.summary.PortsDeny...)
+	}
+	if settings.Ports.AutoRange == "" {
+		settings.Ports.AutoRange = f.summary.PortsAutoRange
+	}
+	if settings.Ports.OfflineReserveSeconds == 0 {
+		settings.Ports.OfflineReserveSeconds = f.summary.OfflineReserveSeconds
+		settings.Ports.OfflineReserve = f.summary.OfflineReserve
+	}
+	if settings.ReadOnly == nil && f.summary.ConfigPath != "" {
+		settings.ReadOnly = []ReadOnlySetting{{Label: "配置文件", Value: f.summary.ConfigPath}}
+	}
+	return settings
+}
+
+func (f *fakeServerAPI) UpdateWebConfig(username, passwordHash string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.updateWebCalls++
+	f.updateWebUsername = username
+	f.updateWebHash = passwordHash
+	return f.updateWebErr
+}
+
+func (f *fakeServerAPI) UpdatePorts(allow, deny []string, autoRange string, offlineReserve time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.updatePortsCalls++
+	f.updatePortsAllow = append([]string(nil), allow...)
+	f.updatePortsDeny = append([]string(nil), deny...)
+	f.updatePortsAuto = autoRange
+	f.updatePortsReserve = offlineReserve
+	return f.updatePortsErr
+}
+
+func (f *fakeServerAPI) RotateCredentials(auth, controlToken, syncMode string) (int64, []view.CredentialResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rotateCalls++
+	f.rotateAuth = auth
+	f.rotateToken = controlToken
+	f.rotateSync = syncMode
+	return f.rotateGeneration, append([]view.CredentialResult(nil), f.rotateResults...), f.rotateErr
+}
+
+func (f *fakeServerAPI) RevokePreviousCredentials() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.revokeCalls++
+	return f.revokeErr
+}
+
+func (f *fakeServerAPI) CredentialsSnapshot() *credentials.Set {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.snapshot.Clone()
+}
+
+func (f *fakeServerAPI) SetTrustProxy(trust bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setTrustProxyCalls++
+	f.setTrustProxyValue = trust
+	return f.setTrustProxyErr
 }
 
 // fakePushError mirrors server.PushError without importing the server package
@@ -968,4 +1078,290 @@ func TestServerWebNewValidation(t *testing.T) {
 	badTLS.TLS = config.WebTLSConfig{Cert: "cert.pem"}
 	_, err = NewServer(&fakeServerAPI{}, badTLS, testSessionKey, slog.Default())
 	require.Error(t, err)
+}
+
+func TestServerSettingsAPIReturnsMaskedValues(t *testing.T) {
+	api := &fakeServerAPI{
+		settings: SettingsView{
+			WebUsername:           "admin",
+			WebPasswordConfigured: true,
+			AuthType:              "password",
+			TrustProxy:            true,
+			Ports: PortSettingsView{
+				Allow:                 []string{"2222", "8000-8100"},
+				Deny:                  []string{"9000"},
+				AutoRange:             "20000-29999",
+				OfflineReserveSeconds: 3600,
+				OfflineReserve:        time.Hour,
+			},
+			Credentials: CredentialSettingsView{
+				Generation:                 2,
+				PreviousGeneration:         1,
+				CurrentAuthMasked:          MaskedSecret,
+				CurrentControlTokenMasked:  MaskedSecret,
+				PreviousAuthMasked:         MaskedSecret,
+				PreviousControlTokenMasked: MaskedSecret,
+				Rotatable:                  true,
+			},
+			Clients: []ClientCredentialView{
+				{ClientID: "c1", Name: "home", Online: true, Generation: 2, Status: "synced"},
+				{ClientID: "c2", Name: "office", Online: false, Generation: 1, Status: "pending"},
+			},
+			ReadOnly: []ReadOnlySetting{{Label: "HY2 监听", Value: "0.0.0.0:443"}},
+		},
+	}
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	resp := doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/api/settings", "", cookie, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
+	raw := readBody(t, resp)
+	require.NotContains(t, raw, "current_auth\"")
+	require.NotContains(t, raw, "control_token\"")
+
+	var settings SettingsView
+	require.NoError(t, json.Unmarshal([]byte(raw), &settings))
+	require.Equal(t, "admin", settings.WebUsername)
+	require.Equal(t, MaskedSecret, settings.Credentials.CurrentAuthMasked)
+	require.Equal(t, MaskedSecret, settings.Credentials.PreviousControlTokenMasked)
+	require.Equal(t, int64(2), settings.Credentials.Generation)
+	require.True(t, settings.TrustProxy)
+	require.Len(t, settings.Clients, 2)
+	require.Equal(t, "pending", settings.Clients[1].Status)
+
+	// The rendered settings page carries the editable sections and never the
+	// actual secrets.
+	resp = doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/settings", "", cookie, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	page := readBody(t, resp)
+	for _, section := range []string{"Web 管理员", "HY2 凭据", "端口白名单", "代理信任", "只读项"} {
+		require.Contains(t, page, section)
+	}
+	require.Contains(t, page, MaskedSecret)
+	require.Contains(t, page, "home")
+	require.Contains(t, page, "office")
+}
+
+func TestServerSettingsRotateCredentials(t *testing.T) {
+	api := &fakeServerAPI{
+		rotateGeneration: 3,
+		rotateResults: []view.CredentialResult{
+			{ClientID: "c1", Name: "home", Generation: 3, Status: "synced"},
+			{ClientID: "c2", Name: "office", Generation: 3, Status: "pending", Error: "not_ready"},
+		},
+	}
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	body := `{"current_password":"pw","auth":"new-auth-password","control_token":"0123456789abcdef","sync_mode":"auto"}`
+	resp := doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/credentials", body, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var result struct {
+		Generation int64                   `json:"generation"`
+		Results    []view.CredentialResult `json:"results"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	resp.Body.Close()
+	require.Equal(t, int64(3), result.Generation)
+	require.Len(t, result.Results, 2)
+	require.Equal(t, "synced", result.Results[0].Status)
+
+	require.Equal(t, 1, api.rotateCalls)
+	require.Equal(t, "new-auth-password", api.rotateAuth)
+	require.Equal(t, "0123456789abcdef", api.rotateToken)
+	require.Equal(t, "auto", api.rotateSync)
+
+	// A wrong current password never reaches the API.
+	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/credentials",
+		`{"current_password":"wrong","auth":"another-password","sync_mode":"manual"}`, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	resp.Body.Close()
+	require.Equal(t, 1, api.rotateCalls)
+
+	// The CSRF header and same-origin Origin remain mandatory.
+	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/credentials", body, cookie, map[string]string{
+		"Content-Type":     "application/json",
+		"X-Requested-With": "hy2tun",
+	})
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	resp.Body.Close()
+	require.Equal(t, 1, api.rotateCalls)
+}
+
+func TestServerSettingsRevealRequiresPasswordAndNoStore(t *testing.T) {
+	api := &fakeServerAPI{snapshot: &credentials.Set{
+		Generation:           2,
+		Auth:                 "current-auth-secret",
+		ControlToken:         "current-token-secret",
+		PreviousGeneration:   1,
+		PreviousAuth:         "previous-auth-secret",
+		PreviousControlToken: "previous-token-secret",
+	}}
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	resp := doRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/settings/credentials/reveal",
+		`{"password":"wrong"}`, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	raw := readBody(t, resp)
+	require.NotContains(t, raw, "current-auth-secret")
+	require.NotContains(t, raw, "previous-token-secret")
+
+	resp = doRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/settings/credentials/reveal",
+		`{"password":"pw"}`, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
+	var revealed struct {
+		Current struct {
+			Generation   int64  `json:"generation"`
+			Auth         string `json:"auth"`
+			ControlToken string `json:"control_token"`
+		} `json:"current"`
+		Previous struct {
+			Generation   int64  `json:"generation"`
+			Auth         string `json:"auth"`
+			ControlToken string `json:"control_token"`
+		} `json:"previous"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&revealed))
+	resp.Body.Close()
+	require.Equal(t, int64(2), revealed.Current.Generation)
+	require.Equal(t, "current-auth-secret", revealed.Current.Auth)
+	require.Equal(t, "current-token-secret", revealed.Current.ControlToken)
+	require.Equal(t, int64(1), revealed.Previous.Generation)
+	require.Equal(t, "previous-auth-secret", revealed.Previous.Auth)
+	require.Equal(t, "previous-token-secret", revealed.Previous.ControlToken)
+
+	// Missing Origin is rejected before the password is checked.
+	resp = doRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/settings/credentials/reveal",
+		`{"password":"pw"}`, cookie, map[string]string{
+			"Content-Type":     "application/json",
+			"X-Requested-With": "hy2tun",
+		})
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	resp.Body.Close()
+}
+
+func TestServerSettingsWebUpdateRevokesSession(t *testing.T) {
+	api := &fakeServerAPI{}
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	body := `{"username":"root","current_password":"pw","new_password":"new-password"}`
+	resp := doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/web", body, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	resp.Body.Close()
+
+	require.Equal(t, 1, api.updateWebCalls)
+	require.Equal(t, "root", api.updateWebUsername)
+	require.NoError(t, bcrypt.CompareHashAndPassword([]byte(api.updateWebHash), []byte("new-password")))
+
+	// The old session cookie is revoked.
+	resp = doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/api/settings", "", cookie, nil)
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	resp.Body.Close()
+
+	// The new credentials work and the old ones do not.
+	resp = doRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/login",
+		`{"username":"admin","password":"pw"}`, nil, map[string]string{"Content-Type": "application/json"})
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	resp.Body.Close()
+	resp = doRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/login",
+		`{"username":"root","password":"new-password"}`, nil, map[string]string{"Content-Type": "application/json"})
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.NotEmpty(t, resp.Cookies())
+	newCookie := resp.Cookies()[0]
+	resp.Body.Close()
+
+	// A wrong current password is rejected without calling the API, even with
+	// a valid session and CSRF headers.
+	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/web",
+		`{"username":"other","current_password":"wrong","new_password":"another-password"}`, newCookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	resp.Body.Close()
+	require.Equal(t, 1, api.updateWebCalls)
+}
+
+func TestServerSettingsPortsAndTrustProxy(t *testing.T) {
+	api := &fakeServerAPI{}
+	web, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	body := `{"current_password":"pw","allow":["2222","8000-8100"],"deny":["9000"],"auto_range":"20000-29999","offline_reserve_seconds":7200}`
+	resp := doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/ports", body, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	resp.Body.Close()
+	require.Equal(t, 1, api.updatePortsCalls)
+	require.Equal(t, []string{"2222", "8000-8100"}, api.updatePortsAllow)
+	require.Equal(t, []string{"9000"}, api.updatePortsDeny)
+	require.Equal(t, "20000-29999", api.updatePortsAuto)
+	require.Equal(t, 2*time.Hour, api.updatePortsReserve)
+
+	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/ports",
+		`{"current_password":"wrong","allow":[],"deny":[],"auto_range":"20000-29999","offline_reserve_seconds":60}`, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	resp.Body.Close()
+	require.Equal(t, 1, api.updatePortsCalls)
+
+	// The trust-proxy toggle has its own authenticated mutation and updates
+	// the live login limiter.
+	require.False(t, web.login.TrustProxy)
+	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/proxy",
+		`{"current_password":"pw","trust_proxy":true}`, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	resp.Body.Close()
+	require.Equal(t, 1, api.setTrustProxyCalls)
+	require.True(t, api.setTrustProxyValue)
+	require.True(t, web.login.TrustProxy)
+
+	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/proxy",
+		`{"current_password":"pw","trust_proxy":false}`, cookie, map[string]string{
+			"Content-Type":     "application/json",
+			"X-Requested-With": "hy2tun",
+		})
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	resp.Body.Close()
+	require.Equal(t, 1, api.setTrustProxyCalls)
+}
+
+func TestServerSettingsRevokePreviousCredentials(t *testing.T) {
+	api := &fakeServerAPI{}
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	resp := doRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/settings/credentials/revoke",
+		`{"current_password":"pw"}`, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	resp.Body.Close()
+	require.Equal(t, 1, api.revokeCalls)
+
+	resp = doRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/settings/credentials/revoke",
+		`{"current_password":"wrong"}`, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	resp.Body.Close()
+	require.Equal(t, 1, api.revokeCalls)
+}
+
+func TestServerSettingsWebUpdateFailureKeepsSession(t *testing.T) {
+	api := &fakeServerAPI{updateWebErr: errors.New("save server config: write failed")}
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	resp := doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/web",
+		`{"username":"root","current_password":"pw","new_password":"new-password"}`, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	resp.Body.Close()
+	require.Equal(t, 1, api.updateWebCalls)
+
+	// A failed config write must not revoke the current session or change the
+	// live login credentials.
+	resp = doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/api/settings", "", cookie, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	resp.Body.Close()
+
+	resp = doRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/login",
+		`{"username":"admin","password":"pw"}`, nil, map[string]string{"Content-Type": "application/json"})
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	resp.Body.Close()
 }

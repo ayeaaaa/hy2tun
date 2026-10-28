@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,12 +20,14 @@ import (
 	hyserver "github.com/apernet/hysteria/core/v2/server"
 	"github.com/apernet/hysteria/extras/v2/auth"
 	"github.com/apernet/hysteria/extras/v2/obfs"
+	"golang.org/x/crypto/bcrypt"
 
 	"hy2tun/internal/config"
 	"hy2tun/internal/credentials"
 	"hy2tun/internal/ports"
 	"hy2tun/internal/state"
 	"hy2tun/internal/version"
+	"hy2tun/internal/view"
 	"hy2tun/internal/webui/serverui"
 )
 
@@ -421,6 +425,181 @@ func (s *Server) SetTrustProxy(trust bool) error {
 	}
 	s.log.Info("trust proxy updated", "trust_proxy", trust)
 	return nil
+}
+
+// UpdateWebConfig hot-applies a new web administrator username and bcrypt
+// password hash. The configuration file is written first; on failure neither
+// the running configuration nor the live login credentials change. A
+// successful update revokes every existing web session.
+func (s *Server) UpdateWebConfig(username, passwordHash string) error {
+	if s == nil {
+		return fmt.Errorf("update web config: server is nil")
+	}
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return fmt.Errorf("update web config: username is required")
+	}
+	if _, err := bcrypt.Cost([]byte(passwordHash)); err != nil {
+		return fmt.Errorf("update web config: password hash is invalid: %w", err)
+	}
+
+	s.settingsMu.Lock()
+	next := cloneConfig(s.cfg)
+	if next == nil {
+		s.settingsMu.Unlock()
+		return fmt.Errorf("update web config: server config is nil")
+	}
+	next.Web.Username = username
+	next.Web.PasswordHash = passwordHash
+	if err := next.Validate(); err != nil {
+		s.settingsMu.Unlock()
+		return fmt.Errorf("update web config: %w", err)
+	}
+	if err := s.persistConfig(next); err != nil {
+		s.settingsMu.Unlock()
+		return fmt.Errorf("update web config: %w", err)
+	}
+	s.cfg = next
+	web := s.web
+	s.settingsMu.Unlock()
+
+	if web != nil {
+		web.SetAdmin(username, passwordHash)
+	}
+	s.log.Info("web administrator updated", "username", username)
+	return nil
+}
+
+// Settings returns the secret-free settings snapshot used by the web console.
+// It merges the online-only credential statuses with offline clients from the
+// state store so the sync table never hides a client that still needs the new
+// credentials.
+func (s *Server) Settings() serverui.SettingsView {
+	cfg := s.currentConfig()
+	if cfg == nil {
+		return serverui.SettingsView{}
+	}
+	creds := s.currentCredentials()
+	if creds == nil {
+		creds = &credentials.Set{Generation: 1}
+	}
+	generation := creds.Generation
+	if generation < 1 {
+		generation = 1
+	}
+
+	webListen := cfg.Web.Listen
+	if s.web != nil {
+		webListen = s.web.Addr()
+	}
+	settings := serverui.SettingsView{
+		WebUsername:           cfg.Web.Username,
+		WebPasswordConfigured: cfg.Web.PasswordHash != "",
+		AuthType:              cfg.Auth.Type,
+		TrustProxy:            s.trustProxy.Load(),
+		Ports: serverui.PortSettingsView{
+			Allow:                 append([]string(nil), cfg.Ports.Allow...),
+			Deny:                  append([]string(nil), cfg.Ports.Deny...),
+			AutoRange:             cfg.Ports.AutoRange,
+			OfflineReserveSeconds: int64(time.Duration(cfg.Ports.OfflineReserve) / time.Second),
+			OfflineReserve:        time.Duration(cfg.Ports.OfflineReserve),
+		},
+		Credentials: serverui.CredentialSettingsView{
+			Generation:                 generation,
+			PreviousGeneration:         creds.PreviousGeneration,
+			CurrentAuthMasked:          maskSecret(creds.Auth),
+			CurrentControlTokenMasked:  maskSecret(creds.ControlToken),
+			PreviousAuthMasked:         maskSecret(creds.PreviousAuth),
+			PreviousControlTokenMasked: maskSecret(creds.PreviousControlToken),
+			Rotatable:                  cfg.Auth.Type == "password",
+		},
+		ReadOnly: []serverui.ReadOnlySetting{
+			{Label: "HY2 监听", Value: s.listenAddr.String()},
+			{Label: "绑定地址", Value: valueOr(cfg.ListenHost, "全部地址")},
+			{Label: "HY2 TLS", Value: boolLabel(cfg.TLS.Cert != "", "已启用", "未启用")},
+			{Label: "Obfs", Value: valueOr(cfg.Obfs.Type, "未启用")},
+			{Label: "QUIC 最大空闲", Value: time.Duration(cfg.QUIC.MaxIdleTimeout).String()},
+			{Label: "Web 监听", Value: valueOr(webListen, "未启用")},
+			{Label: "日志级别", Value: cfg.Log.Level},
+			{Label: "状态文件", Value: valueOr(cfg.StateFile, "未配置")},
+			{Label: "配置文件", Value: valueOr(cfg.ConfigPath, "—")},
+		},
+	}
+	settings.Clients = s.credentialClients(generation)
+	return settings
+}
+
+func (s *Server) credentialClients(currentGeneration int64) []serverui.ClientCredentialView {
+	clients := s.Clients()
+	byID := make(map[string]view.ClientView, len(clients))
+	for _, client := range clients {
+		byID[client.ID] = client
+	}
+
+	seen := make(map[string]struct{})
+	out := make([]serverui.ClientCredentialView, 0, len(clients))
+	for _, status := range s.CredentialStatuses() {
+		item := serverui.ClientCredentialView{
+			ClientID:   status.ClientID,
+			Name:       status.Name,
+			Online:     true,
+			Generation: status.Generation,
+			Status:     status.Status,
+			Error:      status.Error,
+		}
+		if client, ok := byID[status.ClientID]; ok {
+			item.Name = client.Name
+			item.Online = client.Online
+			item.LastSeen = client.LastSeen
+		}
+		seen[status.ClientID] = struct{}{}
+		out = append(out, item)
+	}
+
+	for _, client := range clients {
+		if _, ok := seen[client.ID]; ok {
+			continue
+		}
+		// The state store does not persist the credential generation. An
+		// offline client whose last reported generation matches the current
+		// one cannot be confirmed as synced, so it is shown as unknown;
+		// everything else is pending.
+		status := "pending"
+		if currentGeneration > 0 && client.CredentialGeneration == currentGeneration {
+			status = "unknown"
+		}
+		out = append(out, serverui.ClientCredentialView{
+			ClientID:   client.ID,
+			Name:       client.Name,
+			Online:     false,
+			Generation: client.CredentialGeneration,
+			Status:     status,
+			LastSeen:   client.LastSeen,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ClientID < out[j].ClientID })
+	return out
+}
+
+func maskSecret(value string) string {
+	if value == "" {
+		return ""
+	}
+	return serverui.MaskedSecret
+}
+
+func valueOr(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func boolLabel(value bool, whenTrue, whenFalse string) string {
+	if value {
+		return whenTrue
+	}
+	return whenFalse
 }
 
 // ConfigSummary returns a secret-free configuration summary for the web

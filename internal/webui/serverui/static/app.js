@@ -621,6 +621,433 @@
     });
   }
 
+  function parsePortList(value) {
+    return String(value || "")
+      .split(/[\s,]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  function fmtDateTime(value) {
+    if (!value) {
+      return "—";
+    }
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime()) || date.getFullYear() <= 1) {
+      return "—";
+    }
+    return date.toLocaleString("zh-CN", { hour12: false });
+  }
+
+  async function settingsRequest(path, method, body) {
+    const response = await fetch(path, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Requested-With": "hy2tun",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify(body || {}),
+    });
+    if (response.status === 401) {
+      window.location.href = "/login";
+      throw new Error("会话已失效，请重新登录");
+    }
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (error) {
+      payload = null;
+    }
+    if (!response.ok) {
+      const message = (payload && payload.error) || `请求失败（HTTP ${response.status}）`;
+      throw new Error(message);
+    }
+    return payload;
+  }
+
+  function credentialBadge(status) {
+    switch (status) {
+      case "synced":
+        return ["badge-ok", "已同步"];
+      case "pending":
+        return ["badge-muted", "待同步"];
+      case "unsupported":
+        return ["badge-bad", "不支持推送"];
+      case "timeout":
+        return ["badge-bad", "超时"];
+      default:
+        return ["badge-muted", "未知"];
+    }
+  }
+
+  function renderCredentialClients(clients) {
+    const body = $("[data-credential-clients]");
+    if (!body) {
+      return;
+    }
+    body.textContent = "";
+    if (!Array.isArray(clients) || clients.length === 0) {
+      const row = document.createElement("tr");
+      const cell = document.createElement("td");
+      cell.colSpan = 5;
+      cell.className = "empty-inline";
+      cell.textContent = "暂无客户端";
+      row.appendChild(cell);
+      body.appendChild(row);
+      return;
+    }
+    for (const client of clients) {
+      const row = document.createElement("tr");
+      row.dataset.credentialClient = client.client_id || "";
+
+      const nameCell = document.createElement("td");
+      const name = document.createElement("div");
+      name.textContent = client.name || client.client_id || "—";
+      const id = document.createElement("div");
+      id.className = "note mono";
+      id.textContent = client.client_id || "";
+      nameCell.appendChild(name);
+      nameCell.appendChild(id);
+      row.appendChild(nameCell);
+
+      const onlineCell = document.createElement("td");
+      const onlineBadge = document.createElement("span");
+      onlineBadge.className = `badge ${client.online ? "badge-ok" : "badge-muted"}`;
+      onlineBadge.textContent = client.online ? "在线" : "离线";
+      onlineCell.appendChild(onlineBadge);
+      row.appendChild(onlineCell);
+
+      const generationCell = document.createElement("td");
+      generationCell.className = "mono";
+      generationCell.dataset.credentialGeneration = client.client_id || "";
+      generationCell.textContent = client.generation ? String(client.generation) : "—";
+      row.appendChild(generationCell);
+
+      const statusCell = document.createElement("td");
+      const [badgeClass, badgeText] = credentialBadge(client.status);
+      const statusBadge = document.createElement("span");
+      statusBadge.className = `badge ${badgeClass}`;
+      statusBadge.textContent = badgeText;
+      statusCell.appendChild(statusBadge);
+      if (client.error) {
+        const error = document.createElement("span");
+        error.className = "note mono";
+        error.textContent = client.error;
+        statusCell.appendChild(error);
+      }
+      row.appendChild(statusCell);
+
+      const lastSeenCell = document.createElement("td");
+      lastSeenCell.className = "mono";
+      lastSeenCell.textContent = fmtDateTime(client.last_seen);
+      row.appendChild(lastSeenCell);
+
+      body.appendChild(row);
+    }
+  }
+
+  function updateSecretMasks(credentials) {
+    const masks = {
+      "current-auth": credentials.current_auth_masked,
+      "current-token": credentials.current_control_token_masked,
+      "previous-auth": credentials.previous_auth_masked,
+      "previous-token": credentials.previous_control_token_masked,
+    };
+    for (const [key, value] of Object.entries(masks)) {
+      const element = document.querySelector(`[data-secret="${key}"]`);
+      if (!element) {
+        continue;
+      }
+      element.dataset.mask = value || "—";
+      if (element.dataset.revealed !== "true") {
+        element.textContent = element.dataset.mask;
+      }
+    }
+  }
+
+  async function refreshSettings() {
+    try {
+      const response = await fetch("/api/settings", {
+        headers: { Accept: "application/json" },
+        credentials: "same-origin",
+      });
+      if (response.status === 401) {
+        window.location.href = "/login";
+        return null;
+      }
+      if (!response.ok) {
+        return null;
+      }
+      const settings = await response.json();
+      const credentials = settings.credentials || {};
+      setTextAll("[data-settings-generation]", credentials.generation);
+      setTextAll(
+        "[data-settings-previous-generation]",
+        credentials.previous_generation ? String(credentials.previous_generation) : "—"
+      );
+      updateSecretMasks(credentials);
+      renderCredentialClients(settings.clients);
+      const count = $("[data-credential-client-count]");
+      if (count) {
+        count.textContent = `${Array.isArray(settings.clients) ? settings.clients.length : 0} 个客户端`;
+      }
+      const revokeButton = $("[data-revoke-credentials]");
+      if (revokeButton) {
+        revokeButton.disabled = !(Number(credentials.previous_generation) > 0);
+      }
+      return settings;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function initSettings() {
+    if (!$("#settings-web-form")) {
+      return;
+    }
+
+    const secretFields = $$("[data-secret]");
+    secretFields.forEach((element) => {
+      element.dataset.mask = element.textContent;
+    });
+    let revealTimer = 0;
+    const hideButton = $("[data-hide-secrets]");
+
+    const maskSecrets = () => {
+      secretFields.forEach((element) => {
+        element.textContent = element.dataset.mask || "********";
+        delete element.dataset.revealed;
+      });
+      if (hideButton) {
+        hideButton.hidden = true;
+      }
+      if (revealTimer) {
+        window.clearTimeout(revealTimer);
+        revealTimer = 0;
+      }
+    };
+
+    const showSecrets = (data) => {
+      const current = (data && data.current) || {};
+      const previous = (data && data.previous) || {};
+      const values = {
+        "current-auth": current.auth,
+        "current-token": current.control_token,
+        "previous-auth": previous.auth,
+        "previous-token": previous.control_token,
+      };
+      for (const [key, value] of Object.entries(values)) {
+        const element = document.querySelector(`[data-secret="${key}"]`);
+        if (element) {
+          if (value) {
+            element.dataset.revealed = "true";
+            element.textContent = value;
+          } else {
+            delete element.dataset.revealed;
+            element.textContent = "—";
+          }
+        }
+      }
+      if (hideButton) {
+        hideButton.hidden = false;
+      }
+      if (revealTimer) {
+        window.clearTimeout(revealTimer);
+      }
+      revealTimer = window.setTimeout(maskSecrets, 30000);
+    };
+
+    document.addEventListener("click", async (event) => {
+      const revealButton = event.target.closest("[data-reveal-credentials]");
+      if (revealButton) {
+        const passwordInput = $("#credentials-reveal-password");
+        const password = passwordInput ? passwordInput.value : "";
+        if (!password) {
+          showToast("请输入当前 Web 密码", "bad");
+          if (passwordInput) {
+            passwordInput.focus();
+          }
+          return;
+        }
+        revealButton.disabled = true;
+        try {
+          const data = await settingsRequest("/api/settings/credentials/reveal", "POST", { password });
+          showSecrets(data);
+          showToast("已显示凭据，30 秒后自动隐藏");
+        } catch (error) {
+          showToast(error.message, "bad");
+        } finally {
+          revealButton.disabled = false;
+          if (passwordInput) {
+            passwordInput.value = "";
+          }
+        }
+        return;
+      }
+
+      if (event.target.closest("[data-hide-secrets]")) {
+        maskSecrets();
+        return;
+      }
+
+      const revokeButton = event.target.closest("[data-revoke-credentials]");
+      if (revokeButton) {
+        const passwordInput = $("#credentials-revoke-password");
+        const password = passwordInput ? passwordInput.value : "";
+        if (!password) {
+          showToast("请输入当前 Web 密码", "bad");
+          if (passwordInput) {
+            passwordInput.focus();
+          }
+          return;
+        }
+        if (!window.confirm("撤销后上一代密码和 control token 立即失效，仍在使用旧代际的客户端会失去连接。确定撤销？")) {
+          return;
+        }
+        revokeButton.disabled = true;
+        try {
+          await settingsRequest("/api/settings/credentials/revoke", "POST", { current_password: password });
+          showToast("旧凭据已撤销");
+          if (passwordInput) {
+            passwordInput.value = "";
+          }
+          maskSecrets();
+          await refreshSettings();
+        } catch (error) {
+          showToast(error.message, "bad");
+        } finally {
+          revokeButton.disabled = false;
+        }
+      }
+    });
+
+    const webForm = $("#settings-web-form");
+    webForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const username = $("#web-username").value.trim();
+      const currentPassword = $("#web-current-password").value;
+      const newPassword = $("#web-new-password").value;
+      const confirmPassword = $("#web-confirm-password").value;
+      if (!username) {
+        showToast("用户名不能为空", "bad");
+        return;
+      }
+      if (newPassword.length < 8) {
+        showToast("新密码至少需要 8 个字符", "bad");
+        return;
+      }
+      if (newPassword !== confirmPassword) {
+        showToast("两次输入的新密码不一致", "bad");
+        return;
+      }
+      if (!window.confirm("保存后会退出所有 Web 会话，需要使用新凭据重新登录。继续？")) {
+        return;
+      }
+      try {
+        await settingsRequest("/api/settings/web", "PUT", {
+          username,
+          current_password: currentPassword,
+          new_password: newPassword,
+        });
+        window.location.href = "/login";
+      } catch (error) {
+        showToast(error.message, "bad");
+      }
+    });
+
+    const proxyForm = $("#settings-proxy-form");
+    proxyForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const passwordInput = $("#proxy-current-password");
+      try {
+        await settingsRequest("/api/settings/proxy", "PUT", {
+          current_password: passwordInput.value,
+          trust_proxy: $("#trust-proxy").checked,
+        });
+        passwordInput.value = "";
+        showToast("代理信任设置已更新");
+      } catch (error) {
+        showToast(error.message, "bad");
+      }
+    });
+
+    const credentialsForm = $("#settings-credentials-form");
+    credentialsForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const auth = $("#credentials-auth").value;
+      const token = $("#credentials-token").value;
+      const currentPassword = $("#credentials-current-password").value;
+      const syncMode = $("#credentials-sync").value;
+      if (!auth && !token) {
+        showToast("请填写新的 HY2 密码或 control token", "bad");
+        return;
+      }
+      if (auth && auth.length < 8) {
+        showToast("HY2 密码至少需要 8 个字符", "bad");
+        return;
+      }
+      if (token && token.length < 16) {
+        showToast("control token 至少需要 16 个字符", "bad");
+        return;
+      }
+      const previous = $("[data-settings-previous-generation]");
+      const hasPrevious = previous && previous.textContent.trim() !== "" && previous.textContent.trim() !== "—";
+      const warning = hasPrevious
+        ? "轮换后旧凭据仍然有效，直到撤销。自动推送会等待在线客户端确认，未确认的客户端保持待同步。继续轮换？"
+        : "确认轮换 HY2 凭据？旧凭据会保留为上一代，直到显式撤销。";
+      if (!window.confirm(warning)) {
+        return;
+      }
+      try {
+        const result = await settingsRequest("/api/settings/credentials", "PUT", {
+          current_password: currentPassword,
+          auth,
+          control_token: token,
+          sync_mode: syncMode,
+        });
+        $("#credentials-auth").value = "";
+        $("#credentials-token").value = "";
+        $("#credentials-current-password").value = "";
+        maskSecrets();
+        showToast(`凭据已轮换到代际 ${result.generation}`);
+        await refreshSettings();
+      } catch (error) {
+        showToast(error.message, "bad");
+      }
+    });
+
+    const portsForm = $("#settings-ports-form");
+    portsForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const reserve = Number($("#ports-offline-reserve").value || 0);
+      if (!Number.isFinite(reserve) || reserve < 0) {
+        showToast("离线预留时间必须是非负数", "bad");
+        return;
+      }
+      if (!window.confirm("保存端口策略？已运行的映射不会被关闭，但新注册和更新会立即使用新策略。")) {
+        return;
+      }
+      try {
+        await settingsRequest("/api/settings/ports", "PUT", {
+          current_password: $("#ports-current-password").value,
+          allow: parsePortList($("#ports-allow").value),
+          deny: parsePortList($("#ports-deny").value),
+          auto_range: $("#ports-auto-range").value.trim(),
+          offline_reserve_seconds: Math.floor(reserve),
+        });
+        $("#ports-current-password").value = "";
+        showToast("端口策略已更新");
+        await refreshSettings();
+      } catch (error) {
+        showToast(error.message, "bad");
+      }
+    });
+
+    refreshSettings();
+    window.setInterval(refreshSettings, 5000);
+  }
+
   function init() {
     initSSE();
     initFilters();
@@ -628,6 +1055,7 @@
     initLogout();
     initDrawer();
     initHtmxFallback();
+    initSettings();
   }
 
   if (document.readyState === "loading") {
