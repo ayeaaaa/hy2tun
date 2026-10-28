@@ -1,0 +1,29 @@
+services:
+  hy2tund:
+    build:
+      context: .
+      target: server
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./server.yaml:/etc/hy2tun/server.yaml:ro
+      - ./certs:/etc/hy2tun/certs:ro
+      - hy2tund-state:/var/lib/hy2tun
+    # host networking is required for the HY2 UDP port and public mapping
+    # ports. The container runs as nonroot; use ports above 1024 or grant
+    # CAP_NET_BIND_SERVICE.
+
+  hy2tun:
+    build:
+      context: .
+      target: client
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./client.yaml:/etc/hy2tun/client.yaml:ro
+      - ./certs:/etc/hy2tun/certs:ro
+    depends_on:
+      - hy2tund
+
+volumes:
+  hy2tund-state:

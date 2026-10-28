@@ -149,6 +149,41 @@ make release    # ./scripts/release.sh，产物在 dist/
 VERSION=1.0.0 make release
 ```
 
+## Docker
+
+`Dockerfile` 提供 `server` 和 `client` 两个 target：
+
+```bash
+docker build --target server -t hy2tun-server .
+docker build --target client -t hy2tun-client .
+```
+
+需要使用 host 网络，HY2 UDP 端口和公网映射端口才能正常工作：
+
+```bash
+docker run --network host --restart unless-stopped \
+  -v "$PWD/server.yaml:/etc/hy2tun/server.yaml:ro" \
+  -v "$PWD/certs:/etc/hy2tun/certs:ro" \
+  -v hy2tund-state:/var/lib/hy2tun \
+  hy2tun-server
+```
+
+完整双服务示例见 [`docker-compose.yml`](docker-compose.yml)。镜像以
+`nonroot` 运行；如果需要绑定 1024 以下端口，请使用高权限端口或授予
+`CAP_NET_BIND_SERVICE`。
+
+## 从 Release 安装
+
+在解压后的 release 目录执行：
+
+```bash
+sudo ./scripts/install.sh server
+sudo ./scripts/install.sh client
+```
+
+脚本会安装二进制和 systemd unit，创建 `/etc/hy2tun` 与 `/var/lib/hy2tun`，
+并且只在配置不存在时复制示例配置。启动服务前请先编辑配置。
+
 ## 配置检查
 
 不绑定端口、不写状态文件，只校验配置：

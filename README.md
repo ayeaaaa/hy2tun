@@ -175,6 +175,42 @@ Windows) and contains:
 VERSION=1.0.0 make release
 ```
 
+## Docker
+
+The `Dockerfile` has `server` and `client` targets:
+
+```bash
+docker build --target server -t hy2tun-server .
+docker build --target client -t hy2tun-client .
+```
+
+Use host networking so the HY2 UDP port and public mapping ports work:
+
+```bash
+docker run --network host --restart unless-stopped \
+  -v "$PWD/server.yaml:/etc/hy2tun/server.yaml:ro" \
+  -v "$PWD/certs:/etc/hy2tun/certs:ro" \
+  -v hy2tund-state:/var/lib/hy2tun \
+  hy2tun-server
+```
+
+See [`docker-compose.yml`](docker-compose.yml) for a two-service example. The
+image runs as `nonroot`; use ports above 1024 or grant
+`CAP_NET_BIND_SERVICE` if you need a privileged port.
+
+## Release install
+
+From an extracted release archive:
+
+```bash
+sudo ./scripts/install.sh server
+sudo ./scripts/install.sh client
+```
+
+The script installs the binary and systemd unit, creates `/etc/hy2tun` and
+`/var/lib/hy2tun`, and copies the example config only when it does not already
+exist. Edit the config before starting the service.
+
 ## Configuration check
 
 Validate a configuration without binding sockets or writing state:
