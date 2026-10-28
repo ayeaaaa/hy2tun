@@ -191,3 +191,21 @@ func TestCloseFlushesPendingChanges(t *testing.T) {
 	defer reopened.Close()
 	require.Equal(t, "home", reopened.Snapshot().Clients["c1"].Name)
 }
+
+func TestDeleteRemovesClientAndReservation(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "state.json"), time.Hour)
+	require.NoError(t, err)
+	defer s.Close()
+
+	s.Upsert(ClientState{
+		ID: "gone", Online: false,
+		Mappings:      []config.Mapping{{ID: "m1", Type: "tcp", RemotePort: 2222}},
+		ReservedUntil: time.Now().Add(time.Hour),
+	})
+	require.True(t, s.Reserved("gone", 2222, time.Now()))
+	require.True(t, s.Delete("gone"))
+	_, ok := s.Snapshot().Clients["gone"]
+	require.False(t, ok)
+	require.False(t, s.Reserved("gone", 2222, time.Now()))
+	require.False(t, s.Delete("gone"))
+}

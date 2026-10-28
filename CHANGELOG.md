@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Added
+
+- Server web console can delete an offline client, removing its persisted
+  mappings and soft port reservations. Online clients must disconnect first.
+
 ## v1.3.0 - 2026-10-28
 
 ### Added

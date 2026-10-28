@@ -68,6 +68,11 @@ func (s *Server) Clients() []view.ClientView {
 	return s.mappings.clientViews()
 }
 
+// DeleteClient removes an offline client and its mappings/reservations.
+func (s *Server) DeleteClient(id string) error {
+	return s.mappings.deleteClient(id)
+}
+
 // Client returns one client view by ID.
 func (s *Server) Client(id string) (view.ClientView, bool) {
 	for _, client := range s.mappings.clientViews() {

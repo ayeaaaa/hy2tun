@@ -497,7 +497,45 @@
       }
     };
 
-    document.addEventListener("click", (event) => {
+    document.addEventListener("click", async (event) => {
+      const deleteClientButton = event.target.closest('[data-action="delete-client"]');
+      if (deleteClientButton) {
+        event.preventDefault();
+        const clientId = deleteClientButton.dataset.clientId || "";
+        const clientName = deleteClientButton.dataset.clientName || clientId;
+        if (!clientId || !window.confirm(`删除客户端 ${clientName}？它的映射和端口保留会一并删除，客户端重新连接前不会恢复。`)) {
+          return;
+        }
+        deleteClientButton.disabled = true;
+        try {
+          const response = await fetch(`/api/clients/${encodeURIComponent(clientId)}`, {
+            method: "DELETE",
+            headers: { "X-Requested-With": "hy2tun" },
+            credentials: "same-origin",
+          });
+          if (response.status === 401) {
+            window.location.href = "/login";
+            return;
+          }
+          if (!response.ok) {
+            let payload = null;
+            try {
+              payload = await response.json();
+            } catch (error) {
+              payload = null;
+            }
+            showToast((payload && payload.error) || `删除失败（HTTP ${response.status}）`, "bad");
+            deleteClientButton.disabled = false;
+            return;
+          }
+          window.location.href = "/clients";
+        } catch (error) {
+          showToast("删除失败，请检查网络", "bad");
+          deleteClientButton.disabled = false;
+        }
+        return;
+      }
+
       const addButton = event.target.closest('[data-action="add-mapping"]');
       if (addButton) {
         event.preventDefault();

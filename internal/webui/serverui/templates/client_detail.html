@@ -12,6 +12,9 @@
       <button type="button" class="btn btn-primary btn-sm" data-action="add-mapping" data-client-id="{{.Client.ID}}" data-revision="{{.Client.Revision}}">新增映射</button>
       {{end}}
       <button type="button" class="btn btn-sm" hx-get="/clients/{{.Client.ID}}/detail" hx-target="#client-detail" hx-swap="innerHTML" data-refresh-detail="{{.Client.ID}}">刷新</button>
+      {{if not .Client.Online}}
+      <button type="button" class="btn btn-danger btn-quiet btn-sm" data-action="delete-client" data-client-id="{{.Client.ID}}" data-client-name="{{if .Client.Name}}{{.Client.Name}}{{else}}{{.Client.ID}}{{end}}">删除客户端</button>
+      {{end}}
     </div>
   </header>
 

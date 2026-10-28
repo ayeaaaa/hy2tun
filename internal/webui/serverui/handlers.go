@@ -31,6 +31,7 @@ type API interface {
 	Overview() view.Overview
 	Clients() []view.ClientView
 	Client(id string) (view.ClientView, bool)
+	DeleteClient(id string) error
 	PushMappings(id string, baseRevision int64, mappings []config.Mapping) (int64, error)
 	Settings() SettingsView
 	UpdateWebConfig(username, passwordHash string) error
@@ -335,6 +336,7 @@ func (s *Server) newHandler() http.Handler {
 	mux.Handle("GET /api/overview", s.auth(http.HandlerFunc(s.handleOverviewJSON)))
 	mux.Handle("GET /api/clients", s.auth(http.HandlerFunc(s.handleClientsJSON)))
 	mux.Handle("GET /api/clients/{id}", s.auth(http.HandlerFunc(s.handleClientJSON)))
+	mux.Handle("DELETE /api/clients/{id}", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleDeleteClient))))
 	mux.Handle("PUT /api/clients/{id}/mappings", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handlePushMappings))))
 	mux.Handle("GET /api/mappings", s.auth(http.HandlerFunc(s.handleMappingsJSON)))
 	mux.Handle("GET /api/events", s.auth(http.HandlerFunc(s.handleEvents)))

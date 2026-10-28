@@ -114,6 +114,22 @@ func (s *Store) Upsert(client ClientState) {
 	s.dirty = true
 }
 
+// Delete removes a client and all of its mapping reservations. It reports
+// whether the client existed.
+func (s *Store) Delete(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.Clients == nil {
+		return false
+	}
+	if _, ok := s.state.Clients[id]; !ok {
+		return false
+	}
+	delete(s.state.Clients, id)
+	s.dirty = true
+	return true
+}
+
 // SetOfflineReserve replaces how long ports stay reserved for clients that go
 // offline after this call. Existing reservations are not recalculated.
 func (s *Store) SetOfflineReserve(reserve time.Duration) {

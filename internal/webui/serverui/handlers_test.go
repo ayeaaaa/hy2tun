@@ -43,6 +43,10 @@ type fakeServerAPI struct {
 	pushErr      error
 	pushRevision int64
 
+	deleteErr error
+	deleteID  string
+	deletes   int
+
 	pushes       int
 	pushID       string
 	pushBase     int64
@@ -143,6 +147,14 @@ func (f *fakeServerAPI) PushMappings(id string, baseRevision int64, mappings []c
 		}
 	}
 	return revision, nil
+}
+
+func (f *fakeServerAPI) DeleteClient(id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deletes++
+	f.deleteID = id
+	return f.deleteErr
 }
 
 func (f *fakeServerAPI) Settings() SettingsView {
@@ -545,6 +557,59 @@ func TestLoginRateLimit(t *testing.T) {
 	require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
 	require.Equal(t, "60", resp.Header.Get("Retry-After"))
 	resp.Body.Close()
+}
+
+func TestServerWebDeleteClient(t *testing.T) {
+	api := &fakeServerAPI{
+		clients: []view.ClientView{{ID: "gone", Name: "old", Online: false}},
+	}
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	resp := doRequest(t, ts.Client(), http.MethodDelete, ts.URL+"/api/clients/gone", "", cookie, nil)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	resp.Body.Close()
+
+	api.deleteErr = control.ErrClientOnline
+	resp = doRequest(t, ts.Client(), http.MethodDelete, ts.URL+"/api/clients/gone", "", cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	var payload map[string]string
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&payload))
+	resp.Body.Close()
+	require.Equal(t, "client_online", payload["code"])
+
+	api.deleteErr = control.ErrClientNotFound
+	resp = doRequest(t, ts.Client(), http.MethodDelete, ts.URL+"/api/clients/gone", "", cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&payload))
+	resp.Body.Close()
+	require.Equal(t, "client_not_found", payload["code"])
+
+	api.deleteErr = nil
+	resp = doRequest(t, ts.Client(), http.MethodDelete, ts.URL+"/api/clients/gone", "", cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	resp.Body.Close()
+	require.Equal(t, 3, api.deletes)
+	require.Equal(t, "gone", api.deleteID)
+}
+
+func TestServerWebClientDetailDeleteButtonOnlyForOffline(t *testing.T) {
+	api := &fakeServerAPI{
+		clients: []view.ClientView{
+			{ID: "offline", Name: "old", Online: false},
+			{ID: "online", Name: "live", Online: true},
+		},
+	}
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	resp := doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/clients/offline/detail", "", cookie, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Contains(t, readBody(t, resp), `data-action="delete-client"`)
+
+	resp = doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/clients/online/detail", "", cookie, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.NotContains(t, readBody(t, resp), `data-action="delete-client"`)
 }
 
 func TestServerWebPushMappings(t *testing.T) {

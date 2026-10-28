@@ -597,6 +597,7 @@ minute per client IP. Mutations also require the CSRF header and same-origin
 | `ports.allow`, `ports.deny`, `ports.auto_range`, `ports.offline_reserve` | Yes. Mappings already running are not closed when a new allow list no longer covers them. `offline_reserve` must be at least `1s`. |
 | `web.trust_proxy` | Yes. Applies immediately to login and settings-confirmation rate limiting. |
 | Mappings of online clients | Yes. Push an authoritative list or delete a mapping. Offline clients stay read-only. |
+| Offline clients | Yes. Delete from the client detail page; removes the persisted client, mappings, and soft port reservations. Online clients must disconnect first. |
 | `credentials.generation`, `credentials.previous_*` | Managed by rotation and revoke. Not edited directly in the console. |
 | `listen`, `listen_host` | No. Edit the file and restart. |
 | `tls.*`, `obfs.*`, `bandwidth.*`, `quic.*` | No. Edit the file and restart. |
@@ -787,6 +788,24 @@ then swap the runtime state. If validation or the file write fails, the
 running configuration, credential set, port policy, and web login are left
 unchanged. A client credential update is written to `client.yaml` before the
 `credential_ack` is sent, so an acknowledged rotation is durable.
+
+## Client management
+
+The server keeps offline clients in its state file so their mappings and port
+reservations survive restarts. To forget a client that will not return, open its
+detail page and choose **Delete client**. This removes the persisted client, all
+of its mappings, and its soft port reservations. The action cannot be undone.
+
+The button is available only while the client is offline. If it is online,
+disconnect it first by stopping the client or its control stream. Deleting a
+client does not revoke its HY2 credentials; if the same client reconnects, it
+registers again. Rotate credentials or remove its configuration when it must not
+return.
+
+The equivalent API call is `DELETE /api/clients/{id}` with a valid session,
+`X-Requested-With: hy2tun`, and a same-origin `Origin`. It returns `204` on
+success, `409 client_online` for a live client, and `404 client_not_found` for
+an unknown or already deleted client.
 
 ## Port hopping
 
@@ -1285,8 +1304,9 @@ with a smaller MTU can drop large datagrams before they arrive.
 - After a client disconnects, its ports stay soft-reserved for
   `ports.offline_reserve`. Another client can still request the port
   explicitly.
-- The state file keeps the last-known clients and mappings. Delete it only
-  when you intentionally want to forget offline clients and reservations.
+- The state file keeps the last-known clients and mappings. Use the client
+  detail page's **Delete client** action to forget one offline client and its
+  reservations. Delete the state file only as a last resort for a full reset.
 
 ## Performance testing with iperf3
 

@@ -383,6 +383,26 @@ func (m *mappingManager) detach(sess *clientSession) {
 	m.saveState()
 }
 
+// deleteClient removes an offline client and its persisted mappings. Online
+// clients are rejected because their live control stream is authoritative.
+func (m *mappingManager) deleteClient(clientID string) error {
+	m.mu.Lock()
+	if _, live := m.sessions[clientID]; live {
+		m.mu.Unlock()
+		return control.ErrClientOnline
+	}
+	if m.store == nil || !m.store.Delete(clientID) {
+		m.mu.Unlock()
+		return control.ErrClientNotFound
+	}
+	m.mu.Unlock()
+
+	if err := m.store.Save(); err != nil {
+		return fmt.Errorf("persist client deletion: %w", err)
+	}
+	return nil
+}
+
 // removeMapping removes one mapping from a live session, closing its listener
 // and any traffic it is carrying. The change is persisted for offline
 // reservations. It serializes with pushes and client updates through the

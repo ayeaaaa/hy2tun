@@ -37,6 +37,12 @@ var (
 	// ErrClientOffline reports that the target client has no live control
 	// stream.
 	ErrClientOffline = errors.New("control: client offline")
+	// ErrClientOnline reports that a client cannot be deleted while it still
+	// has a live control stream.
+	ErrClientOnline = errors.New("control: client online")
+	// ErrClientNotFound reports that no live or persisted client has the
+	// requested ID.
+	ErrClientNotFound = errors.New("control: client not found")
 	// ErrClientNotReady reports that the client has not completed its control
 	// handshake yet. The caller may retry shortly.
 	ErrClientNotReady = errors.New("control: client not ready")
