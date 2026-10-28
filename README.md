@@ -1,5 +1,7 @@
 # hy2tun
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 `hy2tun` is a reverse port-forwarding tunnel built on the official
 [Hysteria 2](https://github.com/apernet/hysteria) core. A client inside a
 private network connects out to a public server and exposes selected TCP and
@@ -153,7 +155,7 @@ Windows) and contains:
 - `hy2tund` and `hy2tun` (with `.exe` on Windows), ready to install without
   renaming;
 - `examples/server.yaml` and `examples/client.yaml`;
-- `README.md`;
+- `README.md` and `README.zh-CN.md`;
 - the complete `scripts/` tree with systemd, OpenWrt, and Windows deployment
   notes;
 - `SHA256SUMS` covering the two binaries.

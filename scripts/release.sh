@@ -3,7 +3,7 @@
 # linux/mipsle, linux/mips (both softfloat), and windows/amd64.
 #
 # Every archive contains the stripped, statically linked server and client
-# binaries under friendly names, the example configurations, README, the
+# binaries under friendly names, the example configurations, READMEs, the
 # deployment scripts, and a per-archive SHA256SUMS. dist/SHA256SUMS covers
 # every archive.
 set -eu
@@ -55,7 +55,7 @@ package() {
 	cp "$out/hy2tund-$os-$arch$ext" "$pkg/hy2tund$ext"
 	cp "$out/hy2tun-$os-$arch$ext" "$pkg/hy2tun$ext"
 	cp examples/server.yaml examples/client.yaml "$pkg/examples/"
-	cp README.md "$pkg/"
+	cp README.md README.zh-CN.md "$pkg/"
 	# Include every deployment note in every archive so README links to
 	# scripts/windows/README.md work on Linux and vice versa.
 	cp -R scripts "$pkg/"
