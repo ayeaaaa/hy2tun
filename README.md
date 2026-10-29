@@ -498,6 +498,11 @@ Rules:
 - The old single-server API targets `default`. With a multi-server config that
   has no `default`, old server-scoped API calls return `404` rather than
   guessing a server.
+- Proxy changes are hot-applied. Closing or changing a listener cancels
+  in-flight proxy dials and closes affected active connections; unchanged
+  listeners are reused. If a config rename succeeds but the following
+  directory sync fails, the write is treated as committed and a warning is
+  logged; runtime state follows the new file instead of rolling back.
 
 ## Configuration reference
 
