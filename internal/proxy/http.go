@@ -58,7 +58,7 @@ func (s *Server) serveHTTP(conn net.Conn) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), proxyDialTimeout)
+	ctx, cancel := context.WithTimeout(s.ctx, proxyDialTimeout)
 	remote, err := s.dial(ctx, "tcp", target)
 	cancel()
 	if err != nil {

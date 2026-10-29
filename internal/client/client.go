@@ -9,6 +9,7 @@ import (
 	"crypto/subtle"
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -335,10 +336,17 @@ func (c *Client) SetPersist(persist func(*config.ClientConfig) error) {
 // writeConfig persists a worker configuration through the supervisor callback
 // when installed, otherwise through the standalone client file.
 func (c *Client) writeConfig(next *config.ClientConfig) error {
+	var err error
 	if c.persist != nil {
-		return c.persist(next)
+		err = c.persist(next)
+	} else {
+		err = writeConfigAtomic(c.configPath, next)
 	}
-	return writeConfigAtomic(c.configPath, next)
+	if errors.Is(err, config.ErrCommitted) {
+		c.log.Warn("config committed but directory sync failed", "error", err)
+		return nil
+	}
+	return err
 }
 
 // loadClientWebSessionKey loads the persisted web session signing key next to
@@ -686,6 +694,36 @@ func (c *Client) TCP(addr string) (net.Conn, error) {
 		return nil, fmt.Errorf("HY2 returned a nil TCP stream")
 	}
 	return conn, nil
+}
+
+// TCPContext opens a TCP stream while honoring ctx. Hysteria's stream API has
+// no context, so the underlying call runs in a goroutine; a canceled request
+// returns immediately and closes any connection that arrives later.
+func (c *Client) TCPContext(ctx context.Context, addr string) (net.Conn, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		conn, err := c.TCP(addr)
+		resultCh <- result{conn: conn, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		go func() {
+			res := <-resultCh
+			if res.conn != nil {
+				_ = res.conn.Close()
+			}
+		}()
+		return nil, ctx.Err()
+	case res := <-resultCh:
+		return res.conn, res.err
+	}
 }
 
 // trafficFor returns the shared counters for a mapping, creating them on first

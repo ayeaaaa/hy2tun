@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -49,7 +50,7 @@ func run() error {
 			return err
 		}
 		if generated {
-			if err := config.SaveClient(*configPath, cfg); err != nil {
+			if err := config.SaveClient(*configPath, cfg); err != nil && !errors.Is(err, config.ErrCommitted) {
 				return fmt.Errorf("save generated web password: %w", err)
 			}
 			// The plaintext is shown exactly once and is never logged through

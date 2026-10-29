@@ -125,7 +125,7 @@ func (c *Client) bindOneProxy(kind, listen string, cfg config.ProxyConfig) (*pro
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		return c.TCP(addr)
+		return c.TCPContext(ctx, addr)
 	}
 	switch kind {
 	case "socks5":

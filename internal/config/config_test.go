@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -791,4 +792,18 @@ func FuzzParseListen(f *testing.F) {
 	f.Fuzz(func(t *testing.T, value string) {
 		_, _, _ = ParseListen(value)
 	})
+}
+
+func TestSaveClientCommittedSyncFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "client.yaml")
+	cfg := validClientConfig()
+	oldSync := syncDirFn
+	syncDirFn = func(string) error { return errors.New("sync failed") }
+	defer func() { syncDirFn = oldSync }()
+
+	err := SaveClient(path, cfg)
+	require.ErrorIs(t, err, ErrCommitted)
+	data, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	require.Contains(t, string(data), "server: 127.0.0.1:443")
 }

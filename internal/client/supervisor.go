@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -79,7 +80,7 @@ func NewSupervisor(cfg *config.ClientConfig, log *slog.Logger) (*Supervisor, err
 		changed = true
 	}
 	if changed && cfg.ConfigPath != "" {
-		if err := config.SaveClient(cfg.ConfigPath, cfg); err != nil {
+		if err := saveClientConfig(log, cfg.ConfigPath, cfg); err != nil {
 			return nil, fmt.Errorf("save generated client IDs: %w", err)
 		}
 	}
@@ -297,7 +298,7 @@ func (s *Supervisor) UpdateWebConfig(username, passwordHash string) error {
 		s.configMu.Unlock()
 		return err
 	}
-	if err := config.SaveClient(next.ConfigPath, next); err != nil {
+	if err := s.saveClient(next); err != nil {
 		s.configMu.Unlock()
 		return err
 	}
@@ -425,7 +426,7 @@ func (s *Supervisor) UpdateProxy(name string, cfg config.ProxyConfig) error {
 	}
 	// Save the candidate before touching listeners. A save failure therefore
 	// leaves every existing listener and connection intact.
-	if err := config.SaveClient(next.ConfigPath, next); err != nil {
+	if err := s.saveClient(next); err != nil {
 		s.configMu.Unlock()
 		return err
 	}
@@ -445,7 +446,7 @@ func (s *Supervisor) UpdateProxy(name string, cfg config.ProxyConfig) error {
 	if err := worker.ApplyProxy(applyCfg); err != nil {
 		s.configMu.Lock()
 		if s.configVersion == version {
-			if restoreErr := config.SaveClient(s.cfg.ConfigPath, s.cfg); restoreErr != nil {
+			if restoreErr := s.saveClient(s.cfg); restoreErr != nil {
 				s.log.Warn("restore proxy config after bind failure", "server", name, "error", restoreErr)
 			}
 		}
@@ -476,7 +477,7 @@ func (s *Supervisor) UpdateProxy(name string, cfg config.ProxyConfig) error {
 			}
 			return err
 		}
-		if err := config.SaveClient(next.ConfigPath, next); err != nil {
+		if err := s.saveClient(next); err != nil {
 			s.configMu.Unlock()
 			if restoreErr := worker.ApplyProxy(oldCfg); restoreErr != nil {
 				s.log.Warn("restore proxy after config save failure", "server", name, "error", restoreErr)
@@ -494,6 +495,19 @@ func mergeProxyAuth(next, old config.ProxyConfig) config.ProxyConfig {
 	next.SOCKS5Auth = old.SOCKS5Auth
 	next.HTTPAuth = old.HTTPAuth
 	return next
+}
+
+func saveClientConfig(log *slog.Logger, path string, cfg *config.ClientConfig) error {
+	err := config.SaveClient(path, cfg)
+	if errors.Is(err, config.ErrCommitted) {
+		log.Warn("config committed but directory sync failed", "path", path, "error", err)
+		return nil
+	}
+	return err
+}
+
+func (s *Supervisor) saveClient(cfg *config.ClientConfig) error {
+	return saveClientConfig(s.log, cfg.ConfigPath, cfg)
 }
 
 // persistWorker merges a worker edit into the shared multi-server config. The
@@ -539,7 +553,7 @@ func (s *Supervisor) persistWorker(name string, workerCfg *config.ClientConfig) 
 	if err := next.Validate(); err != nil {
 		return err
 	}
-	if err := config.SaveClient(next.ConfigPath, next); err != nil {
+	if err := s.saveClient(next); err != nil {
 		return err
 	}
 	s.cfg = next

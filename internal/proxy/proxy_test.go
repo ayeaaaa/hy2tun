@@ -298,3 +298,40 @@ func TestCloseUnblocksActiveTunnel(t *testing.T) {
 		t.Fatal("Close did not stop the active tunnel")
 	}
 }
+
+func TestCloseCancelsBlockedDial(t *testing.T) {
+	dialStarted := make(chan struct{})
+	dial := func(ctx context.Context, _, _ string) (net.Conn, error) {
+		close(dialStarted)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	srv, err := NewSOCKS5("127.0.0.1:0", dial, slog.Default())
+	require.NoError(t, err)
+	go srv.Start()
+
+	conn, err := net.Dial("tcp", srv.Addr())
+	require.NoError(t, err)
+	defer conn.Close()
+	_, err = conn.Write([]byte{0x05, 0x01, 0x00})
+	require.NoError(t, err)
+	reply := make([]byte, 2)
+	_, err = io.ReadFull(conn, reply)
+	require.NoError(t, err)
+	_, err = conn.Write([]byte{0x05, 0x01, 0x00, 0x01, 1, 1, 1, 1, 0, 80})
+	require.NoError(t, err)
+	select {
+	case <-dialStarted:
+	case <-time.After(time.Second):
+		t.Fatal("dial was not started")
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- srv.Close() }()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not cancel blocked dial")
+	}
+}

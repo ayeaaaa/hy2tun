@@ -376,6 +376,10 @@ func (s *Server) persistConfig(next *config.ServerConfig) error {
 		save = config.SaveServer
 	}
 	if err := save(next.ConfigPath, next); err != nil {
+		if errors.Is(err, config.ErrCommitted) {
+			s.log.Warn("server config committed but directory sync failed", "error", err)
+			return nil
+		}
 		return err
 	}
 	return nil

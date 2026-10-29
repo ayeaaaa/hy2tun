@@ -56,11 +56,13 @@ const (
 // Server is one bound proxy listener. The TCP listener is created by the
 // constructor, so Addr is valid before Start.
 type Server struct {
-	ln    net.Listener
-	dial  DialFunc
-	log   *slog.Logger
-	auth  *credentials
-	serve func(net.Conn)
+	ln     net.Listener
+	dial   DialFunc
+	log    *slog.Logger
+	auth   *credentials
+	serve  func(net.Conn)
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	closed    atomic.Bool
 	closeOnce sync.Once
@@ -101,12 +103,15 @@ func newServer(listen string, dial DialFunc, log *slog.Logger, auth []string) (*
 	if err != nil {
 		return nil, fmt.Errorf("listen proxy on %s: %w", listen, err)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
-		ln:    ln,
-		dial:  dial,
-		log:   log,
-		auth:  creds,
-		conns: make(map[net.Conn]struct{}),
+		ln:     ln,
+		dial:   dial,
+		log:    log,
+		auth:   creds,
+		ctx:    ctx,
+		cancel: cancel,
+		conns:  make(map[net.Conn]struct{}),
 	}, nil
 }
 
@@ -169,6 +174,9 @@ func (s *Server) Close() error {
 	var closeErr error
 	s.closeOnce.Do(func() {
 		s.closed.Store(true)
+		if s.cancel != nil {
+			s.cancel()
+		}
 		closeErr = s.ln.Close()
 
 		s.mu.Lock()
@@ -217,7 +225,7 @@ func (s *Server) serveSOCKS5(conn net.Conn) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), proxyDialTimeout)
+	ctx, cancel := context.WithTimeout(s.ctx, proxyDialTimeout)
 	remote, err := s.dial(ctx, "tcp", target)
 	cancel()
 	if err != nil {

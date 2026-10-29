@@ -3,6 +3,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -217,6 +218,14 @@ func (p *ProxyConfig) ResolveLegacyProxy() {
 	}
 }
 
+// ErrCommitted reports that a config rename succeeded but the following
+// directory sync failed. The new file is visible on disk; callers must keep
+// the new runtime state instead of rolling back.
+var ErrCommitted = errors.New("config: change committed but directory sync failed")
+
+// syncDirFn is a test seam for the post-rename durability check.
+var syncDirFn = syncDir
+
 const (
 	defaultAutoRange      = "20000-29999"
 	defaultOfflineReserve = Duration(24 * 60 * 60 * 1_000_000_000) // 24h in nanoseconds
@@ -362,7 +371,10 @@ func writeFileAtomic(path string, data []byte) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return err
 	}
-	return syncDir(dir)
+	if err := syncDirFn(dir); err != nil {
+		return fmt.Errorf("%w: %v", ErrCommitted, err)
+	}
+	return nil
 }
 
 func syncDir(dir string) error {
@@ -391,7 +403,7 @@ func saveAtomic(path string, value any) error {
 	old, err := os.ReadFile(path)
 	switch {
 	case err == nil:
-		if err := writeFileAtomic(path+".bak", old); err != nil {
+		if err := writeFileAtomic(path+".bak", old); err != nil && !errors.Is(err, ErrCommitted) {
 			return fmt.Errorf("write backup %s: %w", path+".bak", err)
 		}
 	case os.IsNotExist(err):
