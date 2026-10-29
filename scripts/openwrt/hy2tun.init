@@ -1,17 +1,10 @@
 #!/bin/sh /etc/rc.common
 # OpenWrt procd service for the hy2tun client.
 #
-# Install from the extracted Linux archive root:
-#   opkg update && opkg install ca-bundle
-#   cp hy2tun /usr/bin/hy2tun
-#   chmod +x /usr/bin/hy2tun
-#   install -d -m 0755 /etc/hy2tun
-#   cp examples/client.yaml /etc/hy2tun/client.yaml
-#   chmod 600 /etc/hy2tun/client.yaml
-#   cp scripts/openwrt/hy2tun.init /etc/init.d/hy2tun
-#   chmod +x /etc/init.d/hy2tun
-#   /etc/init.d/hy2tun enable
-#   /etc/init.d/hy2tun start
+# Normal installation is through the hy2tun .ipk from the release:
+#   opkg install ./hy2tun_<version>_<arch>.ipk
+# The package installs this script and enables the service. Configure
+# /etc/hy2tun/client.yaml before starting it.
 #
 # The client rewrites /etc/hy2tun/client.yaml on startup, assigned-port
 # write-back, server push, and web edits. Do not watch that file with procd,

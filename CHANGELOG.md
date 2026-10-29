@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Added
+
+- OpenWrt `.ipk` packages for the client, including the procd init script and
+  example configuration.
+- `luci-app-hy2tun` package with a Services status page and client Web-console
+  link.
+- Release and CI packaging checks for OpenWrt packages.
+
 ## v1.4.0 - 2026-10-29
 
 ### Added

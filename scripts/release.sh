@@ -21,7 +21,7 @@ command -v "$GO" >/dev/null 2>&1 || {
 	echo "release: $GO not found" >&2
 	exit 1
 }
-for tool in tar sha256sum zip; do
+for tool in ar tar sha256sum zip; do
 	command -v "$tool" >/dev/null 2>&1 || {
 		echo "release: $tool is required" >&2
 		exit 1
@@ -67,6 +67,7 @@ package() {
 		(cd "$pkg" && zip -qr "$DIST/$name.zip" .)
 	else
 		tar -C "$pkg" -czf "$DIST/$name.tar.gz" .
+		"$ROOT/scripts/openwrt/build-ipk.sh" "$out/hy2tun-$os-$arch" "$arch" "$VERSION" "$DIST" >/dev/null
 	fi
 }
 
@@ -100,10 +101,12 @@ build linux mipsle GOMIPS=softfloat
 build linux mips GOMIPS=softfloat
 build windows amd64
 
+"$ROOT/scripts/openwrt/build-luci-ipk.sh" "$VERSION" "$DIST" >/dev/null
+
 # Checksum every archive, not the temporary build tree.
 cd "$DIST"
 : > SHA256SUMS
-for f in hy2tun_*.tar.gz hy2tun_*.zip; do
+for f in hy2tun_*.tar.gz hy2tun_*.zip *.ipk; do
 	if [ -f "$f" ]; then
 		sha256sum "$f" >> SHA256SUMS
 	fi

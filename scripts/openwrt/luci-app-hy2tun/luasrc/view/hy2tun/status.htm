@@ -1,0 +1,50 @@
+<%+header%>
+<h2 name="content">hy2tun</h2>
+<%
+local fs = require "nixio.fs"
+local sys = require "luci.sys"
+local active = (sys.call("/etc/init.d/hy2tun status") == 0)
+local configured = fs.access("/etc/hy2tun/client.yaml")
+%>
+<div class="cbi-section">
+	<h3>客户端状态</h3>
+	<p>
+		<strong>服务：</strong>
+		<% if active then %>
+			<span style="color:#2e7d32">运行中</span>
+		<% else %>
+			<span style="color:#b71c1c">未运行</span>
+		<% end %>
+	</p>
+	<p>
+		<strong>配置文件：</strong>
+		<code>/etc/hy2tun/client.yaml</code>
+		<% if not configured then %>
+			（尚未创建，请先编辑配置）
+		<% end %>
+	</p>
+	<p>
+		首次安装后编辑配置文件，或在 LuCI 的
+		<a href="<%=luci.dispatcher.build_url('admin/system/startup')%>">系统 → 启动项</a>
+		中启用服务。
+	</p>
+	<p>
+		<a id="hy2tun-console" class="cbi-button cbi-button-apply" href="#" target="_blank" rel="noopener">
+			打开客户端 Web 控制台
+		</a>
+	</p>
+	<script>
+		(function () {
+			var link = document.getElementById("hy2tun-console");
+			if (link) {
+				link.href = "http://" + window.location.hostname + ":7501/";
+			}
+		})();
+	</script>
+	<p class="cbi-section-descr">
+		Web 控制台默认监听 <code>0.0.0.0:7501</code>。若修改了
+		<code>web.listen</code>，请同步修改上面的端口。服务端 <code>hy2tund</code>
+		应部署在公网 Linux 主机上。
+	</p>
+</div>
+<%+footer%>

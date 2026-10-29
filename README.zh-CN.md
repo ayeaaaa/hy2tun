@@ -421,36 +421,45 @@ sudo systemctl enable --now hy2tun     # 在客户端执行
 sudo journalctl -u hy2tund -f
 ```
 
-**OpenWrt（procd）：**
+**OpenWrt（ipk + LuCI）：**
 
-在解压后的 Linux 归档根目录执行：
+从同一个 Release 下载两个包：
+
+- `hy2tun_<version>_<arch>.ipk` —— `arch` 按路由器 `uname -m` 选择
+  `mips`、`mipsle`、`arm`、`arm64` 或 `amd64`
+- `luci-app-hy2tun_<version>_all.ipk` —— LuCI 状态页和 Web 控制台入口
+
+在路由器上安装：
 
 ```bash
-opkg update && opkg install ca-bundle
-cp hy2tun /usr/bin/hy2tun
-chmod +x /usr/bin/hy2tun
-install -d -m 0755 /etc/hy2tun
-cp examples/client.yaml /etc/hy2tun/client.yaml
-chmod 600 /etc/hy2tun/client.yaml
-cp scripts/openwrt/hy2tun.init /etc/init.d/hy2tun
-chmod +x /etc/init.d/hy2tun
-/etc/init.d/hy2tun enable
-/etc/init.d/hy2tun start
+opkg update
+opkg install ./hy2tun_<version>_<arch>.ipk
+opkg install ./luci-app-hy2tun_<version>_all.ipk
 ```
 
-在外部编辑 `/etc/hy2tun/client.yaml` 后，用 `service hy2tun restart` 应用。
-不要让 procd 监视该文件：客户端在启动、回写分配端口、服务端推送和 Web 编辑
-时都会重写它，文件监视会导致每次写入都重启隧道。
+安装包会放入 `/usr/bin/hy2tun`、procd 启动脚本和
+`/etc/hy2tun/client.yaml.example`。postinst 会在缺少
+`/etc/hy2tun/client.yaml` 时复制示例配置并启用服务，但不会自动启动，直到
+你完成配置。
 
-MIPS 路由器使用 `linux/mipsle` 或 `linux/mips` 构建；ARM 路由器使用
-`linux/arm` 或 `linux/arm64`。MIPS 构建已经使用 `GOMIPS=softfloat`。如果不
-确定，在路由器上执行 `uname -m`。如果闪存空间紧张，只部署客户端二进制，
-或使用 extroot。
+编辑 `/etc/hy2tun/client.yaml`，填写服务端、凭据、control token 和映射，然后
+启动：
 
-> **OpenWrt 目前只支持客户端，而且需要手动安装。** 没有 `.ipk` 包或 LuCI
-> 应用；需要自行安装静态二进制和 procd 启动脚本。`hy2tund` 服务端面向普通
-> 公网 Linux 主机。OpenWrt 真机验证属于外部验收，不由 CI 执行；见下面的手动
-> 验收清单。
+```bash
+/etc/init.d/hy2tun start
+logread -f | grep hy2tun
+```
+
+打开 **LuCI → 服务 → hy2tun** 查看服务状态和客户端 Web 控制台入口。控制台默认
+端口是 `7501`。安装后可在 **系统 → 启动项** 中启用或停用服务。
+
+包元数据使用 `Architecture: all`，方便安装；但二进制本身区分架构，所以必须
+下载与路由器 CPU 匹配的 `.ipk`。MIPS 路由器使用 `mipsle` 或 `mips`（软浮点）；
+ARM 路由器使用 `arm` 或 `arm64`。
+
+仍然可以从 Linux 归档手动安装：复制 `hy2tun` 到 `/usr/bin`、init 脚本到
+`/etc/init.d`、示例配置到 `/etc/hy2tun/client.yaml`。这只是回退方式，不是正常
+安装路径。
 
 **Windows：** 任务计划程序和防火墙说明见
 [`scripts/windows/README.md`](scripts/windows/README.md)。

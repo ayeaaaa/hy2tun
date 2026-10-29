@@ -40,6 +40,9 @@ jobs:
       - name: Build
         run: make build
 
+      - name: Validate OpenWrt packages
+        run: ./scripts/openwrt/test-ipk.sh
+
   vulncheck:
     name: Vulnerability check
     runs-on: ubuntu-latest

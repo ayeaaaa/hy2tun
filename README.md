@@ -467,38 +467,48 @@ sudo systemctl enable --now hy2tun     # on the client
 sudo journalctl -u hy2tund -f
 ```
 
-**OpenWrt (procd):**
+**OpenWrt (ipk + LuCI):**
 
-Run these commands from the extracted Linux archive root:
+Download the two package files from the same Release:
+
+- `hy2tun_<version>_<arch>.ipk` — choose `mips`, `mipsle`, `arm`, `arm64`, or
+  `amd64` to match `uname -m` on the router
+- `luci-app-hy2tun_<version>_all.ipk` — LuCI status page and Web-console link
+
+Install them on the router:
 
 ```bash
-opkg update && opkg install ca-bundle
-cp hy2tun /usr/bin/hy2tun
-chmod +x /usr/bin/hy2tun
-install -d -m 0755 /etc/hy2tun
-cp examples/client.yaml /etc/hy2tun/client.yaml
-chmod 600 /etc/hy2tun/client.yaml
-cp scripts/openwrt/hy2tun.init /etc/init.d/hy2tun
-chmod +x /etc/init.d/hy2tun
-/etc/init.d/hy2tun enable
-/etc/init.d/hy2tun start
+opkg update
+opkg install ./hy2tun_<version>_<arch>.ipk
+opkg install ./luci-app-hy2tun_<version>_all.ipk
 ```
 
-After editing `/etc/hy2tun/client.yaml` externally, apply the change with
-`service hy2tun restart`. Do not watch that file with procd: the client
-rewrites it on startup, assigned-port write-back, server push, and web edits,
-so file watching would restart the tunnel on every write.
+The package installs `/usr/bin/hy2tun`, the procd init script, and
+`/etc/hy2tun/client.yaml.example`. The post-install script creates
+`/etc/hy2tun/client.yaml` when it is missing and enables the service; it does
+not start it until you configure it.
 
-For MIPS routers use the `linux/mipsle` or `linux/mips` build; for ARM
-routers use `linux/arm` or `linux/arm64`. The MIPS builds already use
-`GOMIPS=softfloat`. Check `uname -m` on the router if you are unsure. If flash
-space is tight, deploy only the client binary, or use extroot.
+Edit `/etc/hy2tun/client.yaml` with the server, credentials, control token,
+and mappings, then start the service:
 
-> **OpenWrt support is client-only and manual.** There is no `.ipk` package or
-> LuCI app; install the static binary and the procd init script yourself. The
-> `hy2tund` server is intended for a normal public Linux host. Real-hardware
-> OpenWrt validation is external acceptance and is not performed by CI; see the
-> manual acceptance checklist below.
+```bash
+/etc/init.d/hy2tun start
+logread -f | grep hy2tun
+```
+
+Open **LuCI → Services → hy2tun** for service status and a link to the client
+Web console. The console defaults to port `7501`. Use **System → Startup** to
+enable or disable the service after installation.
+
+The package metadata uses `Architecture: all` so it can be installed on any
+target; the binary itself is architecture-specific, so download the `.ipk`
+matching the router CPU. For MIPS routers use `mipsle` or `mips` (softfloat);
+for ARM use `arm` or `arm64`.
+
+Manual installation without the `.ipk` remains possible from the extracted
+Linux archive: copy `hy2tun` to `/usr/bin`, the init script to `/etc/init.d`,
+and the example config to `/etc/hy2tun/client.yaml`. This is the fallback, not
+the normal installation path.
 
 **Windows:** see [`scripts/windows/README.md`](scripts/windows/README.md) for
 Task Scheduler instructions and firewall notes.

@@ -35,4 +35,5 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.ipk
             dist/SHA256SUMS
