@@ -1619,6 +1619,11 @@ ephemeral ports.
 The repository intentionally does not use a Node/CDN build. Web templates,
 CSS, and JavaScript are embedded with `go:embed`.
 
+## Release notes
+
+Every GitHub Release includes both English and Chinese notes, generated from
+`CHANGELOG.md` and `CHANGELOG.zh-CN.md`.
+
 ## License
 
 MIT. See [`LICENSE`](LICENSE). Security reporting is described in

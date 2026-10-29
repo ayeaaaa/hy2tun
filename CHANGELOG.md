@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Added
+
+- Bilingual GitHub Release notes generated from `CHANGELOG.md` and
+  `CHANGELOG.zh-CN.md`; the release workflow fails if either language is
+  missing.
+
 ## v1.4.1 - 2026-10-29
 
 ### Added

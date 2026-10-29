@@ -20,7 +20,9 @@ make build
 ```
 
 For documentation changes, keep `README.md` and `README.zh-CN.md` in sync and
-check fenced code blocks.
+check fenced code blocks. Every release must have a matching section in both
+`CHANGELOG.md` and `CHANGELOG.zh-CN.md`; the release workflow refuses to publish
+if either language is missing.
 
 ## Commit style
 

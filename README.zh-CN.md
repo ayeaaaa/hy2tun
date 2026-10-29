@@ -1436,6 +1436,11 @@ go test ./internal/e2e -v     # 只运行验收测试
 仓库有意不使用 Node/CDN 构建。Web 模板、CSS 和 JavaScript 通过 `go:embed`
 嵌入。
 
+## Release 说明
+
+每个 GitHub Release 都包含英文和中文说明，由 `CHANGELOG.md` 和
+`CHANGELOG.zh-CN.md` 自动生成。
+
 ## 许可证
 
 MIT，见 [`LICENSE`](LICENSE)。安全报告方式见 [`SECURITY.md`](SECURITY.md)。
