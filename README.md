@@ -101,11 +101,27 @@ public user --TCP--> hy2tund --HY2/QUIC over UDP (BBR)--> hy2tun --TCP--> privat
 - Reverse UDP mappings use native HY2 datagrams, so real-time UDP is not
   converted into a reliable TCP stream.
 
-This improves the tunnel segment; it cannot repair loss on the public
-user-to-server path or the client-to-local-service path. UDP blocking/QoS,
-MTU limits, CPU cost, and QUIC retransmission still apply. On a clean,
-low-latency path a plain TCP tunnel may have less overhead; the advantage is
-largest when the server-client link has meaningful loss or high RTT.
+A TCP mapping has three independent legs:
+
+1. **Public user → `hy2tund`**: a normal TCP connection. Its loss,
+   retransmission, and congestion control are handled by the user's and
+   server's TCP stacks. If a packet is lost on this leg, it never reaches
+   `hy2tund`, so HY2 cannot retransmit or repair it.
+2. **`hy2tund` → `hy2tun`**: the HY2/QUIC-over-UDP tunnel. This is the leg
+   that Hysteria 2/BBR improves, especially under loss and high RTT.
+3. **`hy2tun` → private service**: another normal TCP connection. Its loss is
+   handled by the client and the private service, not by HY2.
+
+HY2 does not “repair TCP” end to end. It replaces the transport of leg 2. A
+lossy public access network, a bad user-to-server route, or a lossy local
+service link can still dominate the user's experience; server placement and
+the endpoint TCP stacks matter there. UDP mappings are best-effort on every
+leg: a datagram lost before `hy2tund` or after `hy2tun` is simply lost, and
+HY2's native datagrams do not retransmit it either.
+
+UDP blocking/QoS, MTU limits, CPU cost, and QUIC retransmission still apply. On
+a clean, low-latency path a plain TCP tunnel may have less overhead; the
+advantage is largest when leg 2 has meaningful loss or high RTT.
 
 ## What it does not do (v1)
 
