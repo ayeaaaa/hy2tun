@@ -306,6 +306,36 @@ func (s *Supervisor) CredentialsSnapshot() *credentials.Set {
 	return worker.CredentialsSnapshot()
 }
 
+// Servers returns the summary rows for the client web server list.
+func (s *Supervisor) Servers() []clientui.ServerSummary {
+	out := make([]clientui.ServerSummary, 0, len(s.order))
+	for _, name := range s.order {
+		worker := s.workers[name]
+		if worker == nil {
+			continue
+		}
+		status := worker.Status()
+		proxy := worker.ProxyState()
+		out = append(out, clientui.ServerSummary{
+			Name:         name,
+			Address:      status.Server,
+			Online:       status.Connected,
+			Mappings:     len(worker.Mappings()),
+			ProxyEnabled: proxy.Enabled,
+		})
+	}
+	return out
+}
+
+// Server returns one worker API by configured server name.
+func (s *Supervisor) Server(name string) (clientui.API, bool) {
+	worker, ok := s.workers[name]
+	if !ok {
+		return nil, false
+	}
+	return worker, true
+}
+
 // UpdateProxy atomically validates, binds, and persists a per-server proxy
 // configuration. Other servers and the web listener are checked first; if the
 // worker cannot bind or the config cannot be saved, the previous worker state

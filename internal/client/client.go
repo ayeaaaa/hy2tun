@@ -575,10 +575,17 @@ func (c *Client) Settings() clientui.SettingsView {
 		configFile = "—"
 	}
 
+	proxyState := c.ProxyState()
 	return clientui.SettingsView{
 		WebUsername:           cfg.Web.Username,
 		WebPasswordConfigured: cfg.Web.PasswordHash != "",
 		Name:                  cfg.Client.Name,
+		Proxy: clientui.ProxyView{
+			Enabled: proxyState.Enabled,
+			SOCKS5:  proxyState.SOCKS5,
+			HTTP:    proxyState.HTTP,
+			Error:   proxyState.Error,
+		},
 		Credentials: clientui.CredentialSettingsView{
 			Generation:                generation,
 			ServerGeneration:          serverGeneration,

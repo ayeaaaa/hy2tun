@@ -60,6 +60,47 @@ type fakeClientAPI struct {
 	lastLimit int
 }
 
+type fakeMultiAPI struct {
+	fakeClientAPI
+	servers map[string]*fakeClientAPI
+	order   []string
+}
+
+func (f *fakeMultiAPI) Servers() []ServerSummary {
+	out := make([]ServerSummary, 0, len(f.order))
+	for _, name := range f.order {
+		api := f.servers[name]
+		status := api.Status()
+		out = append(out, ServerSummary{
+			Name:         name,
+			Address:      status.Server,
+			Online:       status.Connected,
+			Mappings:     len(api.Mappings()),
+			ProxyEnabled: api.settings.Proxy.Enabled,
+		})
+	}
+	return out
+}
+
+func (f *fakeMultiAPI) Server(name string) (API, bool) {
+	api, ok := f.servers[name]
+	if !ok {
+		return nil, false
+	}
+	return api, true
+}
+
+func (f *fakeMultiAPI) UpdateProxy(name string, cfg config.ProxyConfig) error {
+	api, ok := f.servers[name]
+	if !ok {
+		return errors.New("server not found")
+	}
+	api.settings.Proxy.Enabled = cfg.Enabled
+	api.settings.Proxy.SOCKS5 = cfg.SOCKS5
+	api.settings.Proxy.HTTP = cfg.HTTP
+	return nil
+}
+
 func (f *fakeClientAPI) Status() view.ClientStatus {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -406,6 +447,59 @@ func TestClientWebStatusAndLogs(t *testing.T) {
 	mappings := readClientJSON[[]mappingResponse](t, resp)
 	require.Len(t, mappings, 3)
 	require.Equal(t, "m1", mappings[0].ID)
+}
+
+func TestClientServersPageAndSelection(t *testing.T) {
+	us := &fakeClientAPI{
+		status:   view.ClientStatus{Name: "us", Server: "us.example.com:443", Connected: true},
+		mappings: []view.MappingView{{Mapping: config.Mapping{ID: "us-m", Type: "tcp", RemotePort: 25022, LocalAddr: "127.0.0.1:22", Enabled: true}}},
+		settings: SettingsView{Name: "us"},
+	}
+	sg := &fakeClientAPI{
+		status:   view.ClientStatus{Name: "sg", Server: "sg.example.com:443", Connected: false},
+		settings: SettingsView{Name: "sg"},
+	}
+	multi := &fakeMultiAPI{
+		servers: map[string]*fakeClientAPI{"us": us, "sg": sg},
+		order:   []string{"us", "sg"},
+	}
+	_, ts := newTestClientWeb(t, multi)
+	cookie := loginClientWeb(t, ts)
+
+	resp := doClientRequest(t, ts.Client(), http.MethodGet, ts.URL+"/servers", "", cookie, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readClientBody(t, resp)
+	require.Contains(t, body, "us")
+	require.Contains(t, body, "sg")
+
+	resp = doClientRequest(t, ts.Client(), http.MethodGet, ts.URL+"/?server=us", "", cookie, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body = readClientBody(t, resp)
+	require.Contains(t, body, "us.example.com:443")
+	require.Contains(t, body, "us-m")
+
+	resp = doClientRequest(t, ts.Client(), http.MethodGet, ts.URL+"/?server=missing", "", cookie, nil)
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	resp.Body.Close()
+
+	resp = doClientRequest(t, ts.Client(), http.MethodGet, ts.URL+"/api/status?server=us", "", cookie, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Contains(t, readClientBody(t, resp), "us.example.com:443")
+
+	// No default server means the old unscoped API must not guess.
+	resp = doClientRequest(t, ts.Client(), http.MethodGet, ts.URL+"/api/status", "", cookie, nil)
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	resp.Body.Close()
+
+	body = `{"id":"new","type":"tcp","remote_port":25023,"local_addr":"127.0.0.1:23","enabled":true}`
+	resp = doClientRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/mappings?server=sg", body, cookie, map[string]string{
+		"X-Requested-With": "hy2tun",
+		"Origin":           ts.URL,
+	})
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	resp.Body.Close()
+	require.Len(t, sg.added, 1)
+	require.Empty(t, us.added)
 }
 
 func TestClientWebPageRendersStatusTabsAndSettings(t *testing.T) {

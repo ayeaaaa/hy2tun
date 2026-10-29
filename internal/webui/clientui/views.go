@@ -29,7 +29,25 @@ type SettingsView struct {
 	WebPasswordConfigured bool                   `json:"web_password_configured"`
 	Name                  string                 `json:"name"`
 	Credentials           CredentialSettingsView `json:"credentials"`
+	Proxy                 ProxyView              `json:"proxy"`
 	ReadOnly              []ReadOnlySetting      `json:"read_only"`
+}
+
+// ProxyView is the per-server local proxy state shown by the client console.
+type ProxyView struct {
+	Enabled bool   `json:"enabled"`
+	SOCKS5  string `json:"socks5"`
+	HTTP    string `json:"http"`
+	Error   string `json:"error,omitempty"`
+}
+
+// ServerSummary is one row in the client console server list.
+type ServerSummary struct {
+	Name         string `json:"name"`
+	Address      string `json:"address"`
+	Online       bool   `json:"online"`
+	Mappings     int    `json:"mappings"`
+	ProxyEnabled bool   `json:"proxy_enabled"`
 }
 
 // CredentialSettingsView describes the client's local credential generation
@@ -53,6 +71,11 @@ type pageBase struct {
 	Title    string
 	Username string
 	Version  string
+}
+
+type serversPage struct {
+	pageBase
+	Servers []ServerSummary
 }
 
 type indexPage struct {
@@ -110,6 +133,7 @@ func (s *Server) parseTemplates() error {
 		files []string
 	}{
 		{"index", []string{"templates/layout.html", "templates/index.html"}},
+		{"servers", []string{"templates/layout.html", "templates/servers.html"}},
 		{"login", []string{"templates/login.html"}},
 	}
 
@@ -166,8 +190,8 @@ func (s *Server) adminUsername() string {
 	return s.cfg.Username
 }
 
-func (s *Server) settingsFor() SettingsView {
-	settings := s.api.Settings()
+func (s *Server) settingsFor(api API) SettingsView {
+	settings := api.Settings()
 	// Defense in depth: the API is expected to mask already, but a template or
 	// JSON response must never carry a plaintext secret even if it does not.
 	settings.Credentials.CurrentAuthMasked = maskSecret(settings.Credentials.CurrentAuthMasked)

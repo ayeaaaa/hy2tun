@@ -1,0 +1,32 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1>服务端</h1>
+    <p class="page-sub">每个服务端独立连接、映射和代理</p>
+  </div>
+</div>
+<section class="panel">
+  <div class="panel-head"><h2>全部服务端</h2><span class="muted small">{{len .Servers}} 个</span></div>
+  {{if .Servers}}
+  <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>名称</th><th>地址</th><th>状态</th><th>映射</th><th>代理</th><th></th></tr></thead>
+      <tbody>
+      {{range .Servers}}
+      <tr>
+        <td><strong>{{.Name}}</strong></td>
+        <td class="mono">{{.Address}}</td>
+        <td><span class="badge {{if .Online}}badge-ok{{else}}badge-muted{{end}}">{{if .Online}}在线{{else}}离线{{end}}</span></td>
+        <td>{{.Mappings}}</td>
+        <td>{{if .ProxyEnabled}}<span class="badge badge-ok">已开启</span>{{else}}<span class="badge badge-muted">关闭</span>{{end}}</td>
+        <td><a class="btn btn-sm" href="/?server={{.Name}}">查看</a></td>
+      </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="empty-inline">还没有配置服务端。</div>
+  {{end}}
+</section>
+{{end}}

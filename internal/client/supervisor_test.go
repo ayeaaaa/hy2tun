@@ -119,3 +119,20 @@ func TestSupervisorStartStopsAllWorkersOnCancel(t *testing.T) {
 		t.Fatal("supervisor did not stop after context cancellation")
 	}
 }
+
+func TestSupervisorExposesServerSummaries(t *testing.T) {
+	cfg := multiClientConfigForTest()
+	cfg.ConfigPath = filepath.Join(t.TempDir(), "client.yaml")
+	sup, err := NewSupervisor(cfg, nil)
+	require.NoError(t, err)
+	defer sup.Close()
+
+	summaries := sup.Servers()
+	require.Len(t, summaries, 2)
+	require.Equal(t, "us", summaries[0].Name)
+	api, ok := sup.Server("sg")
+	require.True(t, ok)
+	require.NotNil(t, api)
+	_, ok = sup.Server("missing")
+	require.False(t, ok)
+}

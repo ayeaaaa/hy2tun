@@ -51,11 +51,20 @@ type API interface {
 // ClientAPI is an alias for API.
 type ClientAPI = API
 
+// MultiAPI is implemented by a supervisor that owns several independent
+// server workers.
+type MultiAPI interface {
+	Servers() []ServerSummary
+	Server(name string) (API, bool)
+	UpdateProxy(name string, proxy config.ProxyConfig) error
+}
+
 // Server is an authenticated HTTP server for the hy2tun client console.
 type Server struct {
-	api API
-	cfg config.WebConfig
-	log *slog.Logger
+	api   API
+	multi MultiAPI
+	cfg   config.WebConfig
+	log   *slog.Logger
 
 	sessions *shared.SessionManager
 	limiter  *shared.LoginLimiter
@@ -129,6 +138,9 @@ func New(api API, cfg config.WebConfig, sessionKey []byte, log *slog.Logger) (*S
 		staticFS:        staticFS,
 		eventInterval:   2 * time.Second,
 		done:            make(chan struct{}),
+	}
+	if multi, ok := api.(MultiAPI); ok {
+		s.multi = multi
 	}
 	s.login = &shared.LoginHandler{
 		Sessions:     sessions,
@@ -300,6 +312,8 @@ func (s *Server) newHandler() http.Handler {
 	mux.Handle("POST /api/logout", shared.RequireCSRF(http.HandlerFunc(s.handleLogout)))
 
 	mux.Handle("GET /{$}", s.auth(http.HandlerFunc(s.handlePage)))
+	mux.Handle("GET /servers", s.auth(http.HandlerFunc(s.handleServersPage)))
+	mux.Handle("GET /api/servers", s.auth(http.HandlerFunc(s.handleServersJSON)))
 	mux.Handle("GET /api/status", s.auth(http.HandlerFunc(s.handleStatusJSON)))
 	mux.Handle("GET /api/mappings", s.auth(http.HandlerFunc(s.handleMappingsJSON)))
 	mux.Handle("POST /api/mappings", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleAddMapping))))
@@ -371,12 +385,21 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
-	status := s.api.Status()
-	mappings := s.api.Mappings()
+	api, ok := s.apiFor(r)
+	if !ok {
+		if s.multi != nil && strings.TrimSpace(r.URL.Query().Get("server")) == "" {
+			http.Redirect(w, r, "/servers", http.StatusSeeOther)
+			return
+		}
+		http.Error(w, "server not found", http.StatusNotFound)
+		return
+	}
+	status := api.Status()
+	mappings := api.Mappings()
 	if mappings == nil {
 		mappings = []view.MappingView{}
 	}
-	logs := s.api.Logs("", 200)
+	logs := api.Logs("", 200)
 	if logs == nil {
 		logs = []view.LogEntry{}
 	}
@@ -385,21 +408,36 @@ func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
 		Status:         status,
 		Mappings:       mappings,
 		Logs:           logs,
-		Settings:       s.settingsFor(),
+		Settings:       s.settingsFor(api),
 		ActiveMappings: countActiveMappings(mappings),
 	})
 }
 
 func (s *Server) handleStatusJSON(w http.ResponseWriter, r *http.Request) {
-	mappings := s.api.Mappings()
-	writeJSON(w, http.StatusOK, statusResponseFrom(s.api.Status(), mappings))
+	api, ok := s.apiFor(r)
+	if !ok {
+		http.Error(w, "server not found", http.StatusNotFound)
+		return
+	}
+	mappings := api.Mappings()
+	writeJSON(w, http.StatusOK, statusResponseFrom(api.Status(), mappings))
 }
 
 func (s *Server) handleMappingsJSON(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, mappingResponses(s.api.Mappings()))
+	api, ok := s.apiFor(r)
+	if !ok {
+		http.Error(w, "server not found", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, mappingResponses(api.Mappings()))
 }
 
 func (s *Server) handleAddMapping(w http.ResponseWriter, r *http.Request) {
+	api, ok := s.apiFor(r)
+	if !ok {
+		http.Error(w, "server not found", http.StatusNotFound)
+		return
+	}
 	mapping, err := decodeMapping(w, r)
 	if err != nil {
 		writeJSONErrorCode(w, http.StatusBadRequest, "invalid_body", err.Error())
@@ -412,7 +450,7 @@ func (s *Server) handleAddMapping(w http.ResponseWriter, r *http.Request) {
 		writeJSONErrorCode(w, http.StatusBadRequest, "invalid_mapping", err.Error())
 		return
 	}
-	if err := s.api.AddMapping(mapping); err != nil {
+	if err := api.AddMapping(mapping); err != nil {
 		s.writeMappingError(w, err)
 		return
 	}
@@ -423,6 +461,11 @@ func (s *Server) handleAddMapping(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateMapping(w http.ResponseWriter, r *http.Request) {
+	api, ok := s.apiFor(r)
+	if !ok {
+		http.Error(w, "server not found", http.StatusNotFound)
+		return
+	}
 	id := r.PathValue("id")
 	if id == "" {
 		writeJSONErrorCode(w, http.StatusBadRequest, "invalid_mapping", "映射 ID 不能为空")
@@ -442,7 +485,7 @@ func (s *Server) handleUpdateMapping(w http.ResponseWriter, r *http.Request) {
 		writeJSONErrorCode(w, http.StatusBadRequest, "invalid_mapping", err.Error())
 		return
 	}
-	if err := s.api.UpdateMapping(mapping); err != nil {
+	if err := api.UpdateMapping(mapping); err != nil {
 		s.writeMappingError(w, err)
 		return
 	}
@@ -453,12 +496,17 @@ func (s *Server) handleUpdateMapping(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteMapping(w http.ResponseWriter, r *http.Request) {
+	api, ok := s.apiFor(r)
+	if !ok {
+		http.Error(w, "server not found", http.StatusNotFound)
+		return
+	}
 	id := r.PathValue("id")
 	if id == "" {
 		writeJSONErrorCode(w, http.StatusBadRequest, "invalid_mapping", "映射 ID 不能为空")
 		return
 	}
-	if err := s.api.DeleteMapping(id); err != nil {
+	if err := api.DeleteMapping(id); err != nil {
 		s.writeMappingError(w, err)
 		return
 	}
@@ -543,13 +591,23 @@ hy2tun_client_credential_synced %d
 }
 
 func (s *Server) handleSettingsJSON(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.settingsFor())
+	api, ok := s.apiFor(r)
+	if !ok {
+		http.Error(w, "server not found", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.settingsFor(api))
 }
 
 // passwordRequest accepts either "password" (the reveal API shape) or
 // "current_password" (the form-oriented mutations). Both are the current web
 // administrator password and are never logged.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	api, found := s.apiFor(r)
+	if !found {
+		http.Error(w, "server not found", http.StatusNotFound)
+		return
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSONErrorCode(w, http.StatusInternalServerError, "internal", "当前连接不支持流式响应")
@@ -565,7 +623,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 
 	send := func() bool {
-		data, err := json.Marshal(s.snapshot())
+		data, err := json.Marshal(s.snapshot(api))
 		if err != nil {
 			s.log.Error("encode client web event", "error", err)
 			return false
@@ -601,13 +659,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) snapshot() sseSnapshot {
-	mappings := s.api.Mappings()
+func (s *Server) snapshot(api API) sseSnapshot {
+	mappings := api.Mappings()
 	if mappings == nil {
 		mappings = []view.MappingView{}
 	}
 	return sseSnapshot{
-		Status:     statusResponseFrom(s.api.Status(), mappings),
+		Status:     statusResponseFrom(api.Status(), mappings),
 		Mappings:   mappingResponses(mappings),
 		ServerTime: time.Now(),
 	}

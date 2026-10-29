@@ -131,6 +131,11 @@ func (s *Server) handleUpdateWebSettings(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleUpdateName(w http.ResponseWriter, r *http.Request) {
+	api, ok := s.apiFor(r)
+	if !ok {
+		http.Error(w, "server not found", http.StatusNotFound)
+		return
+	}
 	var request struct {
 		passwordRequest
 		Name string `json:"name"`
@@ -146,14 +151,19 @@ func (s *Server) handleUpdateName(w http.ResponseWriter, r *http.Request) {
 		writeJSONErrorCode(w, http.StatusBadRequest, "name_required", "客户端名称不能为空")
 		return
 	}
-	if err := s.api.UpdateName(name); err != nil {
+	if err := api.UpdateName(name); err != nil {
 		s.writeSettingsMutationError(w, err, "invalid_name", "更新客户端名称失败")
 		return
 	}
-	writeJSON(w, http.StatusOK, s.settingsFor())
+	writeJSON(w, http.StatusOK, s.settingsFor(api))
 }
 
 func (s *Server) handleRotateCredentials(w http.ResponseWriter, r *http.Request) {
+	api, ok := s.apiFor(r)
+	if !ok {
+		http.Error(w, "server not found", http.StatusNotFound)
+		return
+	}
 	var request struct {
 		passwordRequest
 		Generation   int64  `json:"generation"`
@@ -182,7 +192,7 @@ func (s *Server) handleRotateCredentials(w http.ResponseWriter, r *http.Request)
 		writeJSONErrorCode(w, http.StatusBadRequest, "control_token_required", "control token 不能为空")
 		return
 	}
-	current := s.api.Settings().Credentials.Generation
+	current := api.Settings().Credentials.Generation
 	if current < 1 {
 		current = 1
 	}
@@ -191,7 +201,7 @@ func (s *Server) handleRotateCredentials(w http.ResponseWriter, r *http.Request)
 			fmt.Sprintf("新代际必须大于当前代际 %d", current))
 		return
 	}
-	if err := s.api.RotateLocalCredentials(request.Generation, request.Auth, request.ControlToken); err != nil {
+	if err := api.RotateLocalCredentials(request.Generation, request.Auth, request.ControlToken); err != nil {
 		s.writeSettingsMutationError(w, err, "invalid_credentials", err.Error())
 		return
 	}
@@ -215,6 +225,11 @@ type revealCredentialsResponse struct {
 }
 
 func (s *Server) handleRevealCredentials(w http.ResponseWriter, r *http.Request) {
+	api, ok := s.apiFor(r)
+	if !ok {
+		http.Error(w, "server not found", http.StatusNotFound)
+		return
+	}
 	var request passwordRequest
 	if !decodeSettingsBody(w, r, &request) {
 		return
@@ -222,7 +237,7 @@ func (s *Server) handleRevealCredentials(w http.ResponseWriter, r *http.Request)
 	if !s.confirmCurrentPassword(w, r, request.secret()) {
 		return
 	}
-	set := s.api.CredentialsSnapshot()
+	set := api.CredentialsSnapshot()
 	if set == nil {
 		writeJSONErrorCode(w, http.StatusInternalServerError, "internal", "凭据不可用")
 		return

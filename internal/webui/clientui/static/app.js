@@ -4,6 +4,19 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
 
+  function currentServer() {
+    return new URLSearchParams(window.location.search).get("server") || "";
+  }
+
+  function serverURL(path) {
+    const server = currentServer();
+    if (!server) {
+      return path;
+    }
+    const separator = path.includes("?") ? "&" : "?";
+    return `${path}${separator}server=${encodeURIComponent(server)}`;
+  }
+
   function fmtBytes(value) {
     let bytes = Number(value);
     if (!Number.isFinite(bytes) || bytes < 0) {
@@ -375,7 +388,7 @@
 
   async function refreshSettings() {
     try {
-      const response = await fetch("/api/settings", {
+      const response = await fetch(serverURL("/api/settings"), {
         headers: { Accept: "application/json" },
         credentials: "same-origin",
       });
@@ -409,7 +422,7 @@
     const tick = async () => {
       attempts += 1;
       try {
-        const response = await fetch("/api/status", {
+        const response = await fetch(serverURL("/api/status"), {
           headers: { Accept: "application/json" },
           credentials: "same-origin",
         });
@@ -453,7 +466,7 @@
       }
       return;
     }
-    const source = new EventSource("/api/events");
+    const source = new EventSource(serverURL("/api/events"));
     source.addEventListener("open", () => setLive("live"));
     source.addEventListener("error", () => {
       setLive("retry");
@@ -473,7 +486,7 @@
 
   async function fetchMappings() {
     try {
-      const response = await fetch("/api/mappings", {
+      const response = await fetch(serverURL("/api/mappings"), {
         headers: { Accept: "application/json" },
         credentials: "same-origin",
       });
@@ -683,7 +696,7 @@
         }
         revealButton.disabled = true;
         try {
-          const data = await settingsRequest("/api/settings/credentials/reveal", "POST", { password });
+          const data = await settingsRequest(serverURL("/api/settings/credentials/reveal"), "POST", { password });
           showSecrets(data);
           showToast("已显示凭据，30 秒后自动隐藏");
         } catch (error) {
@@ -759,7 +772,7 @@
         button.disabled = true;
       }
       try {
-        const settings = await settingsRequest("/api/settings/name", "PUT", {
+        const settings = await settingsRequest(serverURL("/api/settings/name"), "PUT", {
           name,
           current_password: currentPassword,
         });
@@ -817,7 +830,7 @@
         button.textContent = "保存中…";
       }
       try {
-        await settingsRequest("/api/settings/credentials", "PUT", {
+        await settingsRequest(serverURL("/api/settings/credentials"), "PUT", {
           generation,
           auth,
           control_token: token,
@@ -963,7 +976,7 @@
       save.disabled = true;
       save.textContent = "保存中…";
       try {
-        const response = await fetch(id ? `/api/mappings/${encodeURIComponent(id)}` : "/api/mappings", {
+        const response = await fetch(serverURL(id ? `/api/mappings/${encodeURIComponent(id)}` : "/api/mappings"), {
           method: id ? "PUT" : "POST",
           headers: {
             "Content-Type": "application/json",
@@ -1008,7 +1021,7 @@
       const button = document.getElementById("mapping-delete");
       button.disabled = true;
       try {
-        const response = await fetch(`/api/mappings/${encodeURIComponent(id)}`, {
+        const response = await fetch(serverURL(`/api/mappings/${encodeURIComponent(id)}`), {
           method: "DELETE",
           headers: { "X-Requested-With": "hy2tun" },
           credentials: "same-origin",
