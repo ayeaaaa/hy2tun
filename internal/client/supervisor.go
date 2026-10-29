@@ -382,7 +382,9 @@ func (s *Supervisor) UpdateProxy(name string, cfg config.ProxyConfig) error {
 	} else {
 		next.Proxy = cfg
 	}
+	worker.configMu.Lock()
 	oldCfg := worker.cfg.Proxy
+	worker.configMu.Unlock()
 	if err := next.Validate(); err != nil {
 		s.configMu.Unlock()
 		return err

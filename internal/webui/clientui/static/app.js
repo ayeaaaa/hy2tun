@@ -357,6 +357,17 @@
         input.value = settings.web_username;
       }
     }
+    const proxy = settings.proxy || {};
+    const proxyEnabled = document.getElementById("proxy-enabled");
+    if (proxyEnabled && document.activeElement !== proxyEnabled) {
+      proxyEnabled.checked = Boolean(proxy.enabled);
+    }
+    for (const [id, value] of [["proxy-socks5", proxy.socks5], ["proxy-http", proxy.http]]) {
+      const input = document.getElementById(id);
+      if (input && document.activeElement !== input) {
+        input.value = value || "";
+      }
+    }
   }
 
   async function settingsRequest(path, method, body) {
@@ -756,6 +767,32 @@
         }
       }
     });
+
+    const proxyForm = $("#settings-proxy-form");
+    if (proxyForm) {
+      proxyForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const button = $("button[type='submit']", proxyForm);
+        if (button) {
+          button.disabled = true;
+        }
+        try {
+          const settings = await settingsRequest(serverURL("/api/settings/proxy"), "PUT", {
+            enabled: $("#proxy-enabled").checked,
+            socks5: $("#proxy-socks5").value.trim(),
+            http: $("#proxy-http").value.trim(),
+          });
+          applySettings(settings);
+          showToast("代理设置已更新");
+        } catch (error) {
+          showToast(error.message, "bad");
+        } finally {
+          if (button) {
+            button.disabled = false;
+          }
+        }
+      });
+    }
 
     const nameForm = $("#settings-name-form");
     nameForm.addEventListener("submit", async (event) => {

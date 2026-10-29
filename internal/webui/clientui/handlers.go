@@ -327,6 +327,8 @@ func (s *Server) newHandler() http.Handler {
 
 	mux.Handle("GET /api/settings", s.auth(http.HandlerFunc(s.handleSettingsJSON)))
 	mux.Handle("PUT /api/settings/web", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateWebSettings))))
+	mux.Handle("PUT /api/settings/proxy", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateProxy))))
+	mux.Handle("PUT /api/servers/{name}/proxy", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateProxy))))
 	mux.Handle("PUT /api/settings/name", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateName))))
 	mux.Handle("PUT /api/settings/credentials", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleRotateCredentials))))
 	mux.Handle("POST /api/settings/credentials/reveal", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleRevealCredentials))))

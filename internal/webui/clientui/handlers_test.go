@@ -47,6 +47,7 @@ type fakeClientAPI struct {
 	addErr      error
 	updateErr   error
 	deleteErr   error
+	proxyErr    error
 	settingsErr error
 	nameErr     error
 	webErr      error
@@ -95,9 +96,10 @@ func (f *fakeMultiAPI) UpdateProxy(name string, cfg config.ProxyConfig) error {
 	if !ok {
 		return errors.New("server not found")
 	}
-	api.settings.Proxy.Enabled = cfg.Enabled
-	api.settings.Proxy.SOCKS5 = cfg.SOCKS5
-	api.settings.Proxy.HTTP = cfg.HTTP
+	if api.proxyErr != nil {
+		return api.proxyErr
+	}
+	api.settings.Proxy = ProxyView{Enabled: cfg.Enabled, SOCKS5: cfg.SOCKS5, HTTP: cfg.HTTP}
 	return nil
 }
 
@@ -166,6 +168,22 @@ func (f *fakeClientAPI) Logs(level string, limit int) []view.LogEntry {
 type fakeWebConfig struct {
 	Username     string
 	PasswordHash string
+}
+
+func (f *fakeClientAPI) Proxy() ProxyView {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.settings.Proxy
+}
+
+func (f *fakeClientAPI) UpdateProxy(cfg config.ProxyConfig) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.proxyErr != nil {
+		return f.proxyErr
+	}
+	f.settings.Proxy = ProxyView{Enabled: cfg.Enabled, SOCKS5: cfg.SOCKS5, HTTP: cfg.HTTP}
+	return nil
 }
 
 func (f *fakeClientAPI) Settings() SettingsView {
@@ -500,6 +518,57 @@ func TestClientServersPageAndSelection(t *testing.T) {
 	resp.Body.Close()
 	require.Len(t, sg.added, 1)
 	require.Empty(t, us.added)
+}
+
+func TestClientProxySettingsAPIAndCSRF(t *testing.T) {
+	api := &fakeClientAPI{
+		settings: SettingsView{Proxy: ProxyView{Enabled: false, SOCKS5: "127.0.0.1:1080"}},
+	}
+	_, ts := newTestClientWeb(t, api)
+	cookie := loginClientWeb(t, ts)
+
+	resp := doClientRequest(t, ts.Client(), http.MethodGet, ts.URL+"/api/settings", "", cookie, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Contains(t, readClientBody(t, resp), `"socks5":"127.0.0.1:1080"`)
+
+	body := `{"enabled":true,"socks5":"127.0.0.1:1081","http":"127.0.0.1:8081"}`
+	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/proxy", body, cookie, map[string]string{
+		"X-Requested-With": "hy2tun",
+		"Origin":           ts.URL,
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	resp.Body.Close()
+	require.True(t, api.settings.Proxy.Enabled)
+	require.Equal(t, "127.0.0.1:1081", api.settings.Proxy.SOCKS5)
+
+	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/proxy", body, cookie, nil)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	resp.Body.Close()
+}
+
+func TestClientProxySettingsPageHasControls(t *testing.T) {
+	api := &fakeClientAPI{settings: SettingsView{Proxy: ProxyView{SOCKS5: "127.0.0.1:1080"}}}
+	_, ts := newTestClientWeb(t, api)
+	cookie := loginClientWeb(t, ts)
+	resp := doClientRequest(t, ts.Client(), http.MethodGet, ts.URL+"/", "", cookie, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readClientBody(t, resp)
+	require.Contains(t, body, `id="settings-proxy-form"`)
+	require.Contains(t, body, `id="proxy-socks5"`)
+	require.Contains(t, body, `id="proxy-http"`)
+}
+
+func TestClientProxySettingsMapsConflict(t *testing.T) {
+	api := &fakeClientAPI{proxyErr: errors.New("proxy address conflict: 127.0.0.1:1080")}
+	_, ts := newTestClientWeb(t, api)
+	cookie := loginClientWeb(t, ts)
+	resp := doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/proxy",
+		`{"enabled":true,"socks5":"127.0.0.1:1080"}`, cookie, map[string]string{
+			"X-Requested-With": "hy2tun",
+			"Origin":           ts.URL,
+		})
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	require.Contains(t, readClientBody(t, resp), "proxy_conflict")
 }
 
 func TestClientWebPageRendersStatusTabsAndSettings(t *testing.T) {
@@ -1154,4 +1223,25 @@ func TestClientWebSettingsMasksPlaintextFromAPI(t *testing.T) {
 	require.NotContains(t, body, "plain-auth")
 	require.NotContains(t, body, "plain-token")
 	require.Contains(t, body, MaskedSecret)
+}
+
+func TestClientProxyServerScopedRoute(t *testing.T) {
+	us := &fakeClientAPI{settings: SettingsView{Name: "us"}}
+	sg := &fakeClientAPI{settings: SettingsView{Name: "sg"}}
+	multi := &fakeMultiAPI{
+		servers: map[string]*fakeClientAPI{"us": us, "sg": sg},
+		order:   []string{"us", "sg"},
+	}
+	_, ts := newTestClientWeb(t, multi)
+	cookie := loginClientWeb(t, ts)
+
+	resp := doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/servers/sg/proxy",
+		`{"enabled":true,"socks5":"127.0.0.1:1082"}`, cookie, map[string]string{
+			"X-Requested-With": "hy2tun",
+			"Origin":           ts.URL,
+		})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	resp.Body.Close()
+	require.True(t, sg.settings.Proxy.Enabled)
+	require.False(t, us.settings.Proxy.Enabled)
 }

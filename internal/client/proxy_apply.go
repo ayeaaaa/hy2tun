@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"hy2tun/internal/config"
+	"hy2tun/internal/webui/clientui"
 )
 
 // ProxyState is the current per-server proxy state exposed to the web console.
@@ -121,6 +122,39 @@ func validateProxyAddress(name, value string) error {
 	port, err := strconv.Atoi(portText)
 	if err != nil || port < 1 || port > 65535 {
 		return fmt.Errorf("proxy.%s port must be between 1 and 65535", name)
+	}
+	return nil
+}
+
+// Proxy returns the web-console proxy view for this worker.
+func (c *Client) Proxy() clientui.ProxyView {
+	state := c.ProxyState()
+	return clientui.ProxyView{
+		Enabled: state.Enabled,
+		SOCKS5:  state.SOCKS5,
+		HTTP:    state.HTTP,
+		Error:   state.Error,
+	}
+}
+
+// UpdateProxy applies and persists a proxy change for a standalone client. The
+// supervisor uses its own transactional update path for multi-server configs.
+func (c *Client) UpdateProxy(cfg config.ProxyConfig) error {
+	c.configMu.Lock()
+	old := c.cfg.Proxy
+	c.configMu.Unlock()
+	if err := c.ApplyProxy(cfg); err != nil {
+		return err
+	}
+	c.configMu.Lock()
+	next := cloneClientConfig(c.cfg)
+	next.Proxy = cfg
+	c.configMu.Unlock()
+	if err := c.writeConfig(next); err != nil {
+		if restoreErr := c.ApplyProxy(old); restoreErr != nil {
+			c.log.Warn("restore proxy after config save failure", "error", restoreErr)
+		}
+		return err
 	}
 	return nil
 }

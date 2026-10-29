@@ -1,10 +1,14 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strings"
 )
+
+// ErrProxyConflict reports a proxy listener address conflict.
+var ErrProxyConflict = errors.New("proxy address conflict")
 
 // ClientServerConfig is one independent remote server in a multi-server client
 // configuration. It mirrors the per-server fields of ClientConfig and never
@@ -253,7 +257,7 @@ func validateProxyConflicts(servers []ClientServerConfig, webListen string) erro
 				return fmt.Errorf("servers[%d].proxy.%s: %w", i, value.field, err)
 			}
 			if previous, exists := seen[key]; exists {
-				return fmt.Errorf("proxy address conflict: %s is used by %s and servers[%d]", key, previous, i)
+				return fmt.Errorf("%w: %s is used by %s and servers[%d]", ErrProxyConflict, key, previous, i)
 			}
 			seen[key] = fmt.Sprintf("servers[%d]", i)
 		}
@@ -266,7 +270,7 @@ func validateProxyConflicts(servers []ClientServerConfig, webListen string) erro
 		return fmt.Errorf("web.listen: %w", err)
 	}
 	if previous, exists := seen[key]; exists {
-		return fmt.Errorf("proxy address conflicts with web.listen: %s used by %s", key, previous)
+		return fmt.Errorf("%w: %s conflicts with web.listen used by %s", ErrProxyConflict, key, previous)
 	}
 	return nil
 }

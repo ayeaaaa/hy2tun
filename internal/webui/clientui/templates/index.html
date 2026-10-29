@@ -228,6 +228,34 @@
   </div>
 
   <div class="settings-section">
+    <div class="panel-head panel-head-sub">
+      <h2>本地代理</h2>
+      <span class="badge {{if .Settings.Proxy.Enabled}}badge-ok{{else}}badge-muted{{end}}">{{if .Settings.Proxy.Enabled}}已开启{{else}}默认关闭{{end}}</span>
+    </div>
+    <form id="settings-proxy-form" class="settings-form" autocomplete="off">
+      <label class="check">
+        <input type="checkbox" id="proxy-enabled" {{if .Settings.Proxy.Enabled}}checked{{end}}>
+        启用该服务端的本地 SOCKS5/HTTP 代理
+      </label>
+      <div class="grid-2">
+        <div class="field">
+          <label class="field-label" for="proxy-socks5">SOCKS5 监听地址</label>
+          <input class="input mono" id="proxy-socks5" type="text" value="{{.Settings.Proxy.SOCKS5}}" placeholder="127.0.0.1:1080">
+        </div>
+        <div class="field">
+          <label class="field-label" for="proxy-http">HTTP CONNECT 监听地址</label>
+          <input class="input mono" id="proxy-http" type="text" value="{{.Settings.Proxy.HTTP}}" placeholder="127.0.0.1:8080">
+        </div>
+      </div>
+      {{if .Settings.Proxy.Error}}<div class="alert alert-bad" role="alert">{{.Settings.Proxy.Error}}</div>{{end}}
+      <p class="field-hint">默认关闭；开启时至少填写一个地址。端口不能与 Web 控制台或其他服务端代理冲突。</p>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">保存代理设置</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="settings-section">
     <div class="panel-head panel-head-sub"><h2>客户端名称</h2></div>
     <form id="settings-name-form" class="settings-form" autocomplete="off">
       <div class="grid-2">
