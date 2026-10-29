@@ -114,20 +114,27 @@ func (s *Store) Upsert(client ClientState) {
 	s.dirty = true
 }
 
-// Delete removes a client and all of its mapping reservations. It reports
-// whether the client existed.
-func (s *Store) Delete(id string) bool {
+// DeleteAndSave removes a client and atomically persists the resulting state.
+// If persistence fails, the in-memory client is restored so a retry remains
+// possible and the caller does not observe a partially applied deletion.
+func (s *Store) DeleteAndSave(id string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if s.state.Clients == nil {
-		return false
+		return false, nil
 	}
-	if _, ok := s.state.Clients[id]; !ok {
-		return false
+	client, ok := s.state.Clients[id]
+	if !ok {
+		return false, nil
 	}
 	delete(s.state.Clients, id)
-	s.dirty = true
-	return true
+	if err := s.saveLocked(); err != nil {
+		s.state.Clients[id] = client
+		s.dirty = true
+		return false, err
+	}
+	return true, nil
 }
 
 // SetOfflineReserve replaces how long ports stay reserved for clients that go

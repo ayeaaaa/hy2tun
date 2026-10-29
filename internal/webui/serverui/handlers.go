@@ -139,7 +139,7 @@ func New(api API, cfg config.WebConfig, sessionKey []byte, log *slog.Logger) (*S
 		},
 		OnError: func(w http.ResponseWriter, r *http.Request, status int, message string) {
 			if wantsHTML(r) {
-				s.render(w, status, "login", loginPage{Username: s.sessions.AdminUsername(), Error: message})
+				s.render(w, status, "login", newLoginPage(s.sessions.AdminUsername(), message))
 				return
 			}
 			writeJSONErrorCode(w, status, "", message)
@@ -380,7 +380,7 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 
 func cacheStatic(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "public, max-age=3600")
+		w.Header().Set("Cache-Control", "no-cache")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -397,7 +397,7 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	case "invalid":
 		message = "用户名或密码错误。"
 	}
-	s.render(w, http.StatusOK, "login", loginPage{Username: s.sessions.AdminUsername(), Error: message})
+	s.render(w, http.StatusOK, "login", newLoginPage(s.sessions.AdminUsername(), message))
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {

@@ -2,7 +2,7 @@
 <div class="page-head">
   <div>
     <h1>设置</h1>
-    <p class="page-sub">热更新配置：保存后立即生效，无需重启。修改 Web 管理员密码、显示/轮换/撤销 HY2 凭据时需要当前 Web 密码确认。</p>
+    <p class="page-sub">热更新配置：保存后立即生效，无需重启。修改 Web 管理员密码、代理信任、显示/轮换/撤销 HY2 凭据时需要当前 Web 密码确认。</p>
   </div>
   <div class="page-head-meta"><span class="pill pill-ok">可在线编辑</span></div>
 </div>
@@ -44,6 +44,10 @@
         信任反向代理的 X-Forwarded-For / X-Real-IP
       </label>
       <p class="field-hint">仅当反向代理会覆盖这些请求头时启用；否则客户端可以伪造来源 IP，绕过登录和显示凭据的限速。</p>
+      <div class="field">
+        <label class="field-label" for="proxy-current-password">当前密码</label>
+        <input class="input" id="proxy-current-password" type="password" autocomplete="current-password" required>
+      </div>
       <div class="form-actions">
         <button type="submit" class="btn btn-primary">保存代理信任</button>
       </div>

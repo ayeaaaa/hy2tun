@@ -203,9 +203,35 @@ func TestDeleteRemovesClientAndReservation(t *testing.T) {
 		ReservedUntil: time.Now().Add(time.Hour),
 	})
 	require.True(t, s.Reserved("gone", 2222, time.Now()))
-	require.True(t, s.Delete("gone"))
+	deleted, err := s.DeleteAndSave("gone")
+	require.NoError(t, err)
+	require.True(t, deleted)
 	_, ok := s.Snapshot().Clients["gone"]
 	require.False(t, ok)
 	require.False(t, s.Reserved("gone", 2222, time.Now()))
-	require.False(t, s.Delete("gone"))
+	deleted, err = s.DeleteAndSave("gone")
+	require.NoError(t, err)
+	require.False(t, deleted)
+}
+
+func TestDeleteAndSaveFailureRestoresClient(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing", "state.json")
+	s, err := Open(path, time.Hour)
+	require.NoError(t, err)
+	defer s.Close()
+
+	s.Upsert(ClientState{ID: "gone", Name: "old", Mappings: []config.Mapping{{ID: "m1", Type: "tcp", RemotePort: 2222}}})
+	deleted, err := s.DeleteAndSave("gone")
+	require.Error(t, err)
+	require.False(t, deleted)
+	_, ok := s.Snapshot().Clients["gone"]
+	require.True(t, ok)
+
+	// Once the directory is writable, a retry can complete.
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0700))
+	deleted, err = s.DeleteAndSave("gone")
+	require.NoError(t, err)
+	require.True(t, deleted)
+	_, ok = s.Snapshot().Clients["gone"]
+	require.False(t, ok)
 }

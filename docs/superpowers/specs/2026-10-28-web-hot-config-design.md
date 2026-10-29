@@ -429,7 +429,7 @@ API：
 | POST | `/api/settings/credentials/reveal` | 回显 current/previous 密码/token |
 | POST | `/api/settings/credentials/revoke` | 撤销 previous |
 
-所有写操作要求 `X-Requested-With: hy2tun` + 同源 Origin + 当前 Web 密码确认（敏感操作）。
+所有写操作要求 `X-Requested-With: hy2tun` + 同源 Origin。Web 管理员、trust-proxy 和 HY2 凭据操作还要求当前 Web 密码确认；端口策略修改不需要重复密码。
 
 ### 8.2 客户端 Web
 
@@ -491,7 +491,7 @@ credentials:
 
 ## 10. 安全
 
-- 所有敏感写操作要求当前 Web 密码确认；失败限速。
+- Web 管理员、trust-proxy 和 HY2 凭据等敏感写操作要求当前 Web 密码确认；失败限速。端口策略修改只要求会话和 CSRF。
 - 回显接口不缓存、不写日志、不出现在 URL。
 - 密码/token 只存于 0600 配置文件和内存；`.bak` 同样 0600。
 - 撤销旧凭据后，旧密码/token 不能建立新连接；主动关闭旧代际控制会话。

@@ -133,6 +133,11 @@ type ReadOnlySetting struct {
 type loginPage struct {
 	Username string
 	Error    string
+	Version  string
+}
+
+func newLoginPage(username, message string) loginPage {
+	return loginPage{Username: username, Error: message, Version: version.Version}
 }
 
 type clientDetailData struct {

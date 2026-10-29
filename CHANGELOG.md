@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Security
+
+- Restore current-password confirmation for trust-proxy changes after review
+  found that passwordless changes could bypass IP-keyed rate limiting. Port
+  policy changes remain passwordless.
+- Serve embedded static assets with `Cache-Control: no-cache` so an upgraded
+  browser cannot run stale JavaScript against new settings forms.
+- Make offline-client deletion transactional: a failed state save restores the
+  in-memory client instead of leaving a partially applied deletion.
+
 ## v1.3.2 - 2026-10-28
 
 ### Changed

@@ -391,14 +391,17 @@ func (m *mappingManager) deleteClient(clientID string) error {
 		m.mu.Unlock()
 		return control.ErrClientOnline
 	}
-	if m.store == nil || !m.store.Delete(clientID) {
+	if m.store == nil {
 		m.mu.Unlock()
 		return control.ErrClientNotFound
 	}
+	deleted, err := m.store.DeleteAndSave(clientID)
 	m.mu.Unlock()
-
-	if err := m.store.Save(); err != nil {
+	if err != nil {
 		return fmt.Errorf("persist client deletion: %w", err)
+	}
+	if !deleted {
+		return control.ErrClientNotFound
 	}
 	return nil
 }

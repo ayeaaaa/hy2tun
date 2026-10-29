@@ -16,6 +16,7 @@ func (s *Server) handleDeleteClient(w http.ResponseWriter, r *http.Request) {
 	err := s.api.DeleteClient(id)
 	switch {
 	case err == nil:
+		s.log.Info("client deleted", "client", id)
 		w.WriteHeader(http.StatusNoContent)
 	case errors.Is(err, control.ErrClientOnline):
 		writeJSONErrorCode(w, http.StatusConflict, "client_online", "在线客户端不能删除，请先断开连接")

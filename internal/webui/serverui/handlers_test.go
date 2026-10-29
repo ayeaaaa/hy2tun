@@ -953,6 +953,14 @@ func TestSetTrustProxyUpdatesLoginHandler(t *testing.T) {
 	require.False(t, web.login.TrustProxy)
 }
 
+func TestServerStaticAssetsAreRevalidated(t *testing.T) {
+	_, ts := newTestWeb(t, &fakeServerAPI{})
+	resp := doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/static/app.js", "", nil, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Contains(t, resp.Header.Get("Cache-Control"), "no-cache")
+	resp.Body.Close()
+}
+
 func TestServerWebStaticAndLoginPage(t *testing.T) {
 	_, ts := newTestWeb(t, &fakeServerAPI{})
 
@@ -976,6 +984,7 @@ func TestServerWebStaticAndLoginPage(t *testing.T) {
 	require.Equal(t, "DENY", resp.Header.Get("X-Frame-Options"))
 	require.Contains(t, resp.Header.Get("Content-Security-Policy"), "default-src 'self'")
 	body := readBody(t, resp)
+	require.Contains(t, body, "/static/app.css?v=")
 	require.Contains(t, body, `action="/api/login"`)
 	require.Contains(t, body, "登录管理控制台")
 
@@ -1461,7 +1470,17 @@ func TestServerSettingsWebUpdateRevokesSession(t *testing.T) {
 	require.Equal(t, 1, api.updateWebCalls)
 }
 
-func TestServerSettingsPageOmitsPasswordForRoutineSettings(t *testing.T) {
+func TestServerSettingsTrustProxyStillRequiresPassword(t *testing.T) {
+	_, ts := newTestWeb(t, &fakeServerAPI{})
+	cookie := login(t, ts)
+
+	resp := doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/proxy",
+		`{"trust_proxy":true}`, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	resp.Body.Close()
+}
+
+func TestServerSettingsPagePasswordFields(t *testing.T) {
 	_, ts := newTestWeb(t, &fakeServerAPI{})
 	cookie := login(t, ts)
 
@@ -1470,7 +1489,7 @@ func TestServerSettingsPageOmitsPasswordForRoutineSettings(t *testing.T) {
 	body := readBody(t, resp)
 	require.Contains(t, body, `id="web-current-password"`)
 	require.Contains(t, body, `id="credentials-current-password"`)
-	require.NotContains(t, body, `id="proxy-current-password"`)
+	require.Contains(t, body, `id="proxy-current-password"`)
 	require.NotContains(t, body, `id="ports-current-password"`)
 }
 
@@ -1506,7 +1525,7 @@ func TestServerSettingsPortsAndTrustProxy(t *testing.T) {
 	// the live login limiter.
 	require.False(t, web.login.TrustProxy)
 	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/proxy",
-		`{"trust_proxy":true}`, cookie, csrfHeaders(ts.URL))
+		`{"current_password":"pw","trust_proxy":true}`, cookie, csrfHeaders(ts.URL))
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	resp.Body.Close()
 	require.Equal(t, 1, api.setTrustProxyCalls)
@@ -1514,7 +1533,7 @@ func TestServerSettingsPortsAndTrustProxy(t *testing.T) {
 	require.True(t, web.login.TrustProxy)
 
 	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/proxy",
-		`{"trust_proxy":false}`, cookie, map[string]string{
+		`{"current_password":"pw","trust_proxy":false}`, cookie, map[string]string{
 			"Content-Type":     "application/json",
 			"X-Requested-With": "hy2tun",
 		})

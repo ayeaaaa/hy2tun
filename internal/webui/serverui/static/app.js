@@ -1007,10 +1007,13 @@
     const proxyForm = $("#settings-proxy-form");
     proxyForm.addEventListener("submit", async (event) => {
       event.preventDefault();
+      const passwordInput = $("#proxy-current-password");
       try {
         await settingsRequest("/api/settings/proxy", "PUT", {
+          current_password: passwordInput.value,
           trust_proxy: $("#trust-proxy").checked,
         });
+        passwordInput.value = "";
         showToast("代理信任设置已更新");
       } catch (error) {
         showToast(error.message, "bad");

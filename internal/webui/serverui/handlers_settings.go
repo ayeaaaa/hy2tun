@@ -149,9 +149,13 @@ func (s *Server) handleUpdatePorts(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpdateTrustProxy(w http.ResponseWriter, r *http.Request) {
 	var request struct {
+		passwordRequest
 		TrustProxy bool `json:"trust_proxy"`
 	}
 	if !decodeSettingsBody(w, r, &request) {
+		return
+	}
+	if !s.confirmCurrentPassword(w, r, request.secret()) {
 		return
 	}
 	if err := s.api.SetTrustProxy(request.TrustProxy); err != nil {
