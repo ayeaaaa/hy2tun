@@ -517,10 +517,11 @@ servers:
 | `web.username`、`web.password_hash` | 控制台登录。哈希为空时生成密码。 |
 | `web.trust_proxy` | 登录限流是否信任 `X-Forwarded-For`/`X-Real-IP`。仅当代理会用直连客户端地址覆盖这两个头时启用。默认 `false`。 |
 | `web.tls.cert`、`web.tls.key` | 客户端控制台可选 HTTPS。 |
-| `proxy.socks5` | 可选的本地 SOCKS5 监听地址，例如 `127.0.0.1:1080`。 |
-| `proxy.socks5_auth` | 可选的 SOCKS5 `user:password`。 |
-| `proxy.http` | 可选的本地 HTTP CONNECT 监听地址。 |
-| `proxy.http_auth` | 可选的 HTTP CONNECT `user:password`。 |
+| `proxy.enabled` | 每个服务端的代理开关，默认 `false`；也可以在客户端控制台修改。 |
+| `proxy.socks5` | 可选的本地 SOCKS5 监听地址，例如 `127.0.0.1:1080`；可在客户端控制台修改。 |
+| `proxy.socks5_auth` | 可选的 SOCKS5 `user:password`；只能改文件。 |
+| `proxy.http` | 可选的本地 HTTP CONNECT 监听地址；可在客户端控制台修改。 |
+| `proxy.http_auth` | 可选的 HTTP CONNECT `user:password`；只能改文件。 |
 | `log.level`、`log.file` | 日志配置。 |
 
 `credentials.generation` 是状态标签，不是认证因素；不要递减。服务端的
@@ -640,7 +641,8 @@ openssl x509 -in cert.pem -outform der | sha256sum
 | `credentials.generation` | 由服务端推送或手动同步管理。 |
 | `server`、`transport.*`、`tls.*`、`obfs.*`、`bandwidth.*`、`client.id` | 不可以。修改文件并重启。 |
 | `web.listen`、`web.trust_proxy`、`web.tls.*` | 不可以。修改文件并重启。 |
-| `proxy.*`、`log.*` | 不可以。修改文件并重启。 |
+| `proxy.enabled`、`proxy.socks5`、`proxy.http` | 可以，在客户端控制台按服务端修改；监听地址不能冲突。 |
+| `proxy.socks5_auth`、`proxy.http_auth`、`log.*` | 不可以。修改文件并重启。 |
 
 客户端 `web.trust_proxy` 在当前版本只能通过文件配置；只有服务端控制台可以在
 运行时切换 trust-proxy。

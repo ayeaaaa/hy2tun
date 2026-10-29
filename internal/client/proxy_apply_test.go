@@ -102,3 +102,22 @@ func TestWorkerPersistReceivesEditedConfig(t *testing.T) {
 	require.NotNil(t, got)
 	require.Equal(t, "renamed", got.Client.Name)
 }
+
+func TestApplyProxyPreservesUnchangedListener(t *testing.T) {
+	cfg := validTestClientConfig()
+	cl, err := New(cfg, nil)
+	require.NoError(t, err)
+	defer cl.Close()
+
+	socks := freeTCPAddress(t)
+	httpAddr := freeTCPAddress(t)
+	require.NoError(t, cl.ApplyProxy(config.ProxyConfig{Enabled: true, SOCKS5: socks}))
+	cl.proxyMu.Lock()
+	original := cl.proxies[0]
+	cl.proxyMu.Unlock()
+
+	require.NoError(t, cl.ApplyProxy(config.ProxyConfig{Enabled: true, SOCKS5: socks, HTTP: httpAddr}))
+	cl.proxyMu.Lock()
+	defer cl.proxyMu.Unlock()
+	require.Same(t, original, cl.proxies[0])
+}

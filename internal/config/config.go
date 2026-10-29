@@ -164,6 +164,57 @@ type ProxyConfig struct {
 	SOCKS5Auth string `yaml:"socks5_auth,omitempty" json:"-"`
 	HTTP       string `yaml:"http" json:"http"`
 	HTTPAuth   string `yaml:"http_auth,omitempty" json:"-"`
+
+	// enabledSet records whether the YAML explicitly contained `enabled`.
+	// It distinguishes a legacy config with addresses but no enabled field
+	// (historically enabled) from an explicit `enabled: false`.
+	enabledSet bool
+}
+
+// UnmarshalYAML preserves whether enabled was explicitly present.
+func (p *ProxyConfig) UnmarshalYAML(value *yaml.Node) error {
+	var raw struct {
+		Enabled    *bool  `yaml:"enabled"`
+		SOCKS5     string `yaml:"socks5"`
+		SOCKS5Auth string `yaml:"socks5_auth"`
+		HTTP       string `yaml:"http"`
+		HTTPAuth   string `yaml:"http_auth"`
+	}
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	p.Enabled = raw.Enabled != nil && *raw.Enabled
+	p.enabledSet = raw.Enabled != nil
+	p.SOCKS5 = raw.SOCKS5
+	p.SOCKS5Auth = raw.SOCKS5Auth
+	p.HTTP = raw.HTTP
+	p.HTTPAuth = raw.HTTPAuth
+	return nil
+}
+
+// MarshalYAML emits enabled only when it was explicit or true. This keeps the
+// legacy YAML shape unchanged for ordinary single-server configs.
+func (p ProxyConfig) MarshalYAML() (any, error) {
+	var enabled *bool
+	if p.Enabled || p.enabledSet {
+		value := p.Enabled
+		enabled = &value
+	}
+	return struct {
+		Enabled    *bool  `yaml:"enabled,omitempty"`
+		SOCKS5     string `yaml:"socks5"`
+		SOCKS5Auth string `yaml:"socks5_auth,omitempty"`
+		HTTP       string `yaml:"http"`
+		HTTPAuth   string `yaml:"http_auth,omitempty"`
+	}{enabled, p.SOCKS5, p.SOCKS5Auth, p.HTTP, p.HTTPAuth}, nil
+}
+
+// ResolveLegacyProxy enables a legacy top-level proxy when it has addresses
+// and the YAML did not explicitly disable it.
+func (p *ProxyConfig) ResolveLegacyProxy() {
+	if !p.enabledSet && (p.SOCKS5 != "" || p.HTTP != "") {
+		p.Enabled = true
+	}
 }
 
 const (

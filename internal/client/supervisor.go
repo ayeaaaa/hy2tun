@@ -24,10 +24,11 @@ type Supervisor struct {
 	logs *logBuffer
 	web  *clientui.Server
 
-	configMu sync.Mutex
-	proxyMu  sync.Mutex
-	workers  map[string]*Client
-	order    []string
+	configMu      sync.Mutex
+	configVersion uint64
+	proxyMu       sync.Mutex
+	workers       map[string]*Client
+	order         []string
 
 	started   atomic.Bool
 	closed    chan struct{}
@@ -103,9 +104,6 @@ func NewSupervisor(cfg *config.ClientConfig, log *slog.Logger) (*Supervisor, err
 		worker.SetPersist(func(next *config.ClientConfig) error {
 			return sup.persistWorker(name, next)
 		})
-		if err := worker.ApplyProxy(server.Proxy); err != nil {
-			log.Warn("server proxy unavailable at startup", "server", name, "error", err)
-		}
 		sup.workers[name] = worker
 		sup.order = append(sup.order, name)
 	}
@@ -140,6 +138,7 @@ func (s *Supervisor) Start(ctx context.Context) error {
 			return fmt.Errorf("start client web console: %w", err)
 		}
 	}
+	s.applyStartupProxies()
 
 	var wg sync.WaitGroup
 	for _, name := range s.order {
@@ -160,6 +159,8 @@ func (s *Supervisor) Start(ctx context.Context) error {
 func (s *Supervisor) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.closed)
+		s.proxyMu.Lock()
+		defer s.proxyMu.Unlock()
 		s.closeWorkers()
 		if s.web != nil {
 			if err := s.web.Close(); err != nil {
@@ -168,6 +169,23 @@ func (s *Supervisor) Close() error {
 		}
 	})
 	return s.closeErr
+}
+
+// applyStartupProxies binds per-server listeners after the web listener has
+// claimed its address. A bind failure disables only that server's proxy.
+func (s *Supervisor) applyStartupProxies() {
+	s.configMu.Lock()
+	servers := s.cfg.ServerConfigs()
+	s.configMu.Unlock()
+	for _, server := range servers {
+		worker := s.workers[server.Name]
+		if worker == nil {
+			continue
+		}
+		if err := worker.ApplyProxy(server.Proxy); err != nil {
+			s.log.Warn("server proxy unavailable at startup", "server", server.Name, "error", err)
+		}
+	}
 }
 
 func (s *Supervisor) closeWorkers() {
@@ -183,11 +201,15 @@ func (s *Supervisor) WebAddr() string {
 	if s.web != nil {
 		return s.web.Addr()
 	}
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
 	return s.cfg.Web.Listen
 }
 
 // ConfigPath returns the shared client config path.
 func (s *Supervisor) ConfigPath() string {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
 	return s.cfg.ConfigPath
 }
 
@@ -198,7 +220,10 @@ func (s *Supervisor) defaultWorker() *Client {
 	if worker := s.workers["default"]; worker != nil {
 		return worker
 	}
-	if len(s.order) > 0 {
+	s.configMu.Lock()
+	multi := s.cfg.IsMulti()
+	s.configMu.Unlock()
+	if !multi && len(s.order) == 1 {
 		return s.workers[s.order[0]]
 	}
 	return nil
@@ -256,8 +281,10 @@ func (s *Supervisor) Settings() clientui.SettingsView {
 		return clientui.SettingsView{}
 	}
 	settings := worker.Settings()
+	s.configMu.Lock()
 	settings.WebUsername = s.cfg.Web.Username
 	settings.WebPasswordConfigured = s.cfg.Web.PasswordHash != ""
+	s.configMu.Unlock()
 	return settings
 }
 
@@ -275,6 +302,7 @@ func (s *Supervisor) UpdateWebConfig(username, passwordHash string) error {
 		return err
 	}
 	s.cfg = next
+	s.configVersion++
 	s.configMu.Unlock()
 	for _, worker := range s.workers {
 		worker.setWebConfig(next.Web)
@@ -343,6 +371,11 @@ func (s *Supervisor) Server(name string) (clientui.API, bool) {
 func (s *Supervisor) UpdateProxy(name string, cfg config.ProxyConfig) error {
 	s.proxyMu.Lock()
 	defer s.proxyMu.Unlock()
+	select {
+	case <-s.closed:
+		return fmt.Errorf("client is closed")
+	default:
+	}
 
 	worker := s.workers[name]
 	if worker == nil {
@@ -365,13 +398,15 @@ func (s *Supervisor) UpdateProxy(name string, cfg config.ProxyConfig) error {
 
 	s.configMu.Lock()
 	next := cloneSupervisorConfig(s.cfg)
+	var oldCfg config.ProxyConfig
 	if next.IsMulti() {
 		found := false
 		for i := range next.Servers {
 			if next.Servers[i].Name != name {
 				continue
 			}
-			next.Servers[i].Proxy = cfg
+			oldCfg = next.Servers[i].Proxy
+			next.Servers[i].Proxy = mergeProxyAuth(cfg, oldCfg)
 			found = true
 			break
 		}
@@ -380,30 +415,85 @@ func (s *Supervisor) UpdateProxy(name string, cfg config.ProxyConfig) error {
 			return fmt.Errorf("server %q not found", name)
 		}
 	} else {
-		next.Proxy = cfg
+		oldCfg = next.Proxy
+		next.Proxy = mergeProxyAuth(cfg, oldCfg)
 	}
-	worker.configMu.Lock()
-	oldCfg := worker.cfg.Proxy
-	worker.configMu.Unlock()
+	version := s.configVersion
 	if err := next.Validate(); err != nil {
+		s.configMu.Unlock()
+		return err
+	}
+	// Save the candidate before touching listeners. A save failure therefore
+	// leaves every existing listener and connection intact.
+	if err := config.SaveClient(next.ConfigPath, next); err != nil {
 		s.configMu.Unlock()
 		return err
 	}
 	s.configMu.Unlock()
 
-	if err := worker.ApplyProxy(cfg); err != nil {
-		return err
-	}
-	if err := config.SaveClient(next.ConfigPath, next); err != nil {
-		if restoreErr := worker.ApplyProxy(oldCfg); restoreErr != nil {
-			s.log.Warn("restore proxy after config save failure", "server", name, "error", restoreErr)
+	applyCfg := cfg
+	if next.IsMulti() {
+		for _, server := range next.Servers {
+			if server.Name == name {
+				applyCfg = server.Proxy
+				break
+			}
 		}
+	} else {
+		applyCfg = next.Proxy
+	}
+	if err := worker.ApplyProxy(applyCfg); err != nil {
+		s.configMu.Lock()
+		if s.configVersion == version {
+			if restoreErr := config.SaveClient(s.cfg.ConfigPath, s.cfg); restoreErr != nil {
+				s.log.Warn("restore proxy config after bind failure", "server", name, "error", restoreErr)
+			}
+		}
+		s.configMu.Unlock()
 		return err
 	}
+
 	s.configMu.Lock()
+	if s.configVersion != version {
+		// A mapping/name/credential edit landed while the listener was being
+		// bound. Merge the proxy into the latest config instead of overwriting
+		// the committed edit with the stale snapshot.
+		next = cloneSupervisorConfig(s.cfg)
+		if next.IsMulti() {
+			for i := range next.Servers {
+				if next.Servers[i].Name == name {
+					next.Servers[i].Proxy = applyCfg
+					break
+				}
+			}
+		} else {
+			next.Proxy = applyCfg
+		}
+		if err := next.Validate(); err != nil {
+			s.configMu.Unlock()
+			if restoreErr := worker.ApplyProxy(oldCfg); restoreErr != nil {
+				s.log.Warn("restore proxy after config validation failure", "server", name, "error", restoreErr)
+			}
+			return err
+		}
+		if err := config.SaveClient(next.ConfigPath, next); err != nil {
+			s.configMu.Unlock()
+			if restoreErr := worker.ApplyProxy(oldCfg); restoreErr != nil {
+				s.log.Warn("restore proxy after config save failure", "server", name, "error", restoreErr)
+			}
+			return err
+		}
+	}
 	s.cfg = next
+	s.configVersion++
 	s.configMu.Unlock()
 	return nil
+}
+
+func mergeProxyAuth(next, old config.ProxyConfig) config.ProxyConfig {
+	next.SOCKS5Auth = old.SOCKS5Auth
+	next.HTTPAuth = old.HTTPAuth
+	return next
 }
 
 // persistWorker merges a worker edit into the shared multi-server config. The
@@ -437,7 +527,14 @@ func (s *Supervisor) persistWorker(name string, workerCfg *config.ClientConfig) 
 		next.Client = workerCfg.Client
 		next.Credentials = workerCfg.Credentials
 		next.Mappings = append([]config.Mapping(nil), workerCfg.Mappings...)
-		next.Proxy = workerCfg.Proxy
+		if !s.cfg.Proxy.Enabled && sameProxyAddresses(s.cfg.Proxy, workerCfg.Proxy) {
+			// Preserve the legacy shape: a config with addresses and no
+			// explicit enabled field stays disabled on disk even though the
+			// runtime snapshot infers the historical enabled behavior.
+			next.Proxy = s.cfg.Proxy
+		} else {
+			next.Proxy = workerCfg.Proxy
+		}
 	}
 	if err := next.Validate(); err != nil {
 		return err
@@ -446,7 +543,13 @@ func (s *Supervisor) persistWorker(name string, workerCfg *config.ClientConfig) 
 		return err
 	}
 	s.cfg = next
+	s.configVersion++
 	return nil
+}
+
+func sameProxyAddresses(a, b config.ProxyConfig) bool {
+	return a.SOCKS5 == b.SOCKS5 && a.HTTP == b.HTTP &&
+		a.SOCKS5Auth == b.SOCKS5Auth && a.HTTPAuth == b.HTTPAuth
 }
 
 func serverFromWorker(name string, workerCfg *config.ClientConfig) config.ClientServerConfig {

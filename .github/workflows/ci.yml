@@ -29,6 +29,11 @@ jobs:
       - name: Race detector
         run: go test -race ./... -count=1
 
+      - name: Check JavaScript syntax
+        run: |
+          node --check internal/webui/clientui/static/app.js
+          node --check internal/webui/serverui/static/app.js
+
       - name: Vet
         run: go vet ./...
 

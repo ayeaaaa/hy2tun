@@ -101,8 +101,26 @@ func TestSupervisorStartupProxyBindFailureDoesNotFailWorker(t *testing.T) {
 	sup, err := NewSupervisor(cfg, nil)
 	require.NoError(t, err)
 	defer sup.Close()
+	sup.applyStartupProxies()
 
 	require.NotNil(t, sup.workers["us"])
 	require.NotEmpty(t, sup.workers["us"].ProxyState().Error)
 	require.False(t, sup.workers["us"].ProxyState().Enabled)
+}
+
+func TestSupervisorUpdateProxyPreservesAuth(t *testing.T) {
+	cfg := multiClientConfigForTest()
+	cfg.ConfigPath = filepath.Join(t.TempDir(), "client.yaml")
+	cfg.Servers[0].Proxy = config.ProxyConfig{
+		Enabled: false, SOCKS5: "127.0.0.1:1080", SOCKS5Auth: "user:secret",
+		HTTPAuth: "http:secret",
+	}
+	sup, err := NewSupervisor(cfg, nil)
+	require.NoError(t, err)
+	defer sup.Close()
+
+	addr := freeTCPAddress(t)
+	require.NoError(t, sup.UpdateProxy("us", config.ProxyConfig{Enabled: true, SOCKS5: addr}))
+	require.Equal(t, "user:secret", sup.cfg.Servers[0].Proxy.SOCKS5Auth)
+	require.Equal(t, "http:secret", sup.cfg.Servers[0].Proxy.HTTPAuth)
 }

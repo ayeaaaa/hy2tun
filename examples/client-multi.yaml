@@ -10,9 +10,9 @@
 web:
   listen: "0.0.0.0:7501"
   username: "admin"
-  # Generate a bcrypt hash with the client's first startup or replace this
-  # placeholder with a real hash before enabling the web console.
-  password_hash: "$2a$10$replace-with-a-bcrypt-hash"
+  # Empty means the client generates a bcrypt hash on first startup and
+  # prints the plaintext password once.
+  password_hash: ""
 
 log:
   level: "info"

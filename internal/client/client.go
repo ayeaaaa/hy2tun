@@ -140,6 +140,9 @@ func newClient(cfg *config.ClientConfig, log *slog.Logger, skipProxyBind bool) (
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
+	if !cfg.IsMulti() {
+		cfg.Proxy.ResolveLegacyProxy()
+	}
 	if cfg.Client.ID == "" {
 		id, err := newClientID()
 		if err != nil {
@@ -541,7 +544,7 @@ func (c *Client) Logs(level string, limit int) []view.LogEntry {
 // available through the authenticated reveal endpoint.
 func (c *Client) Settings() clientui.SettingsView {
 	c.configMu.Lock()
-	cfg := c.cfg
+	cfg := cloneClientConfig(c.cfg)
 	configPath := c.configPath
 	c.configMu.Unlock()
 

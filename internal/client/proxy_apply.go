@@ -1,11 +1,13 @@
 package client
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strconv"
 
 	"hy2tun/internal/config"
+	"hy2tun/internal/proxy"
 	"hy2tun/internal/webui/clientui"
 )
 
@@ -23,6 +25,9 @@ type ProxyState struct {
 // deliberate trade-off: a proxy address change briefly interrupts active proxy
 // connections instead of risking two listeners on one address.
 func (c *Client) ApplyProxy(cfg config.ProxyConfig) error {
+	if c.isClosed() {
+		return fmt.Errorf("client is closed")
+	}
 	if cfg.Enabled {
 		if cfg.SOCKS5 == "" && cfg.HTTP == "" {
 			return fmt.Errorf("proxy.enabled requires socks5 or http")
@@ -43,14 +48,14 @@ func (c *Client) ApplyProxy(cfg config.ProxyConfig) error {
 	c.proxyMu.Lock()
 	defer c.proxyMu.Unlock()
 
-	c.configMu.Lock()
-	oldCfg := c.cfg.Proxy
-	c.configMu.Unlock()
+	oldByAddr := make(map[string]*proxy.Server, len(c.proxies))
+	for _, srv := range c.proxies {
+		oldByAddr[srv.Addr()] = srv
+	}
 
-	hadProxies := len(c.proxies) > 0
-	c.closeProxiesLocked()
-	c.proxies = nil
 	if !cfg.Enabled {
+		c.closeProxiesLocked()
+		c.proxies = nil
 		c.configMu.Lock()
 		c.cfg.Proxy = cfg
 		c.configMu.Unlock()
@@ -58,42 +63,97 @@ func (c *Client) ApplyProxy(cfg config.ProxyConfig) error {
 		return nil
 	}
 
-	proxies, err := c.bindProxiesLocked(cfg)
-	if err != nil {
-		// Best effort: restore the previous listener set so a failed hot update
-		// does not disable a working proxy.
-		if hadProxies {
-			restored, restoreErr := c.bindProxiesLocked(oldCfg)
-			if restoreErr != nil {
-				c.proxyErr = fmt.Sprintf("%v; restore failed: %v", err, restoreErr)
-			} else {
-				c.proxies = restored
-				c.proxyErr = err.Error()
-				if c.started.Load() {
-					c.startProxiesLocked()
-				}
-			}
-		} else {
-			// A startup bind failure leaves this server's proxy disabled but
-			// retains the requested addresses for the web console to display.
-			c.configMu.Lock()
-			c.cfg.Proxy = cfg
-			c.cfg.Proxy.Enabled = false
-			c.configMu.Unlock()
-			c.proxyErr = err.Error()
+	desired := []struct {
+		kind string
+		addr string
+	}{{"socks5", cfg.SOCKS5}, {"http", cfg.HTTP}}
+	newProxies := make([]*proxy.Server, 0, 2)
+	added := make([]*proxy.Server, 0, 2)
+	for _, item := range desired {
+		if item.addr == "" {
+			continue
 		}
-		return err
+		if srv := oldByAddr[item.addr]; srv != nil {
+			newProxies = append(newProxies, srv)
+			continue
+		}
+		srv, err := c.bindOneProxy(item.kind, item.addr, cfg)
+		if err != nil {
+			for _, addedSrv := range added {
+				_ = addedSrv.Close()
+			}
+			if len(c.proxies) == 0 {
+				c.configMu.Lock()
+				c.cfg.Proxy = cfg
+				c.cfg.Proxy.Enabled = false
+				c.configMu.Unlock()
+			}
+			c.proxyErr = err.Error()
+			return err
+		}
+		newProxies = append(newProxies, srv)
+		added = append(added, srv)
 	}
 
-	c.proxies = proxies
+	newSet := make(map[string]struct{}, len(newProxies))
+	for _, srv := range newProxies {
+		newSet[srv.Addr()] = struct{}{}
+	}
+	for _, old := range c.proxies {
+		if _, keep := newSet[old.Addr()]; !keep {
+			if err := old.Close(); err != nil {
+				c.log.Warn("close removed local proxy", "addr", old.Addr(), "error", err)
+			}
+		}
+	}
+	c.proxies = newProxies
 	c.configMu.Lock()
 	c.cfg.Proxy = cfg
 	c.configMu.Unlock()
 	c.proxyErr = ""
 	if c.started.Load() {
-		c.startProxiesLocked()
+		c.startProxyListLocked(added)
 	}
 	return nil
+}
+
+func (c *Client) bindOneProxy(kind, listen string, cfg config.ProxyConfig) (*proxy.Server, error) {
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if network != "tcp" {
+			return nil, fmt.Errorf("proxy supports TCP only, got %q", network)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return c.TCP(addr)
+	}
+	switch kind {
+	case "socks5":
+		srv, err := proxy.NewSOCKS5(listen, dial, c.log, cfg.SOCKS5Auth)
+		if err != nil {
+			return nil, fmt.Errorf("create SOCKS5 proxy on %s: %w", listen, err)
+		}
+		return srv, nil
+	case "http":
+		srv, err := proxy.NewHTTP(listen, dial, c.log, cfg.HTTPAuth)
+		if err != nil {
+			return nil, fmt.Errorf("create HTTP proxy on %s: %w", listen, err)
+		}
+		return srv, nil
+	default:
+		return nil, fmt.Errorf("unknown proxy kind %q", kind)
+	}
+}
+
+func (c *Client) startProxyListLocked(proxies []*proxy.Server) {
+	for _, srv := range proxies {
+		c.log.Info("local proxy listening", "addr", srv.Addr())
+		go func(srv *proxy.Server) {
+			if err := srv.Start(); err != nil {
+				c.log.Warn("local proxy stopped", "addr", srv.Addr(), "error", err)
+			}
+		}(srv)
+	}
 }
 
 // ProxyState returns a snapshot of the current proxy configuration and the
@@ -144,6 +204,7 @@ func (c *Client) UpdateProxy(cfg config.ProxyConfig) error {
 	c.configMu.Lock()
 	old := c.cfg.Proxy
 	c.configMu.Unlock()
+	cfg = mergeProxyAuth(cfg, old)
 	if err := c.ApplyProxy(cfg); err != nil {
 		return err
 	}

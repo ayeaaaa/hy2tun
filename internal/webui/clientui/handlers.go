@@ -401,7 +401,7 @@ func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
 	if mappings == nil {
 		mappings = []view.MappingView{}
 	}
-	logs := api.Logs("", 200)
+	logs := s.api.Logs("", 200)
 	if logs == nil {
 		logs = []view.LogEntry{}
 	}

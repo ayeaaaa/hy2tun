@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -118,7 +120,9 @@ func TestClientLegacyConfigConvertsToDefaultServer(t *testing.T) {
 	cfg.Proxy = ProxyConfig{SOCKS5: "127.0.0.1:1080"}
 	require.False(t, cfg.IsMulti())
 	require.NoError(t, cfg.Validate())
-	require.True(t, cfg.Proxy.Enabled)
+	// Legacy inference happens when building the runtime snapshot, not in the
+	// on-disk config itself.
+	require.False(t, cfg.Proxy.Enabled)
 
 	servers := cfg.ServerConfigs()
 	require.Len(t, servers, 1)
@@ -161,4 +165,66 @@ func TestProxyListenKeyNormalizesHostCase(t *testing.T) {
 	second, err := proxyListenKey("localhost:1080")
 	require.NoError(t, err)
 	require.Equal(t, first, second)
+}
+
+func TestClientMultiDisabledProxyStaysDisabledAfterValidate(t *testing.T) {
+	cfg := multiServerTestConfig()
+	cfg.Servers[0].Proxy = ProxyConfig{Enabled: false, SOCKS5: "127.0.0.1:1080"}
+	require.NoError(t, cfg.Validate())
+	require.False(t, cfg.ServerConfigs()[0].Proxy.Active())
+	worker := cfg.ServerConfigs()[0].ToClientConfig(cfg.Web, cfg.Log, "")
+	require.NoError(t, worker.Validate())
+	require.False(t, worker.ProxyEnabled())
+}
+
+func TestClientLegacyExplicitProxyFalseStaysDisabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "client.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+server: "127.0.0.1:443"
+auth: "pw"
+control:
+  token: "0123456789abcdef0123456789abcdef"
+client:
+  id: "c1"
+  name: "home"
+proxy:
+  enabled: false
+  socks5: "127.0.0.1:1080"
+`), 0600))
+	cfg, err := LoadClient(path)
+	require.NoError(t, err)
+	require.False(t, cfg.ServerConfigs()[0].Proxy.Active())
+}
+
+func TestExplicitDisabledProxySurvivesSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "client.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+server: "127.0.0.1:443"
+auth: "pw"
+control:
+  token: "0123456789abcdef0123456789abcdef"
+client:
+  id: "c1"
+  name: "home"
+proxy:
+  enabled: false
+  socks5: "127.0.0.1:1080"
+`), 0600))
+	cfg, err := LoadClient(path)
+	require.NoError(t, err)
+	require.NoError(t, SaveClient(path, cfg))
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Contains(t, string(data), "enabled: false")
+}
+
+func TestLegacyProxyConflictsAreRejected(t *testing.T) {
+	cfg := validClientConfig()
+	cfg.Proxy = ProxyConfig{SOCKS5: "127.0.0.1:1080", HTTP: "127.0.0.1:1080"}
+	require.ErrorContains(t, cfg.Validate(), "same address")
+
+	cfg = validClientConfig()
+	cfg.Web.Listen = "127.0.0.1:7501"
+	cfg.Proxy = ProxyConfig{SOCKS5: "127.0.0.1:7501"}
+	require.ErrorContains(t, cfg.Validate(), "web.listen")
 }

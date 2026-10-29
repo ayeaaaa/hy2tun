@@ -559,10 +559,11 @@ Rules:
 | `web.username`, `web.password_hash` | Console login. Empty hash generates a password. |
 | `web.trust_proxy` | Trust `X-Forwarded-For`/`X-Real-IP` for login rate limiting. Enable only behind a proxy that overwrites both headers with the direct client address. Default `false`. |
 | `web.tls.cert`, `web.tls.key` | Optional HTTPS for the client console. |
-| `proxy.socks5` | Optional local SOCKS5 listen address, for example `127.0.0.1:1080`. |
-| `proxy.socks5_auth` | Optional `user:password` for SOCKS5. |
-| `proxy.http` | Optional local HTTP CONNECT listen address. |
-| `proxy.http_auth` | Optional `user:password` for HTTP CONNECT. |
+| `proxy.enabled` | Per-server proxy switch, default `false`. Can also be changed from the client console. |
+| `proxy.socks5` | Optional local SOCKS5 listen address, for example `127.0.0.1:1080`. Editable from the client console. |
+| `proxy.socks5_auth` | Optional `user:password` for SOCKS5. File-only. |
+| `proxy.http` | Optional local HTTP CONNECT listen address. Editable from the client console. |
+| `proxy.http_auth` | Optional `user:password` for HTTP CONNECT. File-only. |
 | `log.level`, `log.file` | Logging configuration. |
 
 `credentials.generation` is a status label, not an authentication factor; do
@@ -693,7 +694,8 @@ minute per client IP. All mutations require the CSRF header and same-origin
 | `credentials.generation` | Managed by server push or manual sync. |
 | `server`, `transport.*`, `tls.*`, `obfs.*`, `bandwidth.*`, `client.id` | No. Edit the file and restart. |
 | `web.listen`, `web.trust_proxy`, `web.tls.*` | No. Edit the file and restart. |
-| `proxy.*`, `log.*` | No. Edit the file and restart. |
+| `proxy.enabled`, `proxy.socks5`, `proxy.http` | Yes, per server from the client console; addresses must not conflict. |
+| `proxy.socks5_auth`, `proxy.http_auth`, `log.*` | No. Edit the file and restart. |
 
 The client `web.trust_proxy` setting is file-only in this release; only the
 server console can toggle trust-proxy at runtime.

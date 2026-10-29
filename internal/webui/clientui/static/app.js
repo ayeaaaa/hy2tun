@@ -4,12 +4,12 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
 
-  function currentServer() {
+  function selectedServer() {
     return new URLSearchParams(window.location.search).get("server") || "";
   }
 
   function serverURL(path) {
-    const server = currentServer();
+    const server = selectedServer();
     if (!server) {
       return path;
     }

@@ -63,7 +63,9 @@ func (s *Server) handleUpdateProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		switch {
-		case errors.Is(err, config.ErrProxyConflict) || strings.Contains(err.Error(), "conflict"):
+		case errors.Is(err, config.ErrProxyConflict) ||
+			strings.Contains(err.Error(), "conflict") ||
+			strings.Contains(err.Error(), "address already in use"):
 			writeJSONErrorCode(w, http.StatusConflict, "proxy_conflict", err.Error())
 		case strings.Contains(err.Error(), "proxy."):
 			writeJSONErrorCode(w, http.StatusBadRequest, "invalid_proxy", err.Error())

@@ -136,3 +136,14 @@ func TestSupervisorExposesServerSummaries(t *testing.T) {
 	_, ok = sup.Server("missing")
 	require.False(t, ok)
 }
+
+func TestSupervisorDoesNotGuessServerWithoutDefault(t *testing.T) {
+	cfg := multiClientConfigForTest()
+	cfg.ConfigPath = filepath.Join(t.TempDir(), "client.yaml")
+	sup, err := NewSupervisor(cfg, nil)
+	require.NoError(t, err)
+	defer sup.Close()
+
+	require.Empty(t, sup.Status().Name)
+	require.Error(t, sup.UpdateName("wrong-server"))
+}

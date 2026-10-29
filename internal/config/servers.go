@@ -47,9 +47,7 @@ func (c *ClientConfig) ServerConfigs() []ClientServerConfig {
 		return out
 	}
 	proxy := c.Proxy
-	if proxy.SOCKS5 != "" || proxy.HTTP != "" {
-		proxy.Enabled = true
-	}
+	proxy.ResolveLegacyProxy()
 	return []ClientServerConfig{{
 		Name:        "default",
 		Server:      c.Server,
@@ -210,6 +208,9 @@ func hasHopInterval(transport *ClientTransportConfig) bool {
 }
 
 func validateProxyConfig(field string, proxy ProxyConfig) error {
+	if proxy.SOCKS5 != "" && proxy.SOCKS5 == proxy.HTTP {
+		return fmt.Errorf("%s.socks5 and %s.http must not use the same address", field, field)
+	}
 	if proxy.SOCKS5 != "" {
 		if err := validateProxyListen(field+".socks5", proxy.SOCKS5); err != nil {
 			return err

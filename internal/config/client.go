@@ -157,10 +157,12 @@ func (c *ClientConfig) validateSingleServer() error {
 	if err := validateLogLevel(c.Log.Level); err != nil {
 		return err
 	}
-	if c.Proxy.SOCKS5 != "" || c.Proxy.HTTP != "" {
-		c.Proxy.Enabled = true
-	}
 	if err := validateProxyConfig("proxy", c.Proxy); err != nil {
+		return err
+	}
+	resolved := c.Proxy
+	resolved.ResolveLegacyProxy()
+	if err := validateProxyConflicts([]ClientServerConfig{{Name: "default", Proxy: resolved}}, c.Web.Listen); err != nil {
 		return err
 	}
 	return nil
