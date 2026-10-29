@@ -31,6 +31,7 @@ const DefaultClientWebListen = "0.0.0.0:7501"
 // ClientConfig is the hy2tun configuration.
 type ClientConfig struct {
 	Server    string                 `yaml:"server" json:"server"`
+	Servers   []ClientServerConfig   `yaml:"servers,omitempty" json:"servers,omitempty"`
 	Auth      string                 `yaml:"auth" json:"-"`
 	TLS       ClientTLSConfig        `yaml:"tls" json:"tls"`
 	Obfs      ObfsConfig             `yaml:"obfs" json:"obfs"`
@@ -75,7 +76,7 @@ func (c *ClientConfig) WebEnabled() bool {
 // ProxyEnabled reports whether at least one local proxy listener is configured.
 // Proxy listeners are opt-in, so an empty proxy section leaves both disabled.
 func (c *ClientConfig) ProxyEnabled() bool {
-	return c != nil && (c.Proxy.SOCKS5 != "" || c.Proxy.HTTP != "")
+	return c != nil && c.Proxy.Active()
 }
 
 // LoadClient reads, parses, and validates a client config file.
@@ -114,7 +115,13 @@ func SaveClient(path string, cfg *ClientConfig) error {
 func (c *ClientConfig) Validate() error {
 	c.applyDefaults()
 	c.ensureMappingIDs()
+	if c.IsMulti() {
+		return c.validateMultiServer()
+	}
+	return c.validateSingleServer()
+}
 
+func (c *ClientConfig) validateSingleServer() error {
 	_, _, hopping, err := parseClientServer(c.Server)
 	if err != nil {
 		return err
@@ -150,20 +157,10 @@ func (c *ClientConfig) Validate() error {
 	if err := validateLogLevel(c.Log.Level); err != nil {
 		return err
 	}
-	if c.Proxy.SOCKS5 != "" {
-		if err := validateHostPort("proxy.socks5", c.Proxy.SOCKS5, false, false); err != nil {
-			return err
-		}
+	if c.Proxy.SOCKS5 != "" || c.Proxy.HTTP != "" {
+		c.Proxy.Enabled = true
 	}
-	if err := validateProxyAuth("proxy.socks5_auth", c.Proxy.SOCKS5Auth); err != nil {
-		return err
-	}
-	if c.Proxy.HTTP != "" {
-		if err := validateHostPort("proxy.http", c.Proxy.HTTP, false, false); err != nil {
-			return err
-		}
-	}
-	if err := validateProxyAuth("proxy.http_auth", c.Proxy.HTTPAuth); err != nil {
+	if err := validateProxyConfig("proxy", c.Proxy); err != nil {
 		return err
 	}
 	return nil
@@ -260,7 +257,7 @@ func (c *ClientConfig) HopInterval() (time.Duration, time.Duration, error) {
 }
 
 func (c *ClientConfig) applyDefaults() {
-	if c.Credentials.Generation == 0 {
+	if !c.IsMulti() && c.Credentials.Generation == 0 {
 		c.Credentials.Generation = 1
 	}
 	if c.Log.Level == "" {
@@ -269,12 +266,22 @@ func (c *ClientConfig) applyDefaults() {
 	if c.Web.Listen != "" && c.Web.Username == "" {
 		c.Web.Username = "admin"
 	}
+	for i := range c.Servers {
+		c.Servers[i].applyDefaults()
+	}
 }
 
 func (c *ClientConfig) ensureMappingIDs() {
 	for i := range c.Mappings {
 		if c.Mappings[i].ID == "" {
 			c.Mappings[i].ID = newMappingID()
+		}
+	}
+	for i := range c.Servers {
+		for j := range c.Servers[i].Mappings {
+			if c.Servers[i].Mappings[j].ID == "" {
+				c.Servers[i].Mappings[j].ID = newMappingID()
+			}
 		}
 	}
 }

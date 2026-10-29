@@ -47,14 +47,17 @@ func CheckClient(cfg *ClientConfig) error {
 	if cfg == nil {
 		return fmt.Errorf("client config is nil")
 	}
-	if cfg.TLS.CA != "" {
-		data, err := os.ReadFile(cfg.TLS.CA)
+	for _, server := range cfg.ServerConfigs() {
+		if server.TLS.CA == "" {
+			continue
+		}
+		data, err := os.ReadFile(server.TLS.CA)
 		if err != nil {
-			return fmt.Errorf("read TLS CA %s: %w", cfg.TLS.CA, err)
+			return fmt.Errorf("read TLS CA %s: %w", server.TLS.CA, err)
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(data) {
-			return fmt.Errorf("parse TLS CA %s: no certificates found", cfg.TLS.CA)
+			return fmt.Errorf("parse TLS CA %s: no certificates found", server.TLS.CA)
 		}
 	}
 	if err := checkWebTLS(cfg.Web); err != nil {

@@ -159,6 +159,7 @@ type ClientIdentity struct {
 
 // ProxyConfig configures the optional local SOCKS5/HTTP proxy listeners.
 type ProxyConfig struct {
+	Enabled    bool   `yaml:"enabled,omitempty" json:"enabled"`
 	SOCKS5     string `yaml:"socks5" json:"socks5"`
 	SOCKS5Auth string `yaml:"socks5_auth,omitempty" json:"-"`
 	HTTP       string `yaml:"http" json:"http"`
@@ -261,6 +262,10 @@ func validateWeb(web *WebConfig) error {
 		return fmt.Errorf("web.tls.cert and web.tls.key must be set together")
 	}
 	return nil
+}
+
+func (p ProxyConfig) Active() bool {
+	return p.Enabled
 }
 
 func validateProxyAuth(field, value string) error {
