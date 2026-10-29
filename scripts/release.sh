@@ -21,7 +21,7 @@ command -v "$GO" >/dev/null 2>&1 || {
 	echo "release: $GO not found" >&2
 	exit 1
 }
-for tool in ar tar sha256sum zip; do
+for tool in tar sha256sum zip; do
 	command -v "$tool" >/dev/null 2>&1 || {
 		echo "release: $tool is required" >&2
 		exit 1

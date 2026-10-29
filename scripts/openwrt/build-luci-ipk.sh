@@ -14,7 +14,7 @@ outdir=$2
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 src="$root/scripts/openwrt/luci-app-hy2tun"
 
-for tool in ar tar gzip; do
+for tool in tar gzip; do
 	command -v "$tool" >/dev/null 2>&1 || {
 		echo "build-luci-ipk: $tool is required" >&2
 		exit 1
@@ -57,6 +57,7 @@ chmod 0755 "$control/postinst"
 printf '2.0\n' > "$work/debian-binary"
 (
 	cd "$work"
-	ar rc "$outdir/luci-app-hy2tun_${version}_all.ipk" debian-binary control.tar.gz data.tar.gz
+	tar --owner=0 --group=0 -czf "$outdir/luci-app-hy2tun_${version}_all.ipk" \
+		./debian-binary ./data.tar.gz ./control.tar.gz
 )
 echo "$outdir/luci-app-hy2tun_${version}_all.ipk"

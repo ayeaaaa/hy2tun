@@ -4,6 +4,14 @@
 
 本文件记录项目的重要变更。
 
+## Unreleased
+
+### 修复
+
+- OpenWrt `.ipk` 改用 `opkg` 期望的 gzip-tar 容器格式；之前的 ar 格式会被
+  判定为 malformed。已在 ImmortalWrt 24.10.2 x86_64 上通过 `opkg install`
+  验证，包括 LuCI 包和真实反向 TCP 映射。
+
 ## v1.4.2 - 2026-10-29
 
 ### 新增

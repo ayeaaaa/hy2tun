@@ -19,7 +19,7 @@ version=${3#v}
 outdir=$4
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 
-for tool in ar tar gzip; do
+for tool in tar gzip; do
 	command -v "$tool" >/dev/null 2>&1 || {
 		echo "build-ipk: $tool is required" >&2
 		exit 1
@@ -75,6 +75,7 @@ printf '2.0\n' > "$work/debian-binary"
 
 (
 	cd "$work"
-	ar rc "$outdir/hy2tun_${version}_${goarch}.ipk" debian-binary control.tar.gz data.tar.gz
+	tar --owner=0 --group=0 -czf "$outdir/hy2tun_${version}_${goarch}.ipk" \
+		./debian-binary ./data.tar.gz ./control.tar.gz
 )
 echo "$outdir/hy2tun_${version}_${goarch}.ipk"

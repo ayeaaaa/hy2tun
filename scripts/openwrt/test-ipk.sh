@@ -9,8 +9,8 @@ trap 'rm -rf "$work"' EXIT INT TERM
 "$root/scripts/openwrt/build-luci-ipk.sh" v0.0.0-test "$work" >/dev/null
 
 mkdir -p "$work/client" "$work/luci"
-(cd "$work/client" && ar x ../hy2tun_0.0.0-test_arm64.ipk && tar -xzf control.tar.gz && tar -tzf data.tar.gz > files.txt)
-(cd "$work/luci" && ar x ../luci-app-hy2tun_0.0.0-test_all.ipk && tar -xzf control.tar.gz && tar -tzf data.tar.gz > files.txt)
+(cd "$work/client" && tar -xzf ../hy2tun_0.0.0-test_arm64.ipk && tar -xzf control.tar.gz && tar -tzf data.tar.gz > files.txt)
+(cd "$work/luci" && tar -xzf ../luci-app-hy2tun_0.0.0-test_all.ipk && tar -xzf control.tar.gz && tar -tzf data.tar.gz > files.txt)
 
 grep -q '^Package: hy2tun$' "$work/client/control"
 grep -q '^Architecture: all$' "$work/client/control"

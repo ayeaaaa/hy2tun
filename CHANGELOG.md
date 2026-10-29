@@ -4,6 +4,15 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Fixed
+
+- OpenWrt `.ipk` files now use the gzip-tar container format expected by
+  `opkg`; the previous ar-based packages were rejected as malformed. Verified
+  with `opkg install` on ImmortalWrt 24.10.2 x86_64, including the LuCI
+  package and a live reverse TCP mapping.
+
 ## v1.4.2 - 2026-10-29
 
 ### Added
