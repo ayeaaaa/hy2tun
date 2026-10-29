@@ -34,6 +34,9 @@ do not need a database, Node.js, a CDN, or any runtime dependency.
   atomically, and acknowledges the new revision.
 - Port whitelist with single ports, ranges, deny rules, automatic allocation,
   and offline port reservations.
+- One client process can connect to multiple independent servers. Each server
+  has its own identity, mappings, credentials, reconnect loop, port hopping,
+  and optional local SOCKS5/HTTP proxy.
 - Optional client-side Hysteria 2 UDP port hopping across a port set, with
   automatic Linux server-side nftables/iptables redirect when `listen` is a
   range; a manual redirect remains supported for single-port listeners.
@@ -61,16 +64,14 @@ do not need a database, Node.js, a CDN, or any runtime dependency.
   the server.
 - No TUN mode, transparent proxy, domain-based routing, ACLs, load balancing,
   or CDN fronting.
-- One client connects to one server. One client cannot register with several
-  servers at once.
 - The server console edits only the settings listed in
   [Hot configuration editing](#hot-configuration-editing); listen addresses,
   TLS, obfs, bandwidth, QUIC, web listener/TLS, logging, the state file, and
   the authentication mode/user table still require a file edit and restart.
 - The client console does not edit the server address, port-hopping transport,
-  TLS, obfs, bandwidth, client ID, proxy listeners, or web listener/TLS; those
-  stay in `client.yaml`. It can rename the client and rotate the HY2 pair
-  through manual sync.
+  TLS, obfs, bandwidth, client ID, proxy authentication, or web listener/TLS;
+  those stay in `client.yaml`. It can rename the client, rotate the HY2 pair,
+  and enable/disable or change each server's proxy listener addresses.
 - Offline clients' mapping configuration is read-only in the server console;
   their detail page can delete the client and its persisted mappings and
   reservations. Their credentials can still be updated locally on the client
@@ -428,6 +429,76 @@ space is tight, deploy only the client binary, or use extroot.
 **Windows:** see [`scripts/windows/README.md`](scripts/windows/README.md) for
 Task Scheduler instructions and firewall notes.
 
+## Multiple servers
+
+Use `servers` when one client process must connect to several independent
+servers:
+
+```yaml
+web:
+  listen: "0.0.0.0:7501"
+log:
+  level: "info"
+
+servers:
+  - name: "us"
+    server: "us.example.com:24443"
+    auth: "us-password"
+    tls:
+      ca: "/etc/hy2tun/us-ca.pem"
+    control:
+      token: "0123456789abcdef0123456789abcdef"
+    client:
+      id: ""                 # generated and persisted per server
+      name: "home-us"
+    mappings:
+      - id: "ssh"
+        type: "tcp"
+        remote_port: 25022
+        local_addr: "127.0.0.1:22"
+        enabled: true
+    proxy:
+      enabled: false
+      socks5: "127.0.0.1:1080"
+      http: "127.0.0.1:8080"
+
+  - name: "sg"
+    server: "sg.example.com:24443"
+    auth: "sg-password"
+    control:
+      token: "abcdef0123456789abcdef0123456789"
+    client:
+      id: ""
+      name: "home-sg"
+    mappings:
+      - id: "ssh"
+        type: "tcp"
+        remote_port: 35022
+        local_addr: "127.0.0.1:22"
+        enabled: true
+```
+
+Rules:
+
+- `servers` entries are completely independent; mappings are not inherited or
+  shared. Configure the same local service separately on each server when you
+  want it exposed through both.
+- `servers[].name` must be unique. `servers[].client.id` is generated and
+  persisted separately for each entry.
+- Top-level `web` and `log` are shared by the process. When `servers` is used,
+  the legacy single-server fields must be empty.
+- A legacy top-level `server` configuration remains valid and appears in the
+  console as the `default` server. It is not automatically rewritten to the
+  multi-server shape.
+- Each `servers[].proxy` defaults to disabled. Enable it from the client Web
+  console or with `enabled: true`; at least one SOCKS5/HTTP address is required.
+- Proxy listener ports must not conflict with another enabled proxy or
+  `web.listen`. A failed bind disables only that server's proxy; its mappings
+  and other servers continue.
+- The old single-server API targets `default`. With a multi-server config that
+  has no `default`, old server-scoped API calls return `404` rather than
+  guessing a server.
+
 ## Configuration reference
 
 ### Server (`server.yaml`)
@@ -467,7 +538,8 @@ Task Scheduler instructions and firewall notes.
 
 | Field | Meaning |
 | --- | --- |
-| `server` | `host:port` of the server's HY2 listener, or a port set such as `host:443,8443` or `host:30000-40000` for port hopping. |
+| `server` | Legacy single-server `host:port`, or a port set such as `host:443,8443` or `host:30000-40000` for port hopping. Use `servers` for multiple independent servers. |
+| `servers` | Optional list of independent server entries; see [Multiple servers](#multiple-servers). Cannot be combined with legacy per-server fields. |
 | `auth` | HY2 password, or `user:password` for userpass auth. |
 | `tls.sni` | TLS server name. Empty uses the host part of `server`. |
 | `tls.insecure` | Skip certificate verification. Do not use on untrusted networks. |

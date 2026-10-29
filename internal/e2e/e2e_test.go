@@ -401,6 +401,11 @@ func TestExamplesValidate(t *testing.T) {
 	require.Equal(t, "127.0.0.1:1080", clientCfg.Proxy.SOCKS5)
 	require.Equal(t, "127.0.0.1:8080", clientCfg.Proxy.HTTP)
 	require.NotEmpty(t, clientCfg.Mappings)
+
+	multiCfg, err := config.LoadClient(filepath.Join("..", "..", "examples", "client-multi.yaml"))
+	require.NoError(t, err)
+	require.True(t, multiCfg.IsMulti())
+	require.Len(t, multiCfg.Servers, 2)
 }
 
 // requireStandardHY2Proxy connects the official Hysteria core client and

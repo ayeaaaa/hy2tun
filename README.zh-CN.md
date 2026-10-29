@@ -30,6 +30,8 @@ Node.js、CDN 或任何运行时依赖。
 - 客户端配置是权威配置。服务端控制台可以向在线客户端推送映射变更；客户端
   应用变更、原子写入自己的 YAML 文件，并确认新的 revision。
 - 端口白名单支持单端口、范围、拒绝规则、自动分配和离线端口保留。
+- 一个客户端进程可以连接多个独立服务端。每个服务端有自己的身份、映射、
+  凭据、重连循环、端口跳跃和可选的本地 SOCKS5/HTTP 代理。
 - 客户端可选 HY2 UDP 端口跳跃，支持端口集合；当服务端 `listen` 配置为范围时，
   Linux 服务端会自动配置 nftables/iptables 重定向；单端口监听仍支持手动重定向。
 - 服务端和客户端都有 Web 控制台，支持登录、CSRF 防护、实时状态、映射管理
@@ -50,13 +52,13 @@ Node.js、CDN 或任何运行时依赖。
   认证配置和一个控制令牌；密码认证在轮换期间会保留上一代凭据。
 - 没有 P2P、Hysteria Realms 或 UDP 打洞。客户端始终主动连接服务端。
 - 没有 TUN 模式、透明代理、基于域名的路由、ACL、负载均衡或 CDN 前置。
-- 一个客户端只能连接一个服务端。一个客户端不能同时注册到多个服务端。
 - 服务端控制台只能编辑
   [热配置编辑](#热配置编辑) 中列出的设置；监听地址、TLS、obfs、带宽、QUIC、
   Web 监听/TLS、日志、状态文件和认证模式/用户表仍然需要修改文件并重启。
 - 客户端控制台不能编辑服务端地址、端口跳跃 transport、TLS、obfs、带宽、
-  客户端 ID、代理监听或 Web 监听/TLS；这些仍然留在 `client.yaml`。客户端
-  控制台可以重命名客户端，并通过手动同步轮换 HY2 凭据。
+  客户端 ID、代理认证或 Web 监听/TLS；这些仍然留在 `client.yaml`。客户端
+  控制台可以重命名客户端、通过手动同步轮换 HY2 凭据，并开启/关闭或修改每个
+  服务端的代理监听地址。
 - 离线客户端的映射配置在服务端控制台中只读；详情页可以删除该客户端及其
   持久化映射和端口预约。仍可在客户端主机上本地更新其凭据。
 - 没有自动更新、托盘程序或原生 Windows 服务。Windows 使用任务计划程序。
@@ -391,6 +393,70 @@ MIPS 路由器使用 `linux/mipsle` 或 `linux/mips` 构建；ARM 路由器使�
 **Windows：** 任务计划程序和防火墙说明见
 [`scripts/windows/README.md`](scripts/windows/README.md)。
 
+## 多服务端
+
+当一个客户端进程需要连接多个独立服务端时，使用 `servers`：
+
+```yaml
+web:
+  listen: "0.0.0.0:7501"
+log:
+  level: "info"
+
+servers:
+  - name: "us"
+    server: "us.example.com:24443"
+    auth: "us-password"
+    tls:
+      ca: "/etc/hy2tun/us-ca.pem"
+    control:
+      token: "0123456789abcdef0123456789abcdef"
+    client:
+      id: ""                 # 每个服务端独立生成并持久化
+      name: "home-us"
+    mappings:
+      - id: "ssh"
+        type: "tcp"
+        remote_port: 25022
+        local_addr: "127.0.0.1:22"
+        enabled: true
+    proxy:
+      enabled: false
+      socks5: "127.0.0.1:1080"
+      http: "127.0.0.1:8080"
+
+  - name: "sg"
+    server: "sg.example.com:24443"
+    auth: "sg-password"
+    control:
+      token: "abcdef0123456789abcdef0123456789"
+    client:
+      id: ""
+      name: "home-sg"
+    mappings:
+      - id: "ssh"
+        type: "tcp"
+        remote_port: 35022
+        local_addr: "127.0.0.1:22"
+        enabled: true
+```
+
+规则：
+
+- `servers` 中的每个条目完全独立，映射不会继承或共享。需要把同一个内网
+  服务暴露到多个服务端时，在每个服务端下分别配置。
+- `servers[].name` 必须唯一；`servers[].client.id` 每个条目独立生成并持久化。
+- 顶层 `web` 和 `log` 由进程共享。使用 `servers` 时，旧的单服务端顶层字段
+  必须为空。
+- 旧的顶层 `server` 配置仍然有效，在控制台中显示为 `default` 服务端，不会
+  自动改写成多服务端格式。
+- 每个 `servers[].proxy` 默认关闭。可在客户端 Web 控制台开启，或在配置中写
+  `enabled: true`；开启时至少需要一个 SOCKS5/HTTP 地址。
+- 代理监听端口不能与其他已启用代理或 `web.listen` 冲突。绑定失败只关闭该
+  服务端的代理，映射和其他服务端继续运行。
+- 旧单服务端 API 指向 `default`。多服务端配置没有 `default` 时，旧的
+  服务端作用域 API 返回 `404`，不会猜测目标服务端。
+
 ## 配置参考
 
 ### 服务端（`server.yaml`）
@@ -430,7 +496,8 @@ MIPS 路由器使用 `linux/mipsle` 或 `linux/mips` 构建；ARM 路由器使�
 
 | 字段 | 含义 |
 | --- | --- |
-| `server` | 服务端 HY2 监听地址，`host:port`；端口跳跃时可使用端口集合，例如 `host:443,8443` 或 `host:30000-40000`。 |
+| `server` | 旧的单服务端 `host:port`；端口跳跃时可使用端口集合，例如 `host:443,8443` 或 `host:30000-40000`。多个独立服务端请使用 `servers`。 |
+| `servers` | 可选的多服务端列表，每项完全独立；见 [多服务端](#多服务端)。不能与旧的单服务端字段混用。 |
 | `auth` | HY2 密码；`userpass` 认证时为 `user:password`。 |
 | `tls.sni` | TLS 服务器名称。为空时使用 `server` 的主机部分。 |
 | `tls.insecure` | 跳过证书验证。不要在不可信网络使用。 |

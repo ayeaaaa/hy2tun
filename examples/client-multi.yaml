@@ -1,0 +1,71 @@
+# hy2tun multi-server example configuration.
+#
+# Each server is independent: its own HY2 credentials, control token, TLS,
+# mappings, client identity, port hopping, and local proxy settings. There is
+# no shared mapping inheritance between entries.
+#
+# Copy to /etc/hy2tun/client.yaml and replace every placeholder. Keep the file
+# readable only by the account that runs hy2tun: chmod 600.
+
+web:
+  listen: "0.0.0.0:7501"
+  username: "admin"
+  # Generate a bcrypt hash with the client's first startup or replace this
+  # placeholder with a real hash before enabling the web console.
+  password_hash: "$2a$10$replace-with-a-bcrypt-hash"
+
+log:
+  level: "info"
+
+servers:
+  - name: "us"
+    server: "us.example.com:24443"
+    auth: "change-me-us-password"
+    tls:
+      ca: "/etc/hy2tun/us-ca.pem"
+      sni: "us.example.com"
+    control:
+      token: "0123456789abcdef0123456789abcdef"
+    client:
+      id: ""
+      name: "home-us"
+      revision: 0
+    mappings:
+      - id: "ssh"
+        type: "tcp"
+        remote_port: 25022
+        local_addr: "127.0.0.1:22"
+        enabled: true
+    # Local proxies are opt-in and default to disabled.
+    proxy:
+      enabled: false
+      socks5: "127.0.0.1:1080"
+      http: "127.0.0.1:8080"
+
+  - name: "sg"
+    server: "sg.example.com:24443"
+    auth: "change-me-sg-password"
+    tls:
+      ca: "/etc/hy2tun/sg-ca.pem"
+      sni: "sg.example.com"
+    control:
+      token: "abcdef0123456789abcdef0123456789"
+    client:
+      id: ""
+      name: "home-sg"
+      revision: 0
+    mappings:
+      - id: "ssh"
+        type: "tcp"
+        remote_port: 35022
+        local_addr: "127.0.0.1:22"
+        enabled: true
+      - id: "dns"
+        type: "udp"
+        remote_port: 0
+        local_addr: "127.0.0.1:53"
+        enabled: true
+    proxy:
+      enabled: false
+      socks5: "127.0.0.1:1081"
+      http: "127.0.0.1:8081"

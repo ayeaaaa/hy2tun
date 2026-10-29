@@ -49,6 +49,7 @@ func (c *Client) ApplyProxy(cfg config.ProxyConfig) error {
 
 	hadProxies := len(c.proxies) > 0
 	c.closeProxiesLocked()
+	c.proxies = nil
 	if !cfg.Enabled {
 		c.configMu.Lock()
 		c.cfg.Proxy = cfg

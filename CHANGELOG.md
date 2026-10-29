@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Added
+
+- Multi-server client configuration: one process connects to independent
+  servers with separate client IDs, mappings, credentials, reconnect loops,
+  port hopping, and proxies.
+- Per-server SOCKS5/HTTP proxy listeners, default disabled, editable from the
+  client web console with port-conflict validation.
+- Client server list and server-scoped web APIs; legacy single-server APIs
+  remain mapped to `default`.
+
+### Changed
+
+- Legacy single-server YAML remains supported without automatic format
+  conversion.
+- Multi-server configs use top-level `web` and `log` only; legacy per-server
+  fields are rejected when `servers` is present.
+
 ## v1.3.3 - 2026-10-29
 
 ### Security
