@@ -55,6 +55,34 @@ do not need a database, Node.js, a CDN, or any runtime dependency.
   HY2 connection.
 - Linux, OpenWrt, and Windows client builds from one source tree.
 
+## When to use hy2tun
+
+hy2tun fits when you have a public HY2 server and one or more clients behind
+NAT, CGNAT, or a firewall, and you want to expose selected private services
+without opening inbound ports on the private network.
+
+Typical scenarios:
+
+- Expose SSH, RDP, HTTP, a NAS, a home dashboard, or an internal API from a
+  home or office network through a VPS.
+- Expose UDP services such as WireGuard, DNS, game servers, voice, or MQTT
+  where a reliable TCP tunnel would add head-of-line blocking.
+- Use a public VPS as an egress for a client's local SOCKS5/HTTP proxy, while
+  keeping the reverse mappings on the same HY2 connection.
+- Run one client process against several independent servers, with separate
+  mappings and optional proxies for each server.
+- Use client-side UDP port hopping when a provider rate-limits or blocks a
+  single UDP port.
+- Run on Linux, OpenWrt, or Windows with one static binary and an embedded web
+  console.
+
+It is intentionally narrower than a general-purpose reverse-proxy platform.
+If you need many proxy types, a plugin ecosystem, large multi-tenant
+orchestration, or advanced routing/ACL features, FRP may be a better fit.
+For the focused case above, hy2tun keeps the data path HY2-native, handles UDP
+without converting it to a reliable stream, and includes the server/client
+consoles and multi-server controls in the same binaries.
+
 ## What it does not do (v1)
 
 - No multi-user accounts, approval workflow, tenant isolation, quotas, or
