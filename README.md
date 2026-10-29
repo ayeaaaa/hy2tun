@@ -83,6 +83,30 @@ For the focused case above, hy2tun keeps the data path HY2-native, handles UDP
 without converting it to a reliable stream, and includes the server/client
 consoles and multi-server controls in the same binaries.
 
+### Why HY2/UDP for lossy links
+
+The primary design goal is not only NAT traversal. It is to move the lossy
+server-to-client segment off a TCP tunnel and onto Hysteria 2/QUIC:
+
+```text
+public user --TCP--> hy2tund --HY2/QUIC over UDP (BBR)--> hy2tun --TCP--> private service
+```
+
+- The public user's TCP connection terminates at `hy2tund`; the long-haul
+  server-to-client segment is carried by QUIC streams over UDP.
+- Hysteria 2 uses BBR-style congestion control, which generally tolerates
+  packet loss and high RTT better than a traditional TCP tunnel.
+- QUIC streams are independent, so one stalled public TCP connection does not
+  block unrelated mappings.
+- Reverse UDP mappings use native HY2 datagrams, so real-time UDP is not
+  converted into a reliable TCP stream.
+
+This improves the tunnel segment; it cannot repair loss on the public
+user-to-server path or the client-to-local-service path. UDP blocking/QoS,
+MTU limits, CPU cost, and QUIC retransmission still apply. On a clean,
+low-latency path a plain TCP tunnel may have less overhead; the advantage is
+largest when the server-client link has meaningful loss or high RTT.
+
 ## What it does not do (v1)
 
 - No multi-user accounts, approval workflow, tenant isolation, quotas, or
