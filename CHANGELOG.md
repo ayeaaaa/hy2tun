@@ -11,8 +11,9 @@ All notable changes to this project are documented here.
   policy changes remain passwordless.
 - Serve embedded static assets with `Cache-Control: no-cache` so an upgraded
   browser cannot run stale JavaScript against new settings forms.
-- Make offline-client deletion transactional: a failed state save restores the
-  in-memory client instead of leaving a partially applied deletion.
+- Make offline-client deletion transactional: pre-rename save failures restore
+  the in-memory client, while a committed rename whose directory sync fails is
+  treated as committed and logged instead of being rolled back in memory.
 
 ## v1.3.2 - 2026-10-28
 

@@ -414,6 +414,7 @@ HY2 密码和 control token 可以只改一个，也可以一起改：
    - 提示：已运行映射不受影响
 4. **代理信任**
    - trust_proxy 开关
+   - 当前密码确认
 5. **只读项**
    - listen、TLS、obfs、QUIC、Web 监听、日志、state_file
    - 提示“修改需编辑文件并重启”

@@ -3,6 +3,7 @@ package server
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -398,7 +399,11 @@ func (m *mappingManager) deleteClient(clientID string) error {
 	deleted, err := m.store.DeleteAndSave(clientID)
 	m.mu.Unlock()
 	if err != nil {
-		return fmt.Errorf("persist client deletion: %w", err)
+		if errors.Is(err, state.ErrCommitted) {
+			m.log.Warn("client deletion committed but directory sync failed", "client", clientID, "error", err)
+		} else {
+			return fmt.Errorf("persist client deletion: %w", err)
+		}
 	}
 	if !deleted {
 		return control.ErrClientNotFound

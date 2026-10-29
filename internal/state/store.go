@@ -8,6 +8,7 @@ package state
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,14 @@ import (
 
 	"hy2tun/internal/config"
 )
+
+// ErrCommitted reports that the state file was replaced but the directory
+// sync failed afterwards. The change is visible on disk but may not survive a
+// crash; callers must not roll it back in memory.
+var ErrCommitted = errors.New("state: change committed but not durable")
+
+// syncDirFn is a test seam for the post-rename durability check.
+var syncDirFn = syncDir
 
 // ClientState is the last-known state of one registered client.
 type ClientState struct {
@@ -129,10 +138,13 @@ func (s *Store) DeleteAndSave(id string) (bool, error) {
 		return false, nil
 	}
 	delete(s.state.Clients, id)
-	if err := s.saveLocked(); err != nil {
-		s.state.Clients[id] = client
-		s.dirty = true
-		return false, err
+	committed, err := s.saveLocked()
+	if err != nil {
+		if !committed {
+			s.state.Clients[id] = client
+			s.dirty = true
+		}
+		return committed, err
 	}
 	return true, nil
 }
@@ -192,18 +204,19 @@ func (s *Store) Reserved(clientID string, port int, now time.Time) bool {
 func (s *Store) Save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.saveLocked()
+	_, err := s.saveLocked()
+	return err
 }
 
-func (s *Store) saveLocked() error {
+func (s *Store) saveLocked() (bool, error) {
 	if s.path == "" {
 		s.dirty = false
-		return nil
+		return true, nil
 	}
 
 	data, err := json.MarshalIndent(s.state, "", "  ")
 	if err != nil {
-		return fmt.Errorf("state: marshal %s: %w", s.path, err)
+		return false, fmt.Errorf("state: marshal %s: %w", s.path, err)
 	}
 	data = append(data, '\n')
 
@@ -211,7 +224,7 @@ func (s *Store) saveLocked() error {
 	// than a missing file aborts the save so no state is silently lost.
 	previous, readErr := os.ReadFile(s.path)
 	if readErr != nil && !os.IsNotExist(readErr) {
-		return fmt.Errorf("state: read previous %s: %w", s.path, readErr)
+		return false, fmt.Errorf("state: read previous %s: %w", s.path, readErr)
 	}
 
 	tmp := s.path + ".tmp"
@@ -219,22 +232,22 @@ func (s *Store) saveLocked() error {
 	// partial write must not be left behind.
 	defer os.Remove(tmp)
 	if err := writeFileSync(tmp, data); err != nil {
-		return fmt.Errorf("state: write %s: %w", tmp, err)
+		return false, fmt.Errorf("state: write %s: %w", tmp, err)
 	}
 
 	if readErr == nil {
 		if err := writeFileSync(s.path+".bak", previous); err != nil {
-			return fmt.Errorf("state: write backup %s: %w", s.path+".bak", err)
+			return false, fmt.Errorf("state: write backup %s: %w", s.path+".bak", err)
 		}
 	}
 	if err := os.Rename(tmp, s.path); err != nil {
-		return fmt.Errorf("state: rename %s: %w", s.path, err)
+		return false, fmt.Errorf("state: rename %s: %w", s.path, err)
 	}
-	if err := syncDir(filepath.Dir(s.path)); err != nil {
-		return fmt.Errorf("state: sync %s: %w", filepath.Dir(s.path), err)
+	if err := syncDirFn(filepath.Dir(s.path)); err != nil {
+		return true, fmt.Errorf("%w: state: sync %s: %v", ErrCommitted, filepath.Dir(s.path), err)
 	}
 	s.dirty = false
-	return nil
+	return true, nil
 }
 
 // Close flushes pending changes to disk. It is safe to call more than once.
@@ -245,7 +258,8 @@ func (s *Store) Close() error {
 	if !s.dirty {
 		return nil
 	}
-	return s.saveLocked()
+	_, err := s.saveLocked()
+	return err
 }
 
 // clone returns a copy that shares no mutable memory with the receiver.

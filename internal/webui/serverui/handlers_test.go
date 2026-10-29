@@ -1471,13 +1471,16 @@ func TestServerSettingsWebUpdateRevokesSession(t *testing.T) {
 }
 
 func TestServerSettingsTrustProxyStillRequiresPassword(t *testing.T) {
-	_, ts := newTestWeb(t, &fakeServerAPI{})
+	api := &fakeServerAPI{}
+	web, ts := newTestWeb(t, api)
 	cookie := login(t, ts)
 
 	resp := doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/proxy",
 		`{"trust_proxy":true}`, cookie, csrfHeaders(ts.URL))
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	resp.Body.Close()
+	require.Zero(t, api.setTrustProxyCalls)
+	require.False(t, web.login.TrustProxy)
 }
 
 func TestServerSettingsPagePasswordFields(t *testing.T) {

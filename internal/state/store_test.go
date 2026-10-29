@@ -1,6 +1,7 @@
 package state
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -234,4 +235,26 @@ func TestDeleteAndSaveFailureRestoresClient(t *testing.T) {
 	require.True(t, deleted)
 	_, ok = s.Snapshot().Clients["gone"]
 	require.False(t, ok)
+}
+
+func TestDeleteAndSaveCommittedSyncFailureDoesNotRestoreClient(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	s, err := Open(path, time.Hour)
+	require.NoError(t, err)
+	defer s.Close()
+
+	s.Upsert(ClientState{ID: "gone", Name: "old"})
+	oldSyncDir := syncDirFn
+	syncDirFn = func(string) error { return errors.New("sync failed") }
+	defer func() { syncDirFn = oldSyncDir }()
+
+	deleted, err := s.DeleteAndSave("gone")
+	require.True(t, deleted)
+	require.ErrorIs(t, err, ErrCommitted)
+	_, ok := s.Snapshot().Clients["gone"]
+	require.False(t, ok, "a committed rename must not be rolled back in memory")
+
+	data, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	require.NotContains(t, string(data), `"gone"`)
 }
