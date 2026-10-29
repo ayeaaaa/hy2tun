@@ -11,6 +11,9 @@ All notable changes to this project are documented here.
   port hopping, and proxies.
 - Per-server SOCKS5/HTTP proxy listeners, default disabled, editable from the
   client web console with port-conflict validation.
+- Proxy listeners cancel in-flight dials during close or address changes, and
+  configuration writes distinguish a committed rename from a pre-commit save
+  failure.
 - Client server list and server-scoped web APIs; legacy single-server APIs
   remain mapped to `default`.
 
