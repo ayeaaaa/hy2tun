@@ -147,3 +147,18 @@ func TestCheckClientMultiValidatesEveryServerTLS(t *testing.T) {
 	err := CheckClient(cfg)
 	require.ErrorContains(t, err, "/definitely/missing/ca.pem")
 }
+
+func TestProxyConflictAllowsDifferentSpecificAddresses(t *testing.T) {
+	cfg := multiServerTestConfig()
+	cfg.Servers[0].Proxy = ProxyConfig{Enabled: true, SOCKS5: "127.0.0.1:1080"}
+	cfg.Servers[1].Proxy = ProxyConfig{Enabled: true, SOCKS5: "127.0.0.2:1080"}
+	require.NoError(t, cfg.Validate())
+}
+
+func TestProxyListenKeyNormalizesHostCase(t *testing.T) {
+	first, err := proxyListenKey("LOCALHOST:1080")
+	require.NoError(t, err)
+	second, err := proxyListenKey("localhost:1080")
+	require.NoError(t, err)
+	require.Equal(t, first, second)
+}
