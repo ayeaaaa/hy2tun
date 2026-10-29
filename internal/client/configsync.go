@@ -134,7 +134,7 @@ func (c *Client) UpdateWebConfig(username, passwordHash string) error {
 	if err := next.Validate(); err != nil {
 		return err
 	}
-	if err := writeConfigAtomic(c.configPath, next); err != nil {
+	if err := c.writeConfig(next); err != nil {
 		return err
 	}
 	c.storeConfigLocked(next, c.udpTokenSnapshot(), c.mappingSnapshot())
@@ -175,7 +175,7 @@ func (c *Client) RotateLocalCredentials(generation int64, auth, controlToken str
 		c.configMu.Unlock()
 		return err
 	}
-	if err := writeConfigAtomic(c.configPath, next); err != nil {
+	if err := c.writeConfig(next); err != nil {
 		c.configMu.Unlock()
 		return err
 	}
@@ -246,7 +246,7 @@ func (c *Client) editConfig(apply func(*config.ClientConfig) error) error {
 	if err := next.Validate(); err != nil {
 		return err
 	}
-	if err := writeConfigAtomic(c.configPath, next); err != nil {
+	if err := c.writeConfig(next); err != nil {
 		return err
 	}
 

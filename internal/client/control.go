@@ -316,7 +316,7 @@ func (c *Client) applyHelloAck(snapshot *config.ClientConfig, ack *control.Hello
 			if err := next.Validate(); err != nil {
 				c.log.Warn("write server-assigned ports", "error", err)
 				next = cloneClientConfig(current)
-			} else if err := writeConfigAtomic(c.configPath, next); err != nil {
+			} else if err := c.writeConfig(next); err != nil {
 				c.log.Warn("write server-assigned ports", "error", err)
 				next = cloneClientConfig(current)
 			} else {
@@ -449,7 +449,7 @@ func (c *Client) handlePush(conn net.Conn, msg *control.Push) {
 		})
 		return
 	}
-	if err := writeConfigAtomic(c.configPath, next); err != nil {
+	if err := c.writeConfig(next); err != nil {
 		c.configMu.Unlock()
 		c.log.Warn("apply server mapping push", "error", err)
 		c.writePushAck(conn, &control.PushAck{
@@ -529,7 +529,7 @@ func (c *Client) handleUpdateAck(ack *control.UpdateAck) {
 		next.Mappings = mappings
 		if err := next.Validate(); err != nil {
 			c.log.Warn("write update-assigned ports", "error", err)
-		} else if err := writeConfigAtomic(c.configPath, next); err != nil {
+		} else if err := c.writeConfig(next); err != nil {
 			c.log.Warn("write update-assigned ports", "error", err)
 		} else {
 			views := mappingViews(next.Mappings, resultMap(ack.Results))
@@ -589,7 +589,7 @@ func (c *Client) handleCredentialUpdate(conn net.Conn, msg *control.CredentialUp
 		c.writeCredentialAck(conn, ack)
 		return
 	}
-	if err := writeConfigAtomic(c.configPath, next); err != nil {
+	if err := c.writeConfig(next); err != nil {
 		c.configMu.Unlock()
 		c.log.Warn("write rotated credentials", "error", err)
 		ack.Error = "write_failed"

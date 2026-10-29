@@ -86,14 +86,18 @@ type Client struct {
 	web  *clientui.Server
 
 	// proxies are the optional local SOCKS5/HTTP CONNECT listeners. They are
-	// bound during New and their accept loops run with the client.
-	proxies []*proxy.Server
+	// bound during New or hot-applied by the supervisor and their accept loops
+	// run with the client.
+	proxyMu  sync.Mutex
+	proxies  []*proxy.Server
+	proxyErr string
 
 	// configMu serializes local configuration edits, server pushes, and the
 	// assigned-port write-backs that follow a handshake. The client config is
 	// the single source of truth, so every revision decision is made under it.
 	configMu   sync.Mutex
 	configPath string
+	persist    func(*config.ClientConfig) error
 	// udpReconcileMu serializes UDP session reconciliation so a push and an
 	// update ack cannot start duplicate sessions for one mapping.
 	udpReconcileMu sync.Mutex
@@ -205,8 +209,27 @@ func New(cfg *config.ClientConfig, log *slog.Logger) (*Client, error) {
 // New so a bad listen address or credentials fail startup before the client
 // attempts to connect. Start runs the accept loops.
 func (c *Client) initProxies() error {
+	c.proxyMu.Lock()
+	defer c.proxyMu.Unlock()
 	if !c.cfg.ProxyEnabled() {
 		return nil
+	}
+	proxies, err := c.bindProxiesLocked(c.cfg.Proxy)
+	if err != nil {
+		return err
+	}
+	c.proxies = proxies
+	return nil
+}
+
+// bindProxiesLocked binds all configured proxy listeners without touching the
+// current listener set. The caller owns proxyMu.
+func (c *Client) bindProxiesLocked(cfg config.ProxyConfig) ([]*proxy.Server, error) {
+	if !cfg.Active() {
+		return nil, nil
+	}
+	if cfg.SOCKS5 == "" && cfg.HTTP == "" {
+		return nil, fmt.Errorf("proxy.enabled requires socks5 or http")
 	}
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		if network != "tcp" {
@@ -217,29 +240,40 @@ func (c *Client) initProxies() error {
 		}
 		return c.TCP(addr)
 	}
-
-	if listen := c.cfg.Proxy.SOCKS5; listen != "" {
-		srv, err := proxy.NewSOCKS5(listen, dial, c.log, c.cfg.Proxy.SOCKS5Auth)
-		if err != nil {
-			c.closeProxies()
-			return fmt.Errorf("create SOCKS5 proxy on %s: %w", listen, err)
+	proxies := make([]*proxy.Server, 0, 2)
+	closeOnError := func() {
+		for _, srv := range proxies {
+			_ = srv.Close()
 		}
-		c.proxies = append(c.proxies, srv)
 	}
-	if listen := c.cfg.Proxy.HTTP; listen != "" {
-		srv, err := proxy.NewHTTP(listen, dial, c.log, c.cfg.Proxy.HTTPAuth)
+	if listen := cfg.SOCKS5; listen != "" {
+		srv, err := proxy.NewSOCKS5(listen, dial, c.log, cfg.SOCKS5Auth)
 		if err != nil {
-			c.closeProxies()
-			return fmt.Errorf("create HTTP proxy on %s: %w", listen, err)
+			closeOnError()
+			return nil, fmt.Errorf("create SOCKS5 proxy on %s: %w", listen, err)
 		}
-		c.proxies = append(c.proxies, srv)
+		proxies = append(proxies, srv)
 	}
-	return nil
+	if listen := cfg.HTTP; listen != "" {
+		srv, err := proxy.NewHTTP(listen, dial, c.log, cfg.HTTPAuth)
+		if err != nil {
+			closeOnError()
+			return nil, fmt.Errorf("create HTTP proxy on %s: %w", listen, err)
+		}
+		proxies = append(proxies, srv)
+	}
+	return proxies, nil
 }
 
 // startProxies runs each bound proxy's accept loop. The listeners are already
 // bound, so Start only fails on an unexpected accept error.
 func (c *Client) startProxies() {
+	c.proxyMu.Lock()
+	defer c.proxyMu.Unlock()
+	c.startProxiesLocked()
+}
+
+func (c *Client) startProxiesLocked() {
 	for _, srv := range c.proxies {
 		c.log.Info("local proxy listening", "addr", srv.Addr())
 		go func(srv *proxy.Server) {
@@ -254,11 +288,34 @@ func (c *Client) startProxies() {
 // Close is idempotent, so this is safe from both New's error path and Client
 // shutdown.
 func (c *Client) closeProxies() {
+	c.proxyMu.Lock()
+	defer c.proxyMu.Unlock()
+	c.closeProxiesLocked()
+}
+
+func (c *Client) closeProxiesLocked() {
 	for _, srv := range c.proxies {
 		if err := srv.Close(); err != nil {
 			c.log.Warn("close local proxy", "addr", srv.Addr(), "error", err)
 		}
 	}
+}
+
+// SetPersist installs the supervisor's persistence callback. It must be set
+// before the worker starts processing configuration updates.
+func (c *Client) SetPersist(persist func(*config.ClientConfig) error) {
+	c.configMu.Lock()
+	defer c.configMu.Unlock()
+	c.persist = persist
+}
+
+// writeConfig persists a worker configuration through the supervisor callback
+// when installed, otherwise through the standalone client file.
+func (c *Client) writeConfig(next *config.ClientConfig) error {
+	if c.persist != nil {
+		return c.persist(next)
+	}
+	return writeConfigAtomic(c.configPath, next)
 }
 
 // loadClientWebSessionKey loads the persisted web session signing key next to
