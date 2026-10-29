@@ -113,9 +113,19 @@ var (
 	_ clientui.API = (*Client)(nil)
 )
 
-// New validates cfg and prepares the HY2 client configuration. It does not
-// connect; call Start for that.
+// New validates cfg and prepares a standalone HY2 client. It does not connect;
+// call Start for that.
 func New(cfg *config.ClientConfig, log *slog.Logger) (*Client, error) {
+	return newClient(cfg, log, false)
+}
+
+// NewWorker prepares a per-server worker without binding its proxy listeners.
+// The supervisor applies those listeners after all workers exist.
+func NewWorker(cfg *config.ClientConfig, log *slog.Logger) (*Client, error) {
+	return newClient(cfg, log, true)
+}
+
+func newClient(cfg *config.ClientConfig, log *slog.Logger, skipProxyBind bool) (*Client, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("client config is nil")
 	}
@@ -186,11 +196,13 @@ func New(cfg *config.ClientConfig, log *slog.Logger) (*Client, error) {
 		}
 		cl.web = web
 	}
-	if err := cl.initProxies(); err != nil {
-		if cl.web != nil {
-			_ = cl.web.Close()
+	if !skipProxyBind {
+		if err := cl.initProxies(); err != nil {
+			if cl.web != nil {
+				_ = cl.web.Close()
+			}
+			return nil, err
 		}
-		return nil, err
 	}
 	if cfg.ServerPortHopping() {
 		minHop, maxHop, _ := cfg.HopInterval()
@@ -299,6 +311,14 @@ func (c *Client) closeProxiesLocked() {
 			c.log.Warn("close local proxy", "addr", srv.Addr(), "error", err)
 		}
 	}
+}
+
+// setWebConfig updates the in-memory web settings shown by the worker without
+// creating a worker web listener.
+func (c *Client) setWebConfig(web config.WebConfig) {
+	c.configMu.Lock()
+	c.cfg.Web = web
+	c.configMu.Unlock()
 }
 
 // SetPersist installs the supervisor's persistence callback. It must be set

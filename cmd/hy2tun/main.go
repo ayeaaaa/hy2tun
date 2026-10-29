@@ -57,28 +57,21 @@ func run() error {
 			fmt.Fprintf(os.Stderr, "hy2tun: web console password for %q: %s (shown once)\n", cfg.Web.Username, password)
 		}
 	}
-	hadClientID := cfg.Client.ID != ""
 	log, closer, err := logging.New(cfg.Log.Level, cfg.Log.File)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = closer.Close() }()
 
-	cl, err := client.New(cfg, log)
+	cl, err := client.NewSupervisor(cfg, log)
 	if err != nil {
 		return err
-	}
-	if cfg.Client.ID != "" && !hadClientID {
-		if err := config.SaveClient(*configPath, cfg); err != nil {
-			_ = cl.Close()
-			return fmt.Errorf("save generated client ID: %w", err)
-		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	log.Info("hy2tun starting", "config", *configPath, "server", cfg.Server, "web", cl.WebAddr())
+	log.Info("hy2tun starting", "config", *configPath, "servers", len(cfg.ServerConfigs()), "web", cl.WebAddr())
 	if err := cl.Start(ctx); err != nil {
 		_ = cl.Close()
 		return err
