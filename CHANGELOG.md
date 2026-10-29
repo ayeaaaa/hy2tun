@@ -4,7 +4,7 @@
 
 All notable changes to this project are documented here.
 
-## Unreleased
+## v1.4.3 - 2026-10-29
 
 ### Fixed
 
