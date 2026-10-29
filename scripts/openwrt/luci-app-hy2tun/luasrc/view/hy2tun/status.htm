@@ -3,8 +3,8 @@
 <%
 local fs = require "nixio.fs"
 local sys = require "luci.sys"
-local active = (sys.call("/etc/init.d/hy2tun status") == 0)
-local configured = fs.access("/etc/hy2tun/client.yaml")
+local active = (sys.call("/etc/init.d/hy2tun status >/dev/null 2>&1") == 0)
+local configured = (fs.access("/etc/hy2tun/client.yaml") ~= nil)
 %>
 <div class="cbi-section">
 	<h3>客户端状态</h3>

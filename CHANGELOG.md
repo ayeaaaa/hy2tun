@@ -4,6 +4,15 @@
 
 All notable changes to this project are documented here.
 
+## v1.4.4 - 2026-10-29
+
+### Fixed
+
+- The LuCI status page now loads instead of returning `502 Bad Gateway`:
+  the controller loads `nixio.fs` before use, and the service-status command
+  no longer writes `inactive` into the CGI response. The Services menu entry
+  is available after the LuCI menu cache refresh.
+
 ## v1.4.3 - 2026-10-29
 
 ### Fixed

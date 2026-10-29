@@ -1,7 +1,9 @@
 module("luci.controller.hy2tun", package.seeall)
 
+local fs = require "nixio.fs"
+
 function index()
-	if not nixio.fs.access("/etc/init.d/hy2tun") then
+	if not fs.access("/etc/init.d/hy2tun") then
 		return
 	end
 
