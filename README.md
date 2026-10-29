@@ -71,8 +71,10 @@ do not need a database, Node.js, a CDN, or any runtime dependency.
   TLS, obfs, bandwidth, client ID, proxy listeners, or web listener/TLS; those
   stay in `client.yaml`. It can rename the client and rotate the HY2 pair
   through manual sync.
-- Offline clients are read-only in the server console, but their credentials
-  can still be updated locally on the client host.
+- Offline clients' mapping configuration is read-only in the server console;
+  their detail page can delete the client and its persisted mappings and
+  reservations. Their credentials can still be updated locally on the client
+  host.
 - No automatic update, tray application, or native Windows service. Windows
   uses Task Scheduler.
 - Server-side range listening is Linux-only and requires root or
