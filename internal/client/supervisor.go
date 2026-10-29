@@ -25,6 +25,7 @@ type Supervisor struct {
 	web  *clientui.Server
 
 	configMu sync.Mutex
+	proxyMu  sync.Mutex
 	workers  map[string]*Client
 	order    []string
 
@@ -303,6 +304,74 @@ func (s *Supervisor) CredentialsSnapshot() *credentials.Set {
 		return nil
 	}
 	return worker.CredentialsSnapshot()
+}
+
+// UpdateProxy atomically validates, binds, and persists a per-server proxy
+// configuration. Other servers and the web listener are checked first; if the
+// worker cannot bind or the config cannot be saved, the previous worker state
+// is restored.
+func (s *Supervisor) UpdateProxy(name string, cfg config.ProxyConfig) error {
+	s.proxyMu.Lock()
+	defer s.proxyMu.Unlock()
+
+	worker := s.workers[name]
+	if worker == nil {
+		return fmt.Errorf("server %q not found", name)
+	}
+	if cfg.Enabled && cfg.SOCKS5 == "" && cfg.HTTP == "" {
+		return fmt.Errorf("proxy.enabled requires socks5 or http")
+	}
+	for _, value := range []struct {
+		name string
+		addr string
+	}{{"socks5", cfg.SOCKS5}, {"http", cfg.HTTP}} {
+		if value.addr == "" {
+			continue
+		}
+		if err := validateProxyAddress(value.name, value.addr); err != nil {
+			return err
+		}
+	}
+
+	s.configMu.Lock()
+	next := cloneSupervisorConfig(s.cfg)
+	if next.IsMulti() {
+		found := false
+		for i := range next.Servers {
+			if next.Servers[i].Name != name {
+				continue
+			}
+			next.Servers[i].Proxy = cfg
+			found = true
+			break
+		}
+		if !found {
+			s.configMu.Unlock()
+			return fmt.Errorf("server %q not found", name)
+		}
+	} else {
+		next.Proxy = cfg
+	}
+	oldCfg := worker.cfg.Proxy
+	if err := next.Validate(); err != nil {
+		s.configMu.Unlock()
+		return err
+	}
+	s.configMu.Unlock()
+
+	if err := worker.ApplyProxy(cfg); err != nil {
+		return err
+	}
+	if err := config.SaveClient(next.ConfigPath, next); err != nil {
+		if restoreErr := worker.ApplyProxy(oldCfg); restoreErr != nil {
+			s.log.Warn("restore proxy after config save failure", "server", name, "error", restoreErr)
+		}
+		return err
+	}
+	s.configMu.Lock()
+	s.cfg = next
+	s.configMu.Unlock()
+	return nil
 }
 
 // persistWorker merges a worker edit into the shared multi-server config. The

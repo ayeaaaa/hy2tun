@@ -46,6 +46,7 @@ func (c *Client) ApplyProxy(cfg config.ProxyConfig) error {
 	oldCfg := c.cfg.Proxy
 	c.configMu.Unlock()
 
+	hadProxies := len(c.proxies) > 0
 	c.closeProxiesLocked()
 	if !cfg.Enabled {
 		c.configMu.Lock()
@@ -59,15 +60,25 @@ func (c *Client) ApplyProxy(cfg config.ProxyConfig) error {
 	if err != nil {
 		// Best effort: restore the previous listener set so a failed hot update
 		// does not disable a working proxy.
-		restored, restoreErr := c.bindProxiesLocked(oldCfg)
-		if restoreErr != nil {
-			c.proxyErr = fmt.Sprintf("%v; restore failed: %v", err, restoreErr)
-		} else {
-			c.proxies = restored
-			c.proxyErr = err.Error()
-			if c.started.Load() {
-				c.startProxiesLocked()
+		if hadProxies {
+			restored, restoreErr := c.bindProxiesLocked(oldCfg)
+			if restoreErr != nil {
+				c.proxyErr = fmt.Sprintf("%v; restore failed: %v", err, restoreErr)
+			} else {
+				c.proxies = restored
+				c.proxyErr = err.Error()
+				if c.started.Load() {
+					c.startProxiesLocked()
+				}
 			}
+		} else {
+			// A startup bind failure leaves this server's proxy disabled but
+			// retains the requested addresses for the web console to display.
+			c.configMu.Lock()
+			c.cfg.Proxy = cfg
+			c.cfg.Proxy.Enabled = false
+			c.configMu.Unlock()
+			c.proxyErr = err.Error()
 		}
 		return err
 	}
