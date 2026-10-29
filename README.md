@@ -494,6 +494,12 @@ routers use `linux/arm` or `linux/arm64`. The MIPS builds already use
 `GOMIPS=softfloat`. Check `uname -m` on the router if you are unsure. If flash
 space is tight, deploy only the client binary, or use extroot.
 
+> **OpenWrt support is client-only and manual.** There is no `.ipk` package or
+> LuCI app; install the static binary and the procd init script yourself. The
+> `hy2tund` server is intended for a normal public Linux host. Real-hardware
+> OpenWrt validation is external acceptance and is not performed by CI; see the
+> manual acceptance checklist below.
+
 **Windows:** see [`scripts/windows/README.md`](scripts/windows/README.md) for
 Task Scheduler instructions and firewall notes.
 

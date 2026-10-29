@@ -447,6 +447,11 @@ MIPS 路由器使用 `linux/mipsle` 或 `linux/mips` 构建；ARM 路由器使�
 确定，在路由器上执行 `uname -m`。如果闪存空间紧张，只部署客户端二进制，
 或使用 extroot。
 
+> **OpenWrt 目前只支持客户端，而且需要手动安装。** 没有 `.ipk` 包或 LuCI
+> 应用；需要自行安装静态二进制和 procd 启动脚本。`hy2tund` 服务端面向普通
+> 公网 Linux 主机。OpenWrt 真机验证属于外部验收，不由 CI 执行；见下面的手动
+> 验收清单。
+
 **Windows：** 任务计划程序和防火墙说明见
 [`scripts/windows/README.md`](scripts/windows/README.md)。
 
