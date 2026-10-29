@@ -1622,7 +1622,7 @@ CSS, and JavaScript are embedded with `go:embed`.
 ## Release notes
 
 Every GitHub Release includes both English and Chinese notes, generated from
-`CHANGELOG.md` and `CHANGELOG.zh-CN.md`.
+[`CHANGELOG.md`](CHANGELOG.md) and [`CHANGELOG.zh-CN.md`](CHANGELOG.zh-CN.md).
 
 ## License
 

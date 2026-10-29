@@ -1,5 +1,7 @@
 # Changelog
 
+[English](CHANGELOG.md) | [简体中文](CHANGELOG.zh-CN.md)
+
 All notable changes to this project are documented here.
 
 ## v1.4.2 - 2026-10-29

@@ -44,6 +44,7 @@ $chinese
 
 ---
 
-Full changelog / 完整更新日志: https://github.com/ayeaaaa/hy2tun/blob/main/CHANGELOG.md
+Full changelog (English): https://github.com/ayeaaaa/hy2tun/blob/main/CHANGELOG.md
+完整更新日志（中文）: https://github.com/ayeaaaa/hy2tun/blob/main/CHANGELOG.zh-CN.md
 
 EOF

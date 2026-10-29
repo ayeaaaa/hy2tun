@@ -1438,8 +1438,9 @@ go test ./internal/e2e -v     # 只运行验收测试
 
 ## Release 说明
 
-每个 GitHub Release 都包含英文和中文说明，由 `CHANGELOG.md` 和
-`CHANGELOG.zh-CN.md` 自动生成。
+每个 GitHub Release 都包含英文和中文说明，由
+[`CHANGELOG.md`](CHANGELOG.md) 和
+[`CHANGELOG.zh-CN.md`](CHANGELOG.zh-CN.md) 自动生成。
 
 ## 许可证
 
