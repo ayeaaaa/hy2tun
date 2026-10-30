@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
 
@@ -331,4 +332,255 @@ func GetBasic(path string) (*BasicConfig, error) {
 
 func webTLSConfigured(web WebConfig) bool {
 	return web.TLS.Cert != "" || web.TLS.Key != ""
+}
+
+// BasicUpdate contains the editable basic configuration fields. Pointer fields
+// distinguish a missing JSON field from an explicitly empty value; a nil
+// pointer is rejected for required fields. Auth, ControlToken, and WebPassword
+// preserve the existing secret when nil or empty.
+type BasicUpdate struct {
+	ExpectedRevision   string     `json:"expected_revision"`
+	Server             *string    `json:"server"`
+	Auth               *string    `json:"auth"`
+	ControlToken       *string    `json:"control_token"`
+	TLSSNI             *string    `json:"tls_sni"`
+	TLSInsecure        *bool      `json:"tls_insecure"`
+	ClientName         *string    `json:"client_name"`
+	Mappings           *[]Mapping `json:"mappings"`
+	WebListen          *string    `json:"web_listen"`
+	WebUsername        *string    `json:"web_username"`
+	WebPassword        *string    `json:"web_password"`
+	WebPasswordConfirm *string    `json:"web_password_confirm"`
+}
+
+// SetBasicOptions carries hooks that run while the configuration lock is held.
+type SetBasicOptions struct {
+	// BeforeWrite runs inside the config lock immediately before the file is
+	// written. A returned *BasicError is passed through unchanged.
+	BeforeWrite func() error
+}
+
+// SetBasic validates and writes the basic fields of the client configuration at
+// path, preserving advanced fields and returning the new read model.
+func SetBasic(path string, update *BasicUpdate, opts SetBasicOptions) (*BasicConfig, error) {
+	if err := validateBasicUpdate(update); err != nil {
+		return nil, err
+	}
+	if err := withConfigLock(path, func() error {
+		return setBasicLocked(path, update, opts)
+	}); err != nil {
+		var basicErr *BasicError
+		if errors.As(err, &basicErr) {
+			return nil, basicErr
+		}
+		return nil, basicInternal("write client config %s: %v", path, err)
+	}
+	return GetBasic(path)
+}
+
+func validateBasicUpdate(update *BasicUpdate) error {
+	if update == nil {
+		return basicValidation("update is required")
+	}
+	if update.Server == nil {
+		return basicValidation("server is required")
+	}
+	if update.ClientName == nil {
+		return basicValidation("client_name is required")
+	}
+	if update.Mappings == nil {
+		return basicValidation("mappings is required")
+	}
+	if update.WebListen == nil {
+		return basicValidation("web_listen is required")
+	}
+	if update.WebUsername == nil {
+		return basicValidation("web_username is required")
+	}
+	return nil
+}
+
+func setBasicLocked(path string, update *BasicUpdate, opts SetBasicOptions) error {
+	cfg, data, err := loadClientForEdit(path)
+	exists := true
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			exists = false
+			cfg = nil
+			data = nil
+		} else {
+			var basicErr *BasicError
+			if errors.As(err, &basicErr) {
+				return basicErr
+			}
+			return basicInternal("read client config %s: %v", path, err)
+		}
+	}
+
+	revision := ""
+	if exists {
+		revision = contentRevision(data)
+	}
+	if update.ExpectedRevision == "" {
+		if exists {
+			return basicConflict("expected_revision is required for an existing configuration")
+		}
+	} else if update.ExpectedRevision != revision {
+		return basicConflict("configuration changed on disk; reload and try again")
+	}
+
+	if exists {
+		if cfg.IsMulti() {
+			return &BasicError{
+				Code:    BasicCodeMulti,
+				Message: "multi-server configurations are read-only in the basic editor; use the client console",
+			}
+		}
+		if hasUnknownTopLevelKeys(data) {
+			return &BasicError{
+				Code:    BasicCodeUnknownFields,
+				Message: "configuration contains unknown top-level fields; use the client console or SSH",
+			}
+		}
+	} else {
+		cfg = &ClientConfig{}
+	}
+	cfg.ConfigPath = path
+
+	if err := applyBasicUpdate(cfg, update, exists); err != nil {
+		return err
+	}
+	valid, validationError, advanced := validateBasicState(cfg)
+	if !valid {
+		if advanced {
+			return &BasicError{Code: BasicCodeAdvanced, Message: validationError, Advanced: true}
+		}
+		return basicValidation("%s", validationError)
+	}
+
+	if opts.BeforeWrite != nil {
+		if err := opts.BeforeWrite(); err != nil {
+			var basicErr *BasicError
+			if errors.As(err, &basicErr) {
+				return basicErr
+			}
+			return basicInternal("before write: %v", err)
+		}
+	}
+	if err := SaveClient(path, cfg); err != nil && !errors.Is(err, ErrCommitted) {
+		return basicInternal("save client config %s: %v", path, err)
+	}
+	return nil
+}
+
+// applyBasicUpdate merges the editable fields into cfg. Advanced fields are
+// left untouched unless a server migration clears the client identity.
+func applyBasicUpdate(cfg *ClientConfig, update *BasicUpdate, exists bool) error {
+	oldServer := cfg.Server
+	oldSNI := cfg.TLS.SNI
+	oldAuth := cfg.Auth
+	oldToken := cfg.Control.Token
+
+	newServer := *update.Server
+	newIdentity, err := ServerIdentity(newServer)
+	if err != nil {
+		return basicValidation("server: %v", err)
+	}
+	oldIdentity, oldIdentityErr := ServerIdentity(oldServer)
+	migrated := oldIdentityErr != nil || oldIdentity != newIdentity
+
+	if migrated && exists {
+		if serverLocked(cfg) {
+			return basicAdvanced("server address cannot be changed while advanced server settings are configured; use the client console or SSH")
+		}
+		if update.Auth == nil || *update.Auth == "" {
+			return basicValidation("auth is required when changing the server")
+		}
+		if update.ControlToken == nil || *update.ControlToken == "" {
+			return basicValidation("control_token is required when changing the server")
+		}
+	}
+
+	if update.Auth != nil && *update.Auth != "" && *update.Auth != oldAuth {
+		if len(*update.Auth) < 8 {
+			return basicValidation("auth must be at least 8 bytes")
+		}
+		if cfg.Credentials.Generation > 1 {
+			return basicAdvanced("credentials.generation is greater than 1; use the client console to change auth")
+		}
+		cfg.Auth = *update.Auth
+	}
+	if update.ControlToken != nil && *update.ControlToken != "" && *update.ControlToken != oldToken {
+		if len(*update.ControlToken) < 16 {
+			return basicValidation("control_token must be at least 16 bytes")
+		}
+		if cfg.Credentials.Generation > 1 {
+			return basicAdvanced("credentials.generation is greater than 1; use the client console to change the control token")
+		}
+		cfg.Control.Token = *update.ControlToken
+	}
+
+	if migrated && exists {
+		cfg.Client.ID = ""
+		cfg.Client.Revision = 0
+		if update.TLSSNI == nil || *update.TLSSNI == oldSNI {
+			cfg.TLS.SNI = ""
+		}
+	}
+	cfg.Server = newServer
+
+	if update.TLSSNI != nil && !(migrated && exists && *update.TLSSNI == oldSNI) {
+		cfg.TLS.SNI = *update.TLSSNI
+	}
+	if update.TLSInsecure != nil {
+		cfg.TLS.Insecure = *update.TLSInsecure
+	}
+	cfg.Client.Name = *update.ClientName
+	cfg.Mappings = append([]Mapping(nil), (*update.Mappings)...)
+
+	cfg.Web.Listen = *update.WebListen
+	cfg.Web.Username = *update.WebUsername
+	password := ""
+	if update.WebPassword != nil {
+		password = *update.WebPassword
+	}
+	if password != "" {
+		if cfg.Web.Listen == "" {
+			return basicValidation("web_password must be empty when web.listen is disabled")
+		}
+		if len(password) < 8 {
+			return basicValidation("web_password must be at least 8 characters")
+		}
+		confirm := ""
+		if update.WebPasswordConfirm != nil {
+			confirm = *update.WebPasswordConfirm
+		}
+		if password != confirm {
+			return basicValidation("web_password_confirm must match web_password")
+		}
+		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+		if err != nil {
+			return basicInternal("hash web password: %v", err)
+		}
+		cfg.Web.PasswordHash = string(hash)
+	} else if cfg.Web.Listen == "" {
+		cfg.Web.PasswordHash = ""
+	}
+	return nil
+}
+
+func basicValidation(format string, args ...any) *BasicError {
+	return &BasicError{Code: BasicCodeValidation, Message: fmt.Sprintf(format, args...)}
+}
+
+func basicConflict(format string, args ...any) *BasicError {
+	return &BasicError{Code: BasicCodeConflict, Message: fmt.Sprintf(format, args...)}
+}
+
+func basicAdvanced(format string, args ...any) *BasicError {
+	return &BasicError{Code: BasicCodeAdvanced, Message: fmt.Sprintf(format, args...), Advanced: true}
+}
+
+func basicInternal(format string, args ...any) *BasicError {
+	return &BasicError{Code: BasicCodeInternal, Message: fmt.Sprintf(format, args...)}
 }
