@@ -23,6 +23,10 @@ func main() {
 }
 
 func run() error {
+	if len(os.Args) > 1 && os.Args[1] == "config" {
+		os.Exit(runConfig(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	}
+
 	showVersion := flag.Bool("version", false, "print version and exit")
 	checkConfig := flag.Bool("check-config", false, "validate configuration and exit")
 	configPath := flag.String("c", "client.yaml", "path to client config")
