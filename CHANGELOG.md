@@ -4,6 +4,34 @@
 
 All notable changes to this project are documented here.
 
+## v1.5.0 - 2026-10-30
+
+### Added
+
+- LuCI **Services → hy2tun** page with a basic single-server configuration
+  form, save/save-and-start, start/stop/restart, enable/disable, the most
+  recent 50 log lines, and a link to the client Web console.
+- `hy2tun config get|set` helper for the LuCI page: SHA-256 revision checks,
+  an exclusive configuration lock, atomic writes, bcrypt hashing of the Web
+  password, and stable JSON errors and exit codes.
+- While the service is running, the LuCI form is read-only; saves require the
+  service to be stopped, and a stale revision is rejected as a conflict.
+- Safe server migration from the basic form: changing the server requires new
+  HY2 authentication and control token and clears the stored client ID and
+  revision.
+- Advanced single-server fields are preserved when the basic form is saved.
+  Multi-server configurations, unknown top-level fields, and rotated
+  credentials remain read-only or protected in LuCI and use the client console
+  or SSH.
+
+### Changed
+
+- The OpenWrt package no longer creates `/etc/hy2tun/client.yaml` or enables the
+  service during installation. The shipped `client.yaml.example` contains only
+  the basic single-server fields, and first-run configuration happens in LuCI
+  (install → fill the form → save → start → open the console).
+- `luci-app-hy2tun` now depends on `hy2tun (>= 1.5.0)`.
+
 ## v1.4.4 - 2026-10-29
 
 ### Fixed

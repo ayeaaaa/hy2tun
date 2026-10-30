@@ -427,7 +427,8 @@ sudo journalctl -u hy2tund -f
 
 - `hy2tun_<version>_<arch>.ipk` —— `arch` 按路由器 `uname -m` 选择
   `mips`、`mipsle`、`arm`、`arm64` 或 `amd64`
-- `luci-app-hy2tun_<version>_all.ipk` —— LuCI 状态页和 Web 控制台入口
+- `luci-app-hy2tun_<version>_all.ipk` —— LuCI 配置页、服务控制、日志和
+  Web 控制台入口；依赖 `hy2tun (>= 1.5.0)`
 
 在路由器上安装：
 
@@ -437,21 +438,42 @@ opkg install ./hy2tun_<version>_<arch>.ipk
 opkg install ./luci-app-hy2tun_<version>_all.ipk
 ```
 
-安装包会放入 `/usr/bin/hy2tun`、procd 启动脚本和
-`/etc/hy2tun/client.yaml.example`。postinst 会在缺少
-`/etc/hy2tun/client.yaml` 时复制示例配置并启用服务，但不会自动启动，直到
-你完成配置。
+`hy2tun` 包会安装 `/usr/bin/hy2tun`、procd 启动脚本和
+`/etc/hy2tun/client.yaml.example`。示例只包含单服务端基础字段。安装过程
+**不会**创建 `/etc/hy2tun/client.yaml`，不会启用服务，也不会启动服务。如果
+已存在活动配置，postinst 只会把权限设置为 `0600`。
 
-编辑 `/etc/hy2tun/client.yaml`，填写服务端、凭据、control token 和映射，然后
-启动：
+首次在 LuCI 中配置：
 
-```bash
-/etc/init.d/hy2tun start
-logread -f | grep hy2tun
-```
+1. 打开 **LuCI → 服务 → hy2tun**。缺少配置时页面显示“未创建”，表单为空。
+2. 填写单服务端基础表单：服务端地址（`host:port`）、HY2 认证密码、control
+   token（至少 16 字节）、客户端名称、可选的 TLS SNI 和“跳过证书校验”、
+   端口映射，以及 Web 控制台监听地址、用户名和密码。
+3. 选择“保存”或“保存并启动”。保存要求服务已停止；客户端会在启动前校验
+   配置。
+4. 在同一页面启动、停止、重启、启用或停用服务。页面显示服务状态、最近
+   50 行日志，服务运行后提供“打开控制台”链接。控制台默认端口为 `7501`。
+5. Web 控制台密码至少 8 个字符，且必须与确认输入一致。密码留空会保留
+   现有哈希。启用控制台时，未设置密码则页面拒绝启动服务。
 
-打开 **LuCI → 服务 → hy2tun** 查看服务状态和客户端 Web 控制台入口。控制台默认
-端口是 `7501`。安装后可在 **系统 → 启动项** 中启用或停用服务。
+LuCI 表单不会显示已有的 HY2 认证、control token 或 Web 密码；密码类字段留空
+表示保持不变。
+
+服务运行期间表单只读，需先停止服务再编辑。每次保存都会提交加载配置时的
+SHA-256 revision。如果文件在此期间发生变化（另一个浏览器标签页、客户端
+控制台或服务端推送），保存会以冲突拒绝，并提示刷新。保存基础表单会保留
+`tls.ca`、`tls.pin_sha256`、`obfs`、`bandwidth`、`transport`、`proxy`、
+`web.tls`、`web.trust_proxy`、`log.level` 和 `log.file` 等单服务端高级
+字段，但 YAML 注释可能丢失。
+
+基础表单只管理一个服务端。多服务端（`servers:`）、自定义 CA 或证书固定、
+obfs、带宽限制、UDP 端口跳跃、本地 SOCKS5/HTTP 代理、Web 控制台 TLS 或
+自定义日志文件，请使用客户端 Web 控制台，或通过 SSH 编辑
+`/etc/hy2tun/client.yaml`。通过 SSH 编辑前请先停止服务。多服务端配置在
+LuCI 中隐藏表单且只读。包含未知顶层字段的配置会禁用保存。存在自定义 CA
+或证书固定、obfs、带宽、transport 或已轮换凭据时，服务端地址会被锁定；
+更换服务端需要重新填写 HY2 认证和 control token，并会清除已保存的 client
+ID 和 revision。
 
 包元数据使用 `Architecture: all`，方便安装；但二进制本身区分架构，所以必须
 下载与路由器 CPU 匹配的 `.ipk`。MIPS 路由器使用 `mipsle` 或 `mips`（软浮点）；
@@ -1380,18 +1402,26 @@ Go 测试只在 Linux 上运行。OpenWrt 和 Windows 真机执行属于外部�
 
 ### OpenWrt
 
-1. 安装与 `uname -m` 匹配的归档（`mipsle`/`mips` 是软浮点；`arm` 是
-   GOARM=7）。确认 `hy2tun` 无需额外共享库即可启动。
-2. 把 `examples/client.yaml` 复制到 `/etc/hy2tun/client.yaml`，设置服务端、
-   凭据以及至少一条 TCP 和一条 UDP 映射，然后 `chmod 600`。
-3. 安装 `scripts/openwrt/hy2tun.init`，启用并启动服务。确认 `logread` 显示
-   控制握手完成且没有崩溃循环。
-4. 从局域网登录客户端控制台，添加一条映射，并确认它出现在服务端控制台。
+1. 安装与 `uname -m` 匹配的 `hy2tun_<version>_<arch>.ipk`（`mipsle`/`mips`
+   是软浮点；`arm` 是 GOARM=7）和 `luci-app-hy2tun_<version>_all.ipk`。确认
+   `hy2tun` 无需额外共享库即可启动。
+2. 配置前确认 `/etc/hy2tun/client.yaml` 不存在，且服务未启用。
+3. 打开 **LuCI → 服务 → hy2tun**，填写基础表单、保存并启动。确认页面显示
+   运行中，且 `logread` 显示控制握手完成、没有崩溃循环。
+4. 从页面打开客户端控制台并登录。添加一条 TCP 和一条 UDP 映射，确认它们
+   出现在服务端控制台。
 5. 从局域网外部通过映射的 TCP 端口连接，并向映射的 UDP 端口发送数据报；
    确认两者都有响应。
-6. 重启服务和路由器。确认客户端重连、映射恢复，配置文件（包括服务端分配
+6. 停止服务，修改一条映射，选择“保存并启动”，并从服务端验证新映射。
+7. 重启服务和路由器。确认客户端重连、映射恢复，配置文件（包括服务端分配
    的端口）保留。
-7. 从控制台删除并禁用一条映射。确认公网监听关闭，活跃连接断开。
+8. 从控制台删除并禁用一条映射。确认公网监听关闭，活跃连接断开。
+9. 打开两个 LuCI 标签页，分别保存，确认第二次保存报告 revision 冲突。
+10. 换成 `servers:` 配置并刷新页面，确认表单隐藏且控制台入口仍可用。对
+    单服务端高级配置保存一次基础修改，确认 `obfs`、`proxy` 和 `web.tls`
+    仍然保留。
+11. 设置 `log.file`，确认页面显示该文件的末尾内容。写入无效 YAML，确认
+    页面报告错误；服务运行中时停止和停用按钮仍可用。
 
 ### Windows
 

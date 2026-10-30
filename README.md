@@ -473,7 +473,8 @@ Download the two package files from the same Release:
 
 - `hy2tun_<version>_<arch>.ipk` — choose `mips`, `mipsle`, `arm`, `arm64`, or
   `amd64` to match `uname -m` on the router
-- `luci-app-hy2tun_<version>_all.ipk` — LuCI status page and Web-console link
+- `luci-app-hy2tun_<version>_all.ipk` — LuCI configuration page, service
+  controls, logs, and Web-console link; it depends on `hy2tun (>= 1.5.0)`
 
 Install them on the router:
 
@@ -483,22 +484,54 @@ opkg install ./hy2tun_<version>_<arch>.ipk
 opkg install ./luci-app-hy2tun_<version>_all.ipk
 ```
 
-The package installs `/usr/bin/hy2tun`, the procd init script, and
-`/etc/hy2tun/client.yaml.example`. The post-install script creates
-`/etc/hy2tun/client.yaml` when it is missing and enables the service; it does
-not start it until you configure it.
+The `hy2tun` package installs `/usr/bin/hy2tun`, the procd init script, and
+`/etc/hy2tun/client.yaml.example`. The example covers only the basic
+single-server fields. Installation does **not** create
+`/etc/hy2tun/client.yaml`, does not enable the service, and does not start it.
+If an active configuration already exists, the post-install script only sets
+its permissions to `0600`.
 
-Edit `/etc/hy2tun/client.yaml` with the server, credentials, control token,
-and mappings, then start the service:
+Configure the client for the first time in LuCI:
 
-```bash
-/etc/init.d/hy2tun start
-logread -f | grep hy2tun
-```
+1. Open **LuCI → Services → hy2tun**. A missing configuration is reported as
+   not created, and the form starts empty.
+2. Fill in the basic single-server form: server address as `host:port`, HY2
+   authentication password, control token (at least 16 bytes), client
+   name, optional TLS SNI and “skip certificate verification”, port mappings,
+   and the Web console listen address, username, and password.
+3. Select **Save** or **Save & start**. Saving requires the service to be
+   stopped. The client validates the configuration before it starts.
+4. Use the same page to start, stop, restart, enable, or disable the service.
+   The page shows the service state, the most recent 50 log lines, and an
+   **Open console** link once the service is running. The console defaults to
+   port `7501`.
+5. The Web console password must be at least 8 characters and must match the
+   confirmation field. A blank password keeps the existing hash. A password is
+   required before the page will start the service while the console is
+   enabled.
 
-Open **LuCI → Services → hy2tun** for service status and a link to the client
-Web console. The console defaults to port `7501`. Use **System → Startup** to
-enable or disable the service after installation.
+The LuCI form never displays existing HY2 authentication, control token, or Web
+password values; leave a secret field blank to keep the current value.
+
+While the service is running, the form is read-only; stop it before editing.
+Every save sends the SHA-256 revision of the configuration file it loaded. If
+the file changed in the meantime (another browser tab, the client console, or a
+server push), the save is rejected as a conflict and the page asks you to
+reload. Saving the basic form preserves advanced single-server fields such as
+`tls.ca`, `tls.pin_sha256`, `obfs`, `bandwidth`, `transport`, `proxy`,
+`web.tls`, `web.trust_proxy`, `log.level`, and `log.file`, but YAML comments
+may be lost.
+
+The basic form manages one server. Use the client Web console or edit
+`/etc/hy2tun/client.yaml` over SSH for multiple servers (`servers:`), a custom
+CA or certificate pin, obfs, bandwidth limits, UDP port hopping, local
+SOCKS5/HTTP proxies, Web console TLS, or a custom log file. Stop the service
+before editing the file over SSH. A multi-server configuration hides the form
+and is read-only in LuCI. A configuration with unknown top-level fields
+disables saving. The server address is locked when a custom CA or certificate
+pin, obfs, bandwidth, transport, or rotated credentials are present; changing
+to a different server requires new HY2 authentication and control token and
+clears the stored client ID and revision.
 
 The package metadata uses `Architecture: all` so it can be installed on any
 target; the binary itself is architecture-specific, so download the `.ipk`
@@ -1555,21 +1588,34 @@ version, and date with the result.
 
 ### OpenWrt
 
-1. Install the archive matching `uname -m` (`mipsle`/`mips` are softfloat;
-   `arm` is GOARM=7). Confirm `hy2tun` starts without extra shared libraries.
-2. Copy `examples/client.yaml` to `/etc/hy2tun/client.yaml`, set the server,
-   credentials, and at least one TCP and one UDP mapping, then `chmod 600`.
-3. Install `scripts/openwrt/hy2tun.init`, enable it, and start the service.
-   Confirm `logread` shows a completed control handshake and no crash loop.
-4. Log in to the client console from the LAN, add a mapping, and verify it
-   appears in the server console.
+1. Install `hy2tun_<version>_<arch>.ipk` (matching `uname -m`; `mipsle`/`mips`
+   are softfloat, `arm` is GOARM=7) and `luci-app-hy2tun_<version>_all.ipk`.
+   Confirm `hy2tun` starts without extra shared libraries.
+2. Before configuring, confirm `/etc/hy2tun/client.yaml` does not exist and the
+   service is not enabled.
+3. Open **LuCI → Services → hy2tun**, fill the basic form, save, and start.
+   Confirm the page reports running and `logread` shows a completed control
+   handshake with no crash loop.
+4. Open the client console from the page and log in. Add a TCP and a UDP
+   mapping, and verify they appear in the server console.
 5. From outside the LAN, connect through the mapped TCP port and send a UDP
    datagram through the mapped UDP port; verify both replies.
-6. Restart the service and reboot the router. Confirm the client reconnects,
+6. Stop the service, edit a mapping, select **Save & start**, and verify the
+   new mapping from the server.
+7. Restart the service and reboot the router. Confirm the client reconnects,
    mappings return, and the config file (including server-assigned ports)
    survives.
-7. Delete and disable a mapping from the console. Confirm the public listener
+8. Delete and disable a mapping from the console. Confirm the public listener
    closes and active connections drop.
+9. Open two LuCI tabs, save from both, and confirm the second save reports a
+   revision conflict.
+10. Replace the configuration with a `servers:` file, reload the page, and
+    confirm the form is hidden and the console link remains available. With a
+    single-server advanced configuration, save a basic change and confirm
+    `obfs`, `proxy`, and `web.tls` remain.
+11. Set `log.file` and confirm the page shows the tail of that file. Introduce
+    invalid YAML and confirm the page reports the error while stop and disable
+    remain available when the service is running.
 
 ### Windows
 
