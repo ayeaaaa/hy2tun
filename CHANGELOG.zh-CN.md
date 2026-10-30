@@ -4,6 +4,20 @@
 
 本文件记录项目的重要变更。
 
+## v1.5.3 - 2026-10-30
+
+### 新增
+
+- `/metrics` 支持可选的 `web.metrics_token` Bearer 认证；为空时保持仅适合
+  回环环境的历史无认证行为。
+- CI 增加 `staticcheck`。
+- OpenWrt 包 post-install 会验证安装的二进制能在目标 CPU 上实际运行。
+
+### 变更
+
+- systemd 单元增加更严格的文件系统、设备、内核和地址族沙箱限制，同时保留
+  `/etc/hy2tun` 和 `/var/lib/hy2tun` 可写。
+
 ## v1.5.2 - 2026-10-30
 
 ### 变更

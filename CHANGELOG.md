@@ -4,6 +4,21 @@
 
 All notable changes to this project are documented here.
 
+## v1.5.3 - 2026-10-30
+
+### Added
+
+- Optional `web.metrics_token` Bearer authentication for `/metrics`; empty
+  keeps the historical unauthenticated endpoint for loopback-only setups.
+- `staticcheck` in CI.
+- OpenWrt package post-install now verifies that the installed binary actually
+  runs on the target CPU.
+
+### Changed
+
+- systemd units use stricter filesystem, device, kernel, and address-family
+  sandboxing while keeping `/etc/hy2tun` and `/var/lib/hy2tun` writable.
+
 ## v1.5.2 - 2026-10-30
 
 ### Changed

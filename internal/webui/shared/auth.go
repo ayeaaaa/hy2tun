@@ -731,6 +731,21 @@ func (h *LoginHandler) log() *slog.Logger {
 	return slog.Default()
 }
 
+// MetricsAuthorized reports whether a /metrics request may proceed. An empty
+// token preserves the historical unauthenticated endpoint for loopback-only
+// deployments; a configured token requires Authorization: Bearer <token>.
+func MetricsAuthorized(r *http.Request, token string) bool {
+	if token == "" {
+		return true
+	}
+	if r == nil {
+		return false
+	}
+	got := r.Header.Get("Authorization")
+	want := "Bearer " + token
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
 // ClientIP returns the request's remote host without its port. Forwarded
 // headers are deliberately ignored because they are attacker-controlled unless
 // a trusted proxy strips them.

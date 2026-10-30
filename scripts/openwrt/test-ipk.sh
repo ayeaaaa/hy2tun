@@ -23,6 +23,7 @@ grep -q './etc/hy2tun/client.yaml.example' "$work/client/files.txt"
 # a configuration that already exists.
 grep -q '\[ -f /etc/hy2tun/client.yaml \]' "$work/client/postinst"
 grep -q 'chmod 600 /etc/hy2tun/client.yaml' "$work/client/postinst"
+grep -q '/usr/bin/hy2tun -version' "$work/client/postinst"
 ! grep -q 'cp' "$work/client/postinst"
 ! grep -q 'enable' "$work/client/postinst"
 

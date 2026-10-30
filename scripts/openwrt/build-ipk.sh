@@ -60,6 +60,12 @@ CONTROL
 
 cat > "$control/postinst" <<'POSTINST'
 #!/bin/sh
+# The package is Architecture: all because OpenWrt target names vary, but the
+# binary is CPU-specific. Fail early instead of leaving an unusable install.
+if ! /usr/bin/hy2tun -version >/dev/null 2>&1; then
+	echo "hy2tun: binary does not run on this CPU; install the matching architecture package" >&2
+	exit 1
+fi
 # Never create /etc/hy2tun/client.yaml and never start it at boot.
 # Only tighten permissions when an active configuration already exists.
 [ -f /etc/hy2tun/client.yaml ] && chmod 600 /etc/hy2tun/client.yaml 2>/dev/null

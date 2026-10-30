@@ -550,6 +550,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if !shared.MetricsAuthorized(r, s.cfg.MetricsToken) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	status := s.api.Status()
 	mappings := s.api.Mappings()
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")

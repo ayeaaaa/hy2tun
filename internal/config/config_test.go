@@ -95,6 +95,11 @@ web:
 	require.Equal(t, int64(1), cfg.Credentials.Generation)
 }
 
+func TestValidateWebMetricsTokenLength(t *testing.T) {
+	require.ErrorContains(t, validateWeb(&WebConfig{Listen: "127.0.0.1:7500", MetricsToken: "short"}), "at least 16")
+	require.NoError(t, validateWeb(&WebConfig{Listen: "127.0.0.1:7500", MetricsToken: "0123456789abcdef"}))
+}
+
 func TestLoadServerConfigTightensPermissions(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "server.yaml")

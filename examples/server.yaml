@@ -93,6 +93,8 @@ web:
   # X-Forwarded-For and X-Real-IP with the direct client address.
   # It makes login rate limiting use the real client IP instead of the proxy's.
   trust_proxy: false
+  # Optional Bearer token for /metrics; empty keeps it unauthenticated.
+  metrics_token: ""
   tls:
     cert: ""
     key: ""

@@ -762,6 +762,16 @@ func TestLoginHandlerUsesUpdatedAdminCredentials(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, attempt("root", "second-password").Code)
 }
 
+func TestMetricsAuthorized(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/metrics", nil)
+	require.True(t, MetricsAuthorized(req, ""))
+	require.False(t, MetricsAuthorized(req, "0123456789abcdef"))
+	req.Header.Set("Authorization", "Bearer wrong")
+	require.False(t, MetricsAuthorized(req, "0123456789abcdef"))
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+	require.True(t, MetricsAuthorized(req, "0123456789abcdef"))
+}
+
 func TestLoginHandlerSetAdminUpdatesStaticFallback(t *testing.T) {
 	sessions, err := NewSessionManager(testSecret(), time.Hour)
 	require.NoError(t, err)

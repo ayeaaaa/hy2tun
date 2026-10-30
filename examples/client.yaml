@@ -96,6 +96,8 @@ web:
   # Set to true only when a trusted reverse proxy overwrites both
   # X-Forwarded-For and X-Real-IP with the direct client address.
   trust_proxy: false
+  # Optional Bearer token for /metrics; empty keeps it unauthenticated.
+  metrics_token: ""
   tls:
     cert: ""
     key: ""

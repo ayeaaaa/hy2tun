@@ -44,14 +44,13 @@ type fakeClientAPI struct {
 	name     string
 	web      fakeWebConfig
 
-	addErr      error
-	updateErr   error
-	deleteErr   error
-	proxyErr    error
-	settingsErr error
-	nameErr     error
-	webErr      error
-	rotateErr   error
+	addErr    error
+	updateErr error
+	deleteErr error
+	proxyErr  error
+	nameErr   error
+	webErr    error
+	rotateErr error
 
 	added   []config.Mapping
 	updated []config.Mapping

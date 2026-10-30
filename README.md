@@ -317,9 +317,10 @@ When the web console is enabled, both binaries expose:
 - `GET /metrics` — Prometheus text metrics for aggregate traffic, mappings,
   connection state, credential generation, and uptime.
 
-These endpoints are intentionally unauthenticated for local monitoring. Keep
-the web listener on loopback, a VPN, or a trusted reverse proxy; do not expose
-it directly to the public internet.
+`/healthz` is intentionally unauthenticated for local probes. `/metrics` is
+also unauthenticated when `web.metrics_token` is empty; set that field and send
+`Authorization: Bearer <token>` when the listener is reachable beyond
+loopback/VPN. Do not expose the web listener directly to the public internet.
 
 ## Quick start
 
@@ -672,6 +673,7 @@ Rules:
 | `web.username` | Console username. Default `admin` when `web.listen` is set. |
 | `web.password_hash` | bcrypt hash. Empty generates a password on first start. |
 | `web.trust_proxy` | Trust `X-Forwarded-For`/`X-Real-IP` for login rate limiting. Enable only behind a proxy that overwrites both headers with the direct client address. Default `false`. |
+| `web.metrics_token` | Optional Bearer token for `/metrics`, at least 16 bytes. Empty keeps `/metrics` unauthenticated; use a token if the web listener is reachable beyond loopback/VPN. |
 | `web.tls.cert`, `web.tls.key` | Optional HTTPS certificate pair for the console. |
 | `state_file` | Persistent state JSON. Empty keeps state in memory. |
 | `log.level` | `debug`, `info`, `warn`, or `error`. |
@@ -701,6 +703,7 @@ Rules:
 | `web.listen` | Client console address. The example uses `0.0.0.0:7501`. |
 | `web.username`, `web.password_hash` | Console login. Empty hash generates a password. |
 | `web.trust_proxy` | Trust `X-Forwarded-For`/`X-Real-IP` for login rate limiting. Enable only behind a proxy that overwrites both headers with the direct client address. Default `false`. |
+| `web.metrics_token` | Optional Bearer token for `/metrics`, at least 16 bytes. Empty keeps `/metrics` unauthenticated; use a token if the web listener is reachable beyond loopback/VPN. |
 | `web.tls.cert`, `web.tls.key` | Optional HTTPS for the client console. |
 | `proxy.enabled` | Per-server proxy switch, default `false`. Can also be changed from the client console. |
 | `proxy.socks5` | Optional local SOCKS5 listen address, for example `127.0.0.1:1080`. Editable from the client console. |
@@ -821,7 +824,7 @@ minute per client IP. All mutations require the CSRF header and same-origin
 | `credentials.generation`, `credentials.previous_*` | Managed by rotation and revoke. Not edited directly in the console. |
 | `listen`, `listen_host` | No. Edit the file and restart. |
 | `tls.*`, `obfs.*`, `bandwidth.*`, `quic.*` | No. Edit the file and restart. |
-| `web.listen`, `web.tls.*` | No. Edit the file and restart. |
+| `web.listen`, `web.metrics_token`, `web.tls.*` | No. Edit the file and restart. |
 | `auth.type`, `auth.users` | No. `userpass` cannot rotate credentials online; edit the file and restart. |
 | `state_file`, `log.*` | No. Edit the file and restart. |
 

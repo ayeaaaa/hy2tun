@@ -275,8 +275,10 @@ hy2tun --check-config -c /etc/hy2tun/client.yaml
 - `GET /metrics` —— Prometheus 文本指标，包含聚合流量、映射数、连接状态、
   凭据代际和运行时间。
 
-这两个端点有意不要求登录，方便本机监控。请把 Web 监听保持在回环地址、VPN
-或可信反向代理后面，不要直接暴露到公网。
+`/healthz` 有意不要求登录，方便本机探活。`/metrics` 在
+`web.metrics_token` 为空时也不要求登录；如果监听地址超出回环/VPN 范围，请
+设置该字段并发送 `Authorization: Bearer <token>`。不要把 Web 监听直接暴露到
+公网。
 
 ## 快速开始
 
@@ -601,6 +603,7 @@ servers:
 | `web.username` | 控制台用户名。设置 `web.listen` 时默认 `admin`。 |
 | `web.password_hash` | bcrypt 哈希。为空时首次启动生成密码。 |
 | `web.trust_proxy` | 登录限流是否信任 `X-Forwarded-For`/`X-Real-IP`。仅当代理会用直连客户端地址覆盖这两个头时启用。默认 `false`。 |
+| `web.metrics_token` | `/metrics` 的可选 Bearer token，至少 16 字节。为空时 `/metrics` 不要求认证；Web 监听超出回环/VPN 范围时应设置。 |
 | `web.tls.cert`、`web.tls.key` | 控制台可选 HTTPS 证书对。 |
 | `state_file` | 持久化状态 JSON。为空时状态只保存在内存。 |
 | `log.level` | `debug`、`info`、`warn` 或 `error`。 |
@@ -630,6 +633,7 @@ servers:
 | `web.listen` | 客户端控制台地址。示例使用 `0.0.0.0:7501`。 |
 | `web.username`、`web.password_hash` | 控制台登录。哈希为空时生成密码。 |
 | `web.trust_proxy` | 登录限流是否信任 `X-Forwarded-For`/`X-Real-IP`。仅当代理会用直连客户端地址覆盖这两个头时启用。默认 `false`。 |
+| `web.metrics_token` | `/metrics` 的可选 Bearer token，至少 16 字节。为空时 `/metrics` 不要求认证；Web 监听超出回环/VPN 范围时应设置。 |
 | `web.tls.cert`、`web.tls.key` | 客户端控制台可选 HTTPS。 |
 | `proxy.enabled` | 每个服务端的代理开关，默认 `false`；也可以在客户端控制台修改。 |
 | `proxy.socks5` | 可选的本地 SOCKS5 监听地址，例如 `127.0.0.1:1080`；可在客户端控制台修改。 |
@@ -739,7 +743,7 @@ openssl x509 -in cert.pem -outform der | sha256sum
 | `credentials.generation`、`credentials.previous_*` | 由轮换和撤销管理，不能在控制台直接编辑。 |
 | `listen`、`listen_host` | 不可以。修改文件并重启。 |
 | `tls.*`、`obfs.*`、`bandwidth.*`、`quic.*` | 不可以。修改文件并重启。 |
-| `web.listen`、`web.tls.*` | 不可以。修改文件并重启。 |
+| `web.listen`、`web.metrics_token`、`web.tls.*` | 不可以。修改文件并重启。 |
 | `auth.type`、`auth.users` | 不可以。`userpass` 不能在线轮换凭据；修改文件并重启。 |
 | `state_file`、`log.*` | 不可以。修改文件并重启。 |
 

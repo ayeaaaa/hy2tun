@@ -16,6 +16,16 @@ RestartSec=2s
 LimitNOFILE=1048576
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+ReadWritePaths=/etc/hy2tun /var/lib/hy2tun
 # Create /etc/hy2tun and /var/lib/hy2tun automatically. The state file and the
 # generated web password hash/web session key live in these directories.
 ConfigurationDirectory=hy2tun

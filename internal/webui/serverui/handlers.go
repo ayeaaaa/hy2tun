@@ -482,6 +482,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if !shared.MetricsAuthorized(r, s.cfg.MetricsToken) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	overview := s.api.Overview()
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")

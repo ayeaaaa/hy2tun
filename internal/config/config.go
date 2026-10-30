@@ -138,6 +138,7 @@ type WebConfig struct {
 	Listen       string       `yaml:"listen" json:"listen"`
 	Username     string       `yaml:"username" json:"username"`
 	PasswordHash string       `yaml:"password_hash" json:"-"`
+	MetricsToken string       `yaml:"metrics_token,omitempty" json:"-"`
 	TLS          WebTLSConfig `yaml:"tls" json:"tls"`
 	// TrustProxy enables X-Forwarded-For client-IP extraction for the login
 	// rate limiter. It must only be enabled when a trusted reverse proxy
@@ -320,6 +321,9 @@ func validateWeb(web *WebConfig) error {
 	}
 	if (web.TLS.Cert == "") != (web.TLS.Key == "") {
 		return fmt.Errorf("web.tls.cert and web.tls.key must be set together")
+	}
+	if web.MetricsToken != "" && len(web.MetricsToken) < 16 {
+		return fmt.Errorf("web.metrics_token must be at least 16 bytes")
 	}
 	return nil
 }
