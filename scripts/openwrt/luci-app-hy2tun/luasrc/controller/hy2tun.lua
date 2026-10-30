@@ -134,12 +134,22 @@ local function run_capture(command)
 	return code, out, err
 end
 
+-- Run a fixed init command with a portable shell watchdog. OpenWrt's BusyBox
+-- does not necessarily provide `timeout`, so use background jobs and wait.
+local function run_bounded(seconds, command)
+	return sys.call(
+		"(" .. command .. ") >/dev/null 2>&1 & child=$!; " ..
+		"(sleep " .. seconds .. "; kill -9 $child 2>/dev/null) & watchdog=$!; " ..
+		"wait $child; rc=$?; kill $watchdog 2>/dev/null; exit $rc"
+	)
+end
+
 local function service_running()
-	return sys.call("timeout 2 " .. INIT .. " status >/dev/null 2>&1") == 0
+	return run_bounded(2, INIT .. " status") == 0
 end
 
 local function service_enabled()
-	return sys.call("timeout 2 " .. INIT .. " enabled >/dev/null 2>&1") == 0
+	return run_bounded(2, INIT .. " enabled") == 0
 end
 
 local function run_service(op)
@@ -147,7 +157,7 @@ local function run_service(op)
 		return 1
 	end
 
-	return sys.call(INIT .. " " .. op .. " >/dev/null 2>&1")
+	return run_bounded(10, INIT .. " " .. op)
 end
 
 local function wait_running(want, timeout)

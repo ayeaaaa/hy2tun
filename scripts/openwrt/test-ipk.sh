@@ -52,7 +52,7 @@ tar -xOzf "$work/luci/data.tar.gz" ./usr/lib/lua/luci/controller/hy2tun.lua \
 tar -xOzf "$work/luci/data.tar.gz" ./usr/lib/lua/luci/view/hy2tun/status.htm \
 	> "$work/luci/status.htm"
 grep -q 'local fs = require "nixio.fs"' "$work/luci/controller.lua"
-grep -q 'status >/dev/null 2>&1' "$work/luci/controller.lua"
+grep -q 'run_bounded(2, INIT .. " status")' "$work/luci/controller.lua"
 ! grep -q 'status >/dev/null 2>&1' "$work/luci/status.htm"
 
 # Syntax-check the controller when a Lua toolchain is available. The view is
