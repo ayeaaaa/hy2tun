@@ -14,15 +14,17 @@ All notable changes to this project are documented here.
 - `hy2tun config get|set` helper for the LuCI page: SHA-256 revision checks,
   an exclusive configuration lock, atomic writes, bcrypt hashing of the Web
   password, and stable JSON errors and exit codes.
+- Configuration validation before saving: invalid basic fields are rejected
+  with field errors, and advanced-field failures are reported without
+  overwriting the existing file.
 - While the service is running, the LuCI form is read-only; saves require the
   service to be stopped, and a stale revision is rejected as a conflict.
 - Safe server migration from the basic form: changing the server requires new
   HY2 authentication and control token and clears the stored client ID and
   revision.
 - Advanced single-server fields are preserved when the basic form is saved.
-  Multi-server configurations, unknown top-level fields, and rotated
-  credentials remain read-only or protected in LuCI and use the client console
-  or SSH.
+  Multi-server configurations and unknown top-level fields remain read-only or
+  protected in LuCI; rotated credentials are managed from the client console.
 
 ### Changed
 

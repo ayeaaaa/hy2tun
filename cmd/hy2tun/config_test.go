@@ -83,14 +83,14 @@ client:
 }
 
 func TestRunConfigGetReadErrorExitCode(t *testing.T) {
-	// A directory cannot be read as a config file, which is an internal error
-	// rather than a parse error, but both map to exit code 1.
+	// A directory cannot be read as a config file. The config get contract
+	// reports YAML parse and IO failures as parse_error with exit code 1.
 	path := t.TempDir()
 	var out, errOut bytes.Buffer
 	code := runConfig([]string{"get", "-c", path}, strings.NewReader(""), &out, &errOut)
 	require.Equal(t, 1, code)
 	require.Empty(t, out.String())
-	require.Contains(t, errOut.String(), `"code":"internal"`)
+	require.Contains(t, errOut.String(), `"code":"parse_error"`)
 }
 
 func TestRunConfigGetHidesSecrets(t *testing.T) {

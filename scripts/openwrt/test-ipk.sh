@@ -21,6 +21,7 @@ grep -q './etc/hy2tun/client.yaml.example' "$work/client/files.txt"
 # The package ships an example only. Post-install must never copy an active
 # configuration or start the service at boot; it may only fix permissions on
 # a configuration that already exists.
+grep -q '\[ -f /etc/hy2tun/client.yaml \]' "$work/client/postinst"
 grep -q 'chmod 600 /etc/hy2tun/client.yaml' "$work/client/postinst"
 ! grep -q 'cp' "$work/client/postinst"
 ! grep -q 'enable' "$work/client/postinst"
@@ -54,14 +55,49 @@ grep -q 'local fs = require "nixio.fs"' "$work/luci/controller.lua"
 grep -q 'status >/dev/null 2>&1' "$work/luci/controller.lua"
 ! grep -q 'status >/dev/null 2>&1' "$work/luci/status.htm"
 
-# The action endpoint must be POST-only (post("action") sets post = true)
-# and the page must send the CSRF token with its form posts.
+# Syntax-check the controller when a Lua toolchain is available. The view is
+# an HTML template, not a loadable Lua chunk.
+if command -v luac >/dev/null 2>&1; then
+	luac -p "$work/luci/controller.lua"
+elif command -v lua >/dev/null 2>&1; then
+	lua -e "assert(loadfile([[$work/luci/controller.lua]]))"
+else
+	echo "Lua interpreter not found; skipping controller syntax check" >&2
+fi
+
+# Syntax-check the page's inline script when Node.js is available. The LuCI
+# template tags are inside JavaScript string literals.
+if command -v node >/dev/null 2>&1; then
+	sed -n '/^<script>$/,/^<\/script>$/p' "$work/luci/status.htm" |
+		sed '1d;$d' > "$work/luci/status.js"
+	node --check "$work/luci/status.js"
+else
+	echo "Node.js not found; skipping page script syntax check" >&2
+fi
+
+# The action endpoint must be POST-only via post("action"), not a route node
+# with a hand-set post flag, and the page must send the CSRF token.
 grep -q 'post("action")' "$work/luci/controller.lua"
+! grep -q '\.post = true' "$work/luci/controller.lua"
+! grep -q 'action\.post' "$work/luci/controller.lua"
 grep -q 'id="hy2tun-csrf-token"' "$work/luci/status.htm"
+
+# A save that succeeds but cannot read the configuration back must discard the
+# stale form, so a retry cannot post the old values with the new revision.
+sed -n '/if (res.saved === true)/,/if (typeof res.running === "boolean")/p' \
+	"$work/luci/status.htm" > "$work/luci/saved-branch.txt"
+grep -q 'state.config = null' "$work/luci/saved-branch.txt"
+grep -q 'state.revision = ""' "$work/luci/saved-branch.txt"
+grep -q 'state.savedSnapshot = null' "$work/luci/saved-branch.txt"
 
 # The page must expose the basic form, mapping table, and save control.
 grep -q 'config get' "$work/luci/controller.lua"
 grep -q 'id="hy2tun-server"' "$work/luci/status.htm"
 grep -q 'id="hy2tun-mappings"' "$work/luci/status.htm"
 grep -q 'id="hy2tun-save"' "$work/luci/status.htm"
+
+# Advanced-field guidance must separate console-editable settings from
+# SSH-only settings.
+grep -q '客户端控制台可修改' "$work/luci/status.htm"
+grep -q '需要 SSH 修改' "$work/luci/status.htm"
 echo "OpenWrt package checks passed"

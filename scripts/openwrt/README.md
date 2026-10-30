@@ -40,37 +40,49 @@ tightens its permissions to `0600`.
 ## Configure in LuCI
 
 1. Install both packages and open **LuCI → Services → hy2tun**.
-2. Fill in the basic form:
+2. Fill in the basic form. The page prefills the client name `openwrt`, the
+   Web console listen address `0.0.0.0:7501`, and username `admin`; the server
+   address and secret fields are empty.
    - server address as `host:port`,
-   - HY2 authentication password,
-   - control token (at least 16 characters),
+   - HY2 authentication password (at least 8 bytes),
+   - control token (at least 16 bytes),
    - client name,
    - optional TLS SNI and “skip certificate verification”,
    - port mappings,
    - Web console listen address, username, and password.
 3. Select **保存** (save) or **保存并启动** (save and start). Saving requires the
    service to be stopped. The client validates the configuration before it
-   starts.
+   starts. Saving normalizes `credentials.generation: 0` to `1`, an empty
+   `web.username` to `admin` when `web.listen` is enabled, and an empty
+   `log.level` to `info`.
 4. Use the start, stop, restart, enable, and disable buttons on the same page.
    Status and the most recent 50 log lines refresh from the page.
-5. Once the service is running, select **打开控制台** (open console) to reach the
-   client Web console, by default on port `7501`. Set a Web console password in
-   the form first; the page refuses to start while the console is enabled
-   without one.
+5. Once the service is running and `web.listen` is non-empty, select
+   **打开控制台** (open console) to reach the client Web console, by default on
+   port `7501`. Set a Web console password (at least 8 characters) in the form
+   first; the page refuses to start a single-server service while the console
+   is enabled without one.
+   Multi-server configurations skip this LuCI start gate and rely on the
+   client's generated-password behavior.
 
-When no configuration exists yet, the page reports “未创建” and the form starts
-empty. Saving creates `/etc/hy2tun/client.yaml` with mode `0600`.
+When no configuration exists yet, the page reports “未创建”. Saving creates
+`/etc/hy2tun/client.yaml` with mode `0600`.
 
 ## Multi-server and advanced configuration
 
-The basic form manages a single server. Use the client Web console or edit
-`/etc/hy2tun/client.yaml` over SSH for:
+The basic form manages a single server. The client Web console can edit the HY2
+authentication and control token (including rotated credentials), mappings,
+proxy listeners, and Web account/password.
 
-- multiple servers (`servers:`),
+SSH is required for:
+
+- multiple servers (`servers:`), including adding or changing entries,
 - a custom CA or certificate pin,
-- obfs, bandwidth limits, or UDP port hopping,
-- local SOCKS5/HTTP proxies,
-- Web console TLS or a custom log file.
+- obfs, bandwidth limits, or UDP port hopping (`transport`),
+- Web console TLS certificates,
+- a custom log file (`log.file`).
+
+Stop the service before editing `/etc/hy2tun/client.yaml` over SSH.
 
 See `examples/client.yaml` and `examples/client-multi.yaml` in the repository
 for the full shape. The LuCI page detects a multi-server configuration and

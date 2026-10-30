@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
@@ -250,6 +251,11 @@ func validateBasicState(cfg *ClientConfig) (bool, string, bool) {
 	if err := basic.Validate(); err != nil {
 		return false, err.Error(), false
 	}
+	// An invalid bcrypt hash is a basic Web-console field error, not an
+	// advanced-field error: the form can replace the hash with a new password.
+	if err := checkWebPassword(basic.Web.PasswordHash); err != nil {
+		return false, err.Error(), false
+	}
 	if basic.Web.Listen != "" && basic.Web.PasswordHash == "" {
 		return false, "web.password_hash is required when web.listen is enabled", false
 	}
@@ -271,18 +277,21 @@ func GetBasic(path string) (*BasicConfig, error) {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return &BasicConfig{
-				ClientName:  "openwrt",
-				WebListen:   DefaultClientWebListen,
-				WebUsername: "admin",
-				Mappings:    []Mapping{},
+				ClientName:           "openwrt",
+				WebListen:            DefaultClientWebListen,
+				WebUsername:          "admin",
+				CredentialGeneration: 1,
+				Mappings:             []Mapping{},
 			}, nil
 		}
 		var basicErr *BasicError
 		if errors.As(err, &basicErr) {
 			return nil, basicErr
 		}
+		// The CLI contract reports YAML parse and IO failures as
+		// parse_error, both with exit code 1.
 		return nil, &BasicError{
-			Code:    BasicCodeInternal,
+			Code:    BasicCodeParse,
 			Message: fmt.Sprintf("read client config %s: %v", path, err),
 		}
 	}
@@ -490,6 +499,9 @@ func applyBasicUpdate(cfg *ClientConfig, update *BasicUpdate, exists bool) error
 	migrated := oldIdentityErr != nil || oldIdentity != newIdentity
 
 	if migrated && exists {
+		if cfg.Credentials.Generation > 1 {
+			return basicAdvanced("credentials.generation is greater than 1; use the client console to change the server")
+		}
 		if serverLocked(cfg) {
 			return basicAdvanced("server address cannot be changed while advanced server settings are configured; use the client console or SSH")
 		}
@@ -498,6 +510,21 @@ func applyBasicUpdate(cfg *ClientConfig, update *BasicUpdate, exists bool) error
 		}
 		if update.ControlToken == nil || *update.ControlToken == "" {
 			return basicValidation("control_token is required when changing the server")
+		}
+		// A migrated server must receive a genuinely new credential pair.
+		// Length checks run before the equality checks so a short legacy
+		// value is rejected even when it is resubmitted unchanged.
+		if len(*update.Auth) < 8 {
+			return basicValidation("auth must be at least 8 bytes")
+		}
+		if len(*update.ControlToken) < 16 {
+			return basicValidation("control_token must be at least 16 bytes")
+		}
+		if *update.Auth == oldAuth {
+			return basicValidation("auth must differ from the previous server's auth when changing the server")
+		}
+		if *update.ControlToken == oldToken {
+			return basicValidation("control_token must differ from the previous server's token when changing the server")
 		}
 	}
 
@@ -548,7 +575,7 @@ func applyBasicUpdate(cfg *ClientConfig, update *BasicUpdate, exists bool) error
 		if cfg.Web.Listen == "" {
 			return basicValidation("web_password must be empty when web.listen is disabled")
 		}
-		if len(password) < 8 {
+		if utf8.RuneCountInString(password) < 8 {
 			return basicValidation("web_password must be at least 8 characters")
 		}
 		confirm := ""

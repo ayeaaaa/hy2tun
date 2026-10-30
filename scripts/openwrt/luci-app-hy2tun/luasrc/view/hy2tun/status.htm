@@ -450,8 +450,8 @@
 			el.password.value = "";
 			el.passwordConfirm.value = "";
 
-			el.auth.placeholder = config.auth_set === true ? "已设置，留空保持不变" : "至少 8 个字符";
-			el.controlToken.placeholder = config.control_token_set === true ? "已设置，留空保持不变" : "至少 16 个字符";
+			el.auth.placeholder = config.auth_set === true ? "已设置，留空保持不变" : "至少 8 字节";
+			el.controlToken.placeholder = config.control_token_set === true ? "已设置，留空保持不变" : "至少 16 字节";
 			el.password.placeholder = config.password_set === true ? "已设置，留空保持不变" : "至少 8 个字符";
 
 			setText(el.authState, config.auth_set === true ? "已设置，留空保持不变" : "未设置");
@@ -628,7 +628,7 @@
 				if (!payload.web_listen) {
 					return "未启用 Web 控制台时不能设置密码。";
 				}
-				if (payload.web_password.length < 8) {
+				if (Array.from(payload.web_password).length < 8) {
 					return "Web 控制台密码至少需要 8 个字符。";
 				}
 				if (payload.web_password !== payload.web_password_confirm) {
@@ -802,7 +802,8 @@
 				return;
 			}
 			if (config.server_locked === true) {
-				setText(el.formHint, "服务端地址已锁定；高级配置请使用客户端控制台或 SSH 修改。");
+				setText(el.formHint, "服务端地址已锁定；TLS CA/pin、obfs、带宽、transport 等字段需通过 SSH 修改；" +
+					"已轮换凭据请在客户端控制台处理。");
 				return;
 			}
 			if (config.credential_generation > 1) {
@@ -918,8 +919,10 @@
 					notices.push("配置包含未知顶层字段，保存已禁用；请使用客户端控制台或 SSH 编辑。");
 				}
 				if (config.advanced === true) {
-					notices.push("配置包含高级字段（TLS CA/pin、obfs、带宽、传输、Web TLS、日志文件等）。" +
-						"保存基础配置会保留它们，但 YAML 注释可能丢失；这些字段请通过客户端控制台或 SSH 修改。");
+					notices.push("配置包含基础表单之外的高级字段。保存基础配置会保留它们，但 YAML 注释可能丢失。");
+					notices.push("客户端控制台可修改：HY2 认证、control token、映射、代理、Web 账号和密码。");
+					notices.push("以下字段需要 SSH 修改：TLS CA/pin、obfs、带宽、transport（端口跳跃）、" +
+						"Web TLS 证书、log.file。");
 				}
 				if (config.advanced_error === true) {
 					notices.push("高级字段可能无效，请通过 SSH 或客户端控制台修复：" +
@@ -1123,15 +1126,16 @@
 						state.savedSnapshot = JSON.stringify(collectPayload());
 					} else {
 						// The configuration was committed but could not be read
-						// back. Never keep secret input in the page after a save.
+						// back. Hide the stale form: retrying with the new
+						// revision and the old field values would overwrite the
+						// saved file. Never keep secret input in the page.
+						state.config = null;
+						state.revision = "";
+						state.savedSnapshot = null;
 						el.auth.value = "";
 						el.controlToken.value = "";
 						el.password.value = "";
 						el.passwordConfirm.value = "";
-						state.savedSnapshot = null;
-						if (typeof res.revision === "string") {
-							state.revision = res.revision;
-						}
 					}
 
 					state.running = res.running === true;

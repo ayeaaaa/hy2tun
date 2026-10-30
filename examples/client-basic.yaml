@@ -5,8 +5,8 @@
 # runs hy2tun: chmod 600 /etc/hy2tun/client.yaml.
 #
 # This example covers a single server and the fields exposed by the LuCI
-# page. For multiple servers or advanced options, see examples/client.yaml,
-# examples/client-multi.yaml, or the built-in client console.
+# page. For multiple servers or advanced options, use the built-in client
+# console or edit the installed /etc/hy2tun/client.yaml over SSH.
 
 server: "us.example.com:24443"
 auth: "change-me"
@@ -26,6 +26,10 @@ mappings:
 web:
   listen: "0.0.0.0:7501"
   username: "admin"
+  # LuCI refuses to start a single-server service while web.listen is set and
+  # this hash is empty. Set a Web console password (at least 8 characters) in
+  # the LuCI form, or leave web.listen empty to disable the console. The CLI
+  # generates a password when this hash is empty.
   password_hash: ""
 log:
   level: "info"

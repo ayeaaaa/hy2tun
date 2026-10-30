@@ -44,6 +44,7 @@ func TestGetBasicMissingFileReturnsDefaults(t *testing.T) {
 	require.Equal(t, "admin", got.WebUsername)
 	require.Empty(t, got.Revision)
 	require.Empty(t, got.Mappings)
+	require.Equal(t, int64(1), got.CredentialGeneration)
 }
 
 func TestGetBasicReturnsRawValuesAndSecretsAsBooleans(t *testing.T) {
@@ -302,26 +303,27 @@ credentials:
 }
 
 func TestGetBasicCheckClientFailureIsAdvancedError(t *testing.T) {
-	cases := map[string]string{
-		"missing ca": `tls:
+	path := writeTestClientConfig(t, basicTestValidYAML+`tls:
   ca: "/definitely/missing/ca.pem"
-`,
-		"invalid bcrypt": `web:
+`)
+	got, err := GetBasic(path)
+	require.NoError(t, err)
+	require.False(t, got.Valid)
+	require.True(t, got.AdvancedError)
+	require.NotEmpty(t, got.ValidationError)
+}
+
+func TestGetBasicInvalidBcryptIsBasicError(t *testing.T) {
+	path := writeTestClientConfig(t, basicTestValidYAML+`web:
   listen: "127.0.0.1:7501"
   username: "admin"
   password_hash: "not-a-bcrypt-hash"
-`,
-	}
-	for name, extra := range cases {
-		t.Run(name, func(t *testing.T) {
-			path := writeTestClientConfig(t, basicTestValidYAML+extra)
-			got, err := GetBasic(path)
-			require.NoError(t, err)
-			require.False(t, got.Valid)
-			require.True(t, got.AdvancedError)
-			require.NotEmpty(t, got.ValidationError)
-		})
-	}
+`)
+	got, err := GetBasic(path)
+	require.NoError(t, err)
+	require.False(t, got.Valid)
+	require.False(t, got.AdvancedError)
+	require.Contains(t, got.ValidationError, "bcrypt")
 }
 
 func TestGetBasicServerLocked(t *testing.T) {
@@ -587,9 +589,10 @@ func TestSetBasicPasswordRules(t *testing.T) {
 	}
 
 	cases := map[string]*BasicUpdate{
-		"too short":  newUpdate("1234567", basicStringPtr("1234567")),
-		"mismatch":   newUpdate("password123", basicStringPtr("password124")),
-		"no confirm": newUpdate("password123", nil),
+		"too short":                  newUpdate("1234567", basicStringPtr("1234567")),
+		"seven multibyte characters": newUpdate("密码密码密码密", basicStringPtr("密码密码密码密")),
+		"mismatch":                   newUpdate("password123", basicStringPtr("password124")),
+		"no confirm":                 newUpdate("password123", nil),
 		"disabled listen": func() *BasicUpdate {
 			u := newUpdate("password123", basicStringPtr("password123"))
 			u.WebListen = basicStringPtr("")
@@ -609,6 +612,16 @@ func TestSetBasicPasswordRules(t *testing.T) {
 	t.Run("minimum length accepted", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "client.yaml")
 		password := "12345678"
+		_, err := SetBasic(path, newUpdate(password, basicStringPtr(password)), SetBasicOptions{})
+		require.NoError(t, err)
+		cfg, err := LoadClient(path)
+		require.NoError(t, err)
+		require.NoError(t, bcrypt.CompareHashAndPassword([]byte(cfg.Web.PasswordHash), []byte(password)))
+	})
+
+	t.Run("eight multibyte characters accepted", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "client.yaml")
+		password := "密码密码密码密码"
 		_, err := SetBasic(path, newUpdate(password, basicStringPtr(password)), SetBasicOptions{})
 		require.NoError(t, err)
 		cfg, err := LoadClient(path)
@@ -905,6 +918,231 @@ func TestSetBasicServerMigrationRequiresNewCredentials(t *testing.T) {
 			require.Equal(t, original, readBasicTestFile(t, path))
 		})
 	}
+}
+
+func TestSetBasicServerMigrationCredentialRules(t *testing.T) {
+	cases := map[string]struct {
+		oldAuth  string
+		oldToken string
+		auth     string
+		token    string
+		wantErr  bool
+	}{
+		"old auth": {
+			oldAuth: "old-auth-secret", oldToken: "0123456789abcdef",
+			auth: "old-auth-secret", token: "fedcba9876543210", wantErr: true,
+		},
+		"old token": {
+			oldAuth: "old-auth-secret", oldToken: "0123456789abcdef",
+			auth: "new-auth-secret", token: "0123456789abcdef", wantErr: true,
+		},
+		"short old auth": {
+			oldAuth: "old", oldToken: "0123456789abcdef",
+			auth: "old", token: "fedcba9876543210", wantErr: true,
+		},
+		"short new auth": {
+			oldAuth: "old-auth-secret", oldToken: "0123456789abcdef",
+			auth: "short", token: "fedcba9876543210", wantErr: true,
+		},
+		"short new token": {
+			oldAuth: "old-auth-secret", oldToken: "0123456789abcdef",
+			auth: "new-auth-secret", token: "short", wantErr: true,
+		},
+		"valid new credentials": {
+			oldAuth: "old-auth-secret", oldToken: "0123456789abcdef",
+			auth: "new-auth-secret", token: "fedcba9876543210",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := writeTestClientConfig(t, fmt.Sprintf(`server: "old.example:443"
+auth: %q
+control:
+  token: %q
+client:
+  id: "c-old"
+  name: "router"
+  revision: 9
+tls:
+  sni: "old.example"
+`, tc.oldAuth, tc.oldToken))
+			original := readBasicTestFile(t, path)
+			revision, err := FileRevision(path)
+			require.NoError(t, err)
+			update := basicUpdate("new.example:443", "router", "", "", []Mapping{})
+			update.ExpectedRevision = revision
+			update.Auth = basicStringPtr(tc.auth)
+			update.ControlToken = basicStringPtr(tc.token)
+			update.TLSSNI = basicStringPtr("old.example")
+			_, err = SetBasic(path, update, SetBasicOptions{})
+			if tc.wantErr {
+				requireBasicErrorCode(t, err, BasicCodeValidation)
+				require.Equal(t, original, readBasicTestFile(t, path))
+				return
+			}
+
+			require.NoError(t, err)
+			cfg, err := LoadClient(path)
+			require.NoError(t, err)
+			require.Equal(t, "new.example:443", cfg.Server)
+			require.Equal(t, tc.auth, cfg.Auth)
+			require.Equal(t, tc.token, cfg.Control.Token)
+			require.Empty(t, cfg.Client.ID)
+			require.Zero(t, cfg.Client.Revision)
+			require.Empty(t, cfg.TLS.SNI)
+		})
+	}
+}
+
+func TestSetBasicServerMigrationRejectsRotatedCredentials(t *testing.T) {
+	path := writeTestClientConfig(t, basicTestValidYAML+"credentials:\n  generation: 2\n")
+	original := readBasicTestFile(t, path)
+	revision, err := FileRevision(path)
+	require.NoError(t, err)
+	update := basicUpdate("new.example:443", "router", "", "", []Mapping{})
+	update.ExpectedRevision = revision
+	update.Auth = basicStringPtr("new-auth-secret")
+	update.ControlToken = basicStringPtr("fedcba9876543210")
+	_, err = SetBasic(path, update, SetBasicOptions{})
+	basicErr := requireBasicErrorCode(t, err, BasicCodeAdvanced)
+	require.True(t, basicErr.Advanced)
+	require.Equal(t, original, readBasicTestFile(t, path))
+}
+
+func TestSetBasicInvalidOldServerIsTreatedAsMigration(t *testing.T) {
+	const invalidOldServer = `server: "missing-port"
+auth: "old-auth-secret"
+control:
+  token: "0123456789abcdef"
+client:
+  id: "c-old"
+  name: "router"
+  revision: 9
+tls:
+  sni: "old.example"
+`
+
+	t.Run("requires new credentials", func(t *testing.T) {
+		path := writeTestClientConfig(t, invalidOldServer)
+		original := readBasicTestFile(t, path)
+		revision, err := FileRevision(path)
+		require.NoError(t, err)
+		update := basicUpdate("new.example:443", "router", "", "", []Mapping{})
+		update.ExpectedRevision = revision
+		_, err = SetBasic(path, update, SetBasicOptions{})
+		requireBasicErrorCode(t, err, BasicCodeValidation)
+		require.Equal(t, original, readBasicTestFile(t, path))
+	})
+
+	t.Run("migrates with new credentials", func(t *testing.T) {
+		path := writeTestClientConfig(t, invalidOldServer)
+		revision, err := FileRevision(path)
+		require.NoError(t, err)
+		update := basicUpdate("new.example:443", "router", "", "", []Mapping{})
+		update.ExpectedRevision = revision
+		update.Auth = basicStringPtr("new-auth-secret")
+		update.ControlToken = basicStringPtr("fedcba9876543210")
+		update.TLSSNI = basicStringPtr("old.example")
+		got, err := SetBasic(path, update, SetBasicOptions{})
+		require.NoError(t, err)
+		require.Equal(t, "new.example:443", got.Server)
+		require.Empty(t, got.TLSSNI)
+
+		cfg, err := LoadClient(path)
+		require.NoError(t, err)
+		require.Equal(t, "new.example:443", cfg.Server)
+		require.Equal(t, "new-auth-secret", cfg.Auth)
+		require.Equal(t, "fedcba9876543210", cfg.Control.Token)
+		require.Empty(t, cfg.Client.ID)
+		require.Zero(t, cfg.Client.Revision)
+		require.Empty(t, cfg.TLS.SNI)
+	})
+}
+
+func TestSetBasicParseErrorDoesNotOverwrite(t *testing.T) {
+	path := writeTestClientConfig(t, "server: [unterminated\n")
+	original := readBasicTestFile(t, path)
+	revision, err := FileRevision(path)
+	require.NoError(t, err)
+	update := basicUpdate("host:443", "router", "", "", []Mapping{})
+	update.ExpectedRevision = revision
+	_, err = SetBasic(path, update, SetBasicOptions{})
+	requireBasicErrorCode(t, err, BasicCodeParse)
+	require.Equal(t, original, readBasicTestFile(t, path))
+}
+
+func TestSetBasicRejectsInvalidMappingsAndWebListen(t *testing.T) {
+	cases := map[string]struct {
+		mappings []Mapping
+		listen   string
+	}{
+		"mapping type": {
+			mappings: []Mapping{{Type: "icmp", LocalAddr: "127.0.0.1:22", Enabled: true}},
+		},
+		"mapping local address": {
+			mappings: []Mapping{{Type: "tcp", LocalAddr: "missing-port", Enabled: true}},
+		},
+		"web listen": {
+			mappings: []Mapping{},
+			listen:   "not-a-listen",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "client.yaml")
+			_, err := SetBasic(path, &BasicUpdate{
+				Server:       basicStringPtr("host:443"),
+				Auth:         basicStringPtr("auth-secret"),
+				ControlToken: basicStringPtr("0123456789abcdef"),
+				ClientName:   basicStringPtr("router"),
+				Mappings:     basicMappingsPtr(tc.mappings),
+				WebListen:    basicStringPtr(tc.listen),
+				WebUsername:  basicStringPtr("admin"),
+			}, SetBasicOptions{})
+			requireBasicErrorCode(t, err, BasicCodeValidation)
+			_, statErr := os.Stat(path)
+			require.ErrorIs(t, statErr, os.ErrNotExist)
+		})
+	}
+}
+
+func TestSetBasicAdvancedValidationFailureDoesNotWrite(t *testing.T) {
+	path := writeTestClientConfig(t, basicTestValidYAML+`transport:
+  udp:
+    hop_interval: "10s"
+`)
+	original := readBasicTestFile(t, path)
+	revision, err := FileRevision(path)
+	require.NoError(t, err)
+	update := basicUpdate("host:443", "router", "", "", []Mapping{})
+	update.ExpectedRevision = revision
+	_, err = SetBasic(path, update, SetBasicOptions{})
+	basicErr := requireBasicErrorCode(t, err, BasicCodeAdvanced)
+	require.True(t, basicErr.Advanced)
+	require.Contains(t, basicErr.Message, "transport.udp")
+	require.Equal(t, original, readBasicTestFile(t, path))
+}
+
+func TestSetBasicCredentialChangesDoNotBumpGeneration(t *testing.T) {
+	path := writeTestClientConfig(t, basicTestValidYAML+"credentials:\n  generation: 1\n")
+	revision, err := FileRevision(path)
+	require.NoError(t, err)
+	update := basicUpdate("host:443", "router", "", "", []Mapping{})
+	update.ExpectedRevision = revision
+	update.Auth = basicStringPtr("new-auth-secret")
+	update.ControlToken = basicStringPtr("fedcba9876543210")
+	got, err := SetBasic(path, update, SetBasicOptions{})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), got.CredentialGeneration)
+
+	cfg, err := LoadClient(path)
+	require.NoError(t, err)
+	require.Equal(t, "new-auth-secret", cfg.Auth)
+	require.Equal(t, "fedcba9876543210", cfg.Control.Token)
+	require.Equal(t, int64(1), cfg.Credentials.Generation)
+	require.Zero(t, cfg.Credentials.PreviousGeneration)
+	require.Empty(t, cfg.Credentials.PreviousAuth)
+	require.Empty(t, cfg.Credentials.PreviousControlToken)
 }
 
 func TestSetBasicEquivalentServerSpellingDoesNotMigrate(t *testing.T) {
