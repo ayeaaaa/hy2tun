@@ -1,6 +1,7 @@
 module("luci.controller.hy2tun", package.seeall)
 
 local fs = require "nixio.fs"
+local nixio = require "nixio"
 local jsonc = require "luci.jsonc"
 local http = require "luci.http"
 local sys = require "luci.sys"
@@ -58,7 +59,9 @@ local function read_file(path)
 end
 
 local function write_file(path, data)
-	local file = io.open(path, "w")
+	-- Create with the final mode instead of opening first and chmodding
+	-- afterwards. nixio expects the symbolic string mode.
+	local file = nixio.open(path, "w", "600")
 	if not file then
 		return false
 	end
@@ -66,13 +69,7 @@ local function write_file(path, data)
 	local written = file:write(data)
 	file:close()
 
-	if not written then
-		return false
-	end
-
-	-- os.tmpname() creates a 0600 file on POSIX; keep it private even on
-	-- platforms where that is not guaranteed. nixio expects a string mode.
-	return fs.chmod(path, "600") and true or false
+	return written and true or false
 end
 
 local function remove_file(path)
@@ -155,15 +152,16 @@ end
 
 local function wait_running(want, timeout)
 	timeout = timeout or 5
+	local deadline = os.time() + timeout
 
-	for i = 0, timeout do
+	while true do
 		if service_running() == want then
 			return true
 		end
-
-		if i < timeout then
-			sys.call("sleep 1 >/dev/null 2>&1")
+		if os.time() >= deadline then
+			break
 		end
+		sys.call("sleep 1 >/dev/null 2>&1")
 	end
 
 	return service_running() == want

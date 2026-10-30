@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os/exec"
+	"time"
 
 	"hy2tun/internal/config"
 )
@@ -14,7 +16,9 @@ import (
 // serviceRunning reports whether the hy2tun init script considers the service
 // running. It is a package variable so tests can stub the init system.
 var serviceRunning = func() bool {
-	cmd := exec.Command("/etc/init.d/hy2tun", "status")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/etc/init.d/hy2tun", "status")
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	return cmd.Run() == nil
@@ -108,6 +112,16 @@ func runConfigSet(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return writeConfigError(stderr, &config.BasicError{
 			Code:    config.BasicCodeParse,
 			Message: fmt.Sprintf("decode request: %v", err),
+		})
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		message := "decode request: trailing data after JSON object"
+		if err != nil {
+			message = fmt.Sprintf("decode request: trailing data after JSON object: %v", err)
+		}
+		return writeConfigError(stderr, &config.BasicError{
+			Code:    config.BasicCodeParse,
+			Message: message,
 		})
 	}
 

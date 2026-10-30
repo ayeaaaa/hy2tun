@@ -578,6 +578,9 @@ func applyBasicUpdate(cfg *ClientConfig, update *BasicUpdate, exists bool) error
 		if utf8.RuneCountInString(password) < 8 {
 			return basicValidation("web_password must be at least 8 characters")
 		}
+		if len([]byte(password)) > 72 {
+			return basicValidation("web_password must be at most 72 bytes")
+		}
 		confirm := ""
 		if update.WebPasswordConfirm != nil {
 			confirm = *update.WebPasswordConfirm

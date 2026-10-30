@@ -208,6 +208,18 @@ func TestRunConfigSetUnknownJSONFieldExitCode(t *testing.T) {
 	require.Contains(t, errOut.String(), `"code":"parse_error"`)
 }
 
+func TestRunConfigSetRejectsTrailingJSON(t *testing.T) {
+	path := writeCLIConfig(t)
+	revision := cliRevision(t, path)
+	payload := cliSetPayload(revision) + `{}`
+	var out, errOut bytes.Buffer
+	code := runConfig([]string{"set", "-c", path}, strings.NewReader(payload), &out, &errOut)
+	require.Equal(t, 1, code)
+	require.Contains(t, errOut.String(), `"code":"parse_error"`)
+	require.Contains(t, errOut.String(), "trailing data")
+	require.Equal(t, revision, cliRevision(t, path))
+}
+
 func TestRunConfigSetSuccess(t *testing.T) {
 	old := serviceRunning
 	serviceRunning = func() bool { return false }

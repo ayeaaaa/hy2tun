@@ -614,6 +614,12 @@
 					return "新配置需要填写 control token。";
 				}
 			}
+			if (payload.auth && new TextEncoder().encode(payload.auth).length < 8) {
+				return "HY2 认证至少需要 8 字节。";
+			}
+			if (payload.control_token && new TextEncoder().encode(payload.control_token).length < 16) {
+				return "control token 至少需要 16 字节。";
+			}
 
 			if (payload.web_listen) {
 				if (!payload.web_username) {

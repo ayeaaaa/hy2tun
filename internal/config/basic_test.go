@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -593,6 +594,7 @@ func TestSetBasicPasswordRules(t *testing.T) {
 		"seven multibyte characters": newUpdate("密码密码密码密", basicStringPtr("密码密码密码密")),
 		"mismatch":                   newUpdate("password123", basicStringPtr("password124")),
 		"no confirm":                 newUpdate("password123", nil),
+		"too long":                   newUpdate(strings.Repeat("a", 73), basicStringPtr(strings.Repeat("a", 73))),
 		"disabled listen": func() *BasicUpdate {
 			u := newUpdate("password123", basicStringPtr("password123"))
 			u.WebListen = basicStringPtr("")
