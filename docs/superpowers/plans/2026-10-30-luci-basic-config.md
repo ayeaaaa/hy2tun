@@ -174,7 +174,7 @@ mappings:
 web:
   listen: "0.0.0.0:7501"
   username: ""
-  password_hash: "$2b$10$...valid..."
+  password_hash: ""
 `)
 	got, err := GetBasic(path)
 	require.NoError(t, err)
