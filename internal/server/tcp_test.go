@@ -176,6 +176,20 @@ func TestMappingUpdateDuringPublicAccept(t *testing.T) {
 	wg.Wait()
 }
 
+func TestActiveConnReleasesConnectionSlot(t *testing.T) {
+	conn, peer := net.Pipe()
+	defer peer.Close()
+	sem := make(chan struct{}, 1)
+	sem <- struct{}{}
+
+	active := &activeConn{Conn: conn, sem: sem}
+	require.Len(t, sem, 1)
+	require.NoError(t, active.Close())
+	require.Len(t, sem, 0)
+	require.NoError(t, active.Close(), "close must be idempotent")
+	require.Len(t, sem, 0)
+}
+
 func TestDataStreamPendingLimit(t *testing.T) {
 	data := newDataStreams(1)
 	defer data.closeAll()
