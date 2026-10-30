@@ -71,8 +71,8 @@ local function write_file(path, data)
 	end
 
 	-- os.tmpname() creates a 0600 file on POSIX; keep it private even on
-	-- platforms where that is not guaranteed.
-	return fs.chmod(path, 384) and true or false
+	-- platforms where that is not guaranteed. nixio expects a string mode.
+	return fs.chmod(path, "600") and true or false
 end
 
 local function remove_file(path)
