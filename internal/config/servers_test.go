@@ -52,6 +52,32 @@ func multiServerTestConfig() *ClientConfig {
 	}
 }
 
+func TestServerIdentityNormalizesEquivalentForms(t *testing.T) {
+	tests := map[string]string{
+		" Example.COM:20000-20000 ":    "example.com:20000",
+		"host:20002-20003,20000-20001": "host:20000-20003",
+		"host:20000,20001-20003":       "host:20000-20003",
+		"[2001:DB8::1]:443":            "[2001:db8::1]:443",
+		"host:20000-20000,20000-20000": "host:20000",
+	}
+	for input, want := range tests {
+		got, err := ServerIdentity(input)
+		require.NoError(t, err)
+		require.Equal(t, want, got)
+	}
+}
+
+func TestServerIdentityRejectsInvalidServer(t *testing.T) {
+	_, err := ServerIdentity("missing-port")
+	require.ErrorContains(t, err, "host:port")
+}
+
+func TestServerIdentityKeepsDisjointRangesSorted(t *testing.T) {
+	got, err := ServerIdentity("host:30000,20000-20001")
+	require.NoError(t, err)
+	require.Equal(t, "host:20000-20001,30000", got)
+}
+
 func TestClientMultiServerConfigValidates(t *testing.T) {
 	cfg := multiServerTestConfig()
 	require.True(t, cfg.IsMulti())

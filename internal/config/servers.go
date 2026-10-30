@@ -4,7 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
+	"strconv"
 	"strings"
+
+	"hy2tun/internal/ports"
 )
 
 // ErrProxyConflict reports a proxy listener address conflict.
@@ -286,4 +290,55 @@ func proxyListenKey(value string) (string, error) {
 		host = ip.String()
 	}
 	return net.JoinHostPort(host, port), nil
+}
+
+// ServerIdentity returns a canonical identity for a client server address so
+// equivalent host and port-range spellings compare equal. Hostnames are
+// lowercased, and port ranges are sorted and merged.
+func ServerIdentity(value string) (string, error) {
+	host, ranges, _, err := parseClientServer(value)
+	if err != nil {
+		return "", err
+	}
+	if len(ranges) == 0 {
+		return "", fmt.Errorf("server must include a port")
+	}
+	merged := mergePortRanges(ranges)
+	parts := make([]string, len(merged))
+	for i, r := range merged {
+		if r.Start == r.End {
+			parts[i] = strconv.Itoa(r.Start)
+			continue
+		}
+		parts[i] = fmt.Sprintf("%d-%d", r.Start, r.End)
+	}
+	return net.JoinHostPort(strings.ToLower(host), strings.Join(parts, ",")), nil
+}
+
+// mergePortRanges sorts ranges by start then end port and merges overlapping or
+// adjacent ranges so equivalent port specifications produce the same identity.
+func mergePortRanges(ranges []ports.Range) []ports.Range {
+	sorted := append([]ports.Range(nil), ranges...)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Start != sorted[j].Start {
+			return sorted[i].Start < sorted[j].Start
+		}
+		return sorted[i].End < sorted[j].End
+	})
+	merged := make([]ports.Range, 0, len(sorted))
+	for _, r := range sorted {
+		if len(merged) == 0 {
+			merged = append(merged, r)
+			continue
+		}
+		last := &merged[len(merged)-1]
+		if r.Start <= last.End+1 {
+			if r.End > last.End {
+				last.End = r.End
+			}
+			continue
+		}
+		merged = append(merged, r)
+	}
+	return merged
 }
