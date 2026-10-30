@@ -14,8 +14,8 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
-- Web console passwords over bcrypt's 72-byte limit now return a validation
-  error instead of an internal error.
+- The LuCI basic-config save path now returns a validation error for Web
+  passwords over bcrypt's 72-byte limit instead of an internal error.
 - The LuCI page rejects HY2 auth shorter than 8 bytes and control tokens
   shorter than 16 bytes before sending a request.
 - Service status polling is bounded to the requested five seconds.

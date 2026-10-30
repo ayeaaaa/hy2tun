@@ -99,8 +99,8 @@ watch this file.
 From the repository root:
 
 ```bash
-scripts/openwrt/build-ipk.sh ./hy2tun arm64 v1.5.0 dist
-scripts/openwrt/build-luci-ipk.sh v1.5.0 dist
+scripts/openwrt/build-ipk.sh ./hy2tun arm64 v1.5.1 dist
+scripts/openwrt/build-luci-ipk.sh v1.5.1 dist
 ```
 
 `build-ipk.sh` sets `Architecture: all` so opkg accepts the package on any

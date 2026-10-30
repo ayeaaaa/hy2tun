@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -116,7 +117,7 @@ func TestRunConfigSetConflictExitCode(t *testing.T) {
 
 func TestRunConfigSetRequireStopped(t *testing.T) {
 	old := serviceRunning
-	serviceRunning = func() bool { return true }
+	serviceRunning = func() (bool, error) { return true, nil }
 	t.Cleanup(func() { serviceRunning = old })
 
 	path := writeCLIConfig(t)
@@ -220,9 +221,26 @@ func TestRunConfigSetRejectsTrailingJSON(t *testing.T) {
 	require.Equal(t, revision, cliRevision(t, path))
 }
 
+func TestRunConfigSetRequireStoppedFailsClosed(t *testing.T) {
+	old := serviceRunning
+	serviceRunning = func() (bool, error) { return false, errors.New("status timed out") }
+	t.Cleanup(func() { serviceRunning = old })
+
+	path := writeCLIConfig(t)
+	before, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var out, errOut bytes.Buffer
+	code := runConfig([]string{"set", "-c", path, "--require-stopped"}, strings.NewReader(cliSetPayload(cliRevision(t, path))), &out, &errOut)
+	require.Equal(t, 1, code)
+	require.Contains(t, errOut.String(), `"code":"internal"`)
+	after, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+}
+
 func TestRunConfigSetSuccess(t *testing.T) {
 	old := serviceRunning
-	serviceRunning = func() bool { return false }
+	serviceRunning = func() (bool, error) { return false, nil }
 	t.Cleanup(func() { serviceRunning = old })
 
 	path := writeCLIConfig(t)

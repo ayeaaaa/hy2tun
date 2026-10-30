@@ -43,6 +43,14 @@ jobs:
       - name: Validate OpenWrt packages
         run: ./scripts/openwrt/test-ipk.sh
 
+      - name: Install LuCI controller test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.1 lua-cjson
+
+      - name: Test LuCI controller
+        run: ./scripts/openwrt/test-luci-controller.sh
+
   vulncheck:
     name: Vulnerability check
     runs-on: ubuntu-latest

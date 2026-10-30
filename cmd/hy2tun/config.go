@@ -14,15 +14,29 @@ import (
 )
 
 // serviceRunning reports whether the hy2tun init script considers the service
-// running. It is a package variable so tests can stub the init system.
-var serviceRunning = func() bool {
+// running. A timeout or execution failure is returned as an error, never as
+// "not running", so --require-stopped cannot fail open.
+var serviceRunning = func() (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/etc/init.d/hy2tun", "status")
+	cmd := exec.CommandContext(ctx, initScriptPath, "status")
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
-	return cmd.Run() == nil
+	err := cmd.Run()
+	if ctx.Err() != nil {
+		return false, fmt.Errorf("check hy2tun service status: %w", ctx.Err())
+	}
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return false, nil
+	}
+	return false, err
 }
+
+var initScriptPath = "/etc/init.d/hy2tun"
 
 // configError is the stable JSON error shape consumed by the LuCI controller.
 type configError struct {
@@ -101,8 +115,17 @@ func runConfigSet(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 
 	// Check before reading stdin so a running service short-circuits the
 	// request; BeforeWrite repeats the check under the configuration lock.
-	if *requireStopped && serviceRunning() {
-		return writeConfigError(stderr, serviceRunningError())
+	if *requireStopped {
+		running, err := serviceRunning()
+		if err != nil {
+			return writeConfigError(stderr, &config.BasicError{
+				Code:    config.BasicCodeInternal,
+				Message: err.Error(),
+			})
+		}
+		if running {
+			return writeConfigError(stderr, serviceRunningError())
+		}
 	}
 
 	var update config.BasicUpdate
@@ -128,7 +151,14 @@ func runConfigSet(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	opts := config.SetBasicOptions{}
 	if *requireStopped {
 		opts.BeforeWrite = func() error {
-			if serviceRunning() {
+			running, err := serviceRunning()
+			if err != nil {
+				return &config.BasicError{
+					Code:    config.BasicCodeInternal,
+					Message: err.Error(),
+				}
+			}
+			if running {
 				return serviceRunningError()
 			}
 			return nil

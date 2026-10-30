@@ -135,11 +135,11 @@ local function run_capture(command)
 end
 
 local function service_running()
-	return sys.call(INIT .. " status >/dev/null 2>&1") == 0
+	return sys.call("timeout 2 " .. INIT .. " status >/dev/null 2>&1") == 0
 end
 
 local function service_enabled()
-	return sys.call(INIT .. " enabled >/dev/null 2>&1") == 0
+	return sys.call("timeout 2 " .. INIT .. " enabled >/dev/null 2>&1") == 0
 end
 
 local function run_service(op)
@@ -154,17 +154,18 @@ local function wait_running(want, timeout)
 	timeout = timeout or 5
 	local deadline = os.time() + timeout
 
-	while true do
+	while os.time() < deadline do
 		if service_running() == want then
 			return true
 		end
-		if os.time() >= deadline then
+		local remaining = deadline - os.time()
+		if remaining <= 0 then
 			break
 		end
-		sys.call("sleep 1 >/dev/null 2>&1")
+		sys.call("sleep " .. remaining .. " >/dev/null 2>&1")
 	end
 
-	return service_running() == want
+	return false
 end
 
 local function code_for_exit(code)

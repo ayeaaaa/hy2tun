@@ -595,6 +595,7 @@ func TestSetBasicPasswordRules(t *testing.T) {
 		"mismatch":                   newUpdate("password123", basicStringPtr("password124")),
 		"no confirm":                 newUpdate("password123", nil),
 		"too long":                   newUpdate(strings.Repeat("a", 73), basicStringPtr(strings.Repeat("a", 73))),
+		"multibyte too long":         newUpdate(strings.Repeat("密", 25), basicStringPtr(strings.Repeat("密", 25))),
 		"disabled listen": func() *BasicUpdate {
 			u := newUpdate("password123", basicStringPtr("password123"))
 			u.WebListen = basicStringPtr("")
@@ -629,6 +630,13 @@ func TestSetBasicPasswordRules(t *testing.T) {
 		cfg, err := LoadClient(path)
 		require.NoError(t, err)
 		require.NoError(t, bcrypt.CompareHashAndPassword([]byte(cfg.Web.PasswordHash), []byte(password)))
+	})
+
+	t.Run("72 ASCII bytes accepted", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "client.yaml")
+		password := strings.Repeat("a", 72)
+		_, err := SetBasic(path, newUpdate(password, basicStringPtr(password)), SetBasicOptions{})
+		require.NoError(t, err)
 	})
 }
 
