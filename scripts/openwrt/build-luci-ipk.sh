@@ -38,11 +38,12 @@ Architecture: all
 Maintainer: hy2tun contributors
 Section: luci
 Priority: optional
-Depends: luci-base, luci-compat, hy2tun
+Depends: luci-base, luci-compat, hy2tun (>= 1.5.0)
 Installed-Size: $(du -sk "$pkg" | awk '{print $1}')
-Description: LuCI status page for the hy2tun client
- Adds a Services -> hy2tun page with service status, configuration
- location, and a link to the client web console.
+Description: LuCI configuration page for the hy2tun client
+ Adds a Services -> hy2tun page with service status, a basic
+ single-server configuration form, logs, and a link to the client
+ web console.
 CONTROL
 
 cat > "$control/postinst" <<'POSTINST'

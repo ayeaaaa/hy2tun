@@ -3,8 +3,9 @@
 #
 # Normal installation is through the hy2tun .ipk from the release:
 #   opkg install ./hy2tun_<version>_<arch>.ipk
-# The package installs this script and enables the service. Configure
-# /etc/hy2tun/client.yaml before starting it.
+# The package installs this script but does not create a configuration or
+# enable the service. Configure /etc/hy2tun/client.yaml, then enable and
+# start the service from LuCI or with /etc/init.d/hy2tun.
 #
 # The client rewrites /etc/hy2tun/client.yaml on startup, assigned-port
 # write-back, server push, and web edits. Do not watch that file with procd,

@@ -38,7 +38,7 @@ mkdir -p "$pkg/usr/bin" "$pkg/etc/init.d" "$pkg/etc/hy2tun" "$control"
 
 install -m 0755 "$binary" "$pkg/usr/bin/hy2tun"
 install -m 0755 "$root/scripts/openwrt/hy2tun.init" "$pkg/etc/init.d/hy2tun"
-install -m 0600 "$root/examples/client.yaml" "$pkg/etc/hy2tun/client.yaml.example"
+install -m 0600 "$root/examples/client-basic.yaml" "$pkg/etc/hy2tun/client.yaml.example"
 
 cat > "$control/control" <<CONTROL
 Package: hy2tun
@@ -52,19 +52,17 @@ Installed-Size: $(du -sk "$pkg" | awk '{print $1}')
 Description: HY2 reverse port-forwarding client
  Static OpenWrt client for hy2tun. Select the .ipk whose filename
  matches the router CPU architecture (mips, mipsle, arm, arm64,
- amd64). The package installs the binary, procd init script, and
- an example configuration. The server (hy2tund) is intended for a
- normal public Linux host.
+ amd64). The package installs the binary, procd init script, and a
+ basic example configuration. It does not create an active
+ configuration or start the service. The server (hy2tund) is
+ intended for a normal public Linux host.
 CONTROL
 
 cat > "$control/postinst" <<'POSTINST'
 #!/bin/sh
-[ -f /etc/hy2tun/client.yaml ] || {
-	cp /etc/hy2tun/client.yaml.example /etc/hy2tun/client.yaml
-	chmod 600 /etc/hy2tun/client.yaml
-}
-chmod 600 /etc/hy2tun/client.yaml 2>/dev/null || true
-/etc/init.d/hy2tun enable 2>/dev/null || true
+# Never create /etc/hy2tun/client.yaml and never start it at boot.
+# Only tighten permissions when an active configuration already exists.
+[ -f /etc/hy2tun/client.yaml ] && chmod 600 /etc/hy2tun/client.yaml 2>/dev/null
 exit 0
 POSTINST
 chmod 0755 "$control/postinst"

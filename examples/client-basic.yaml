@@ -1,0 +1,31 @@
+# hy2tun basic client configuration.
+#
+# Copy this file to /etc/hy2tun/client.yaml and replace every placeholder.
+# The file contains secrets and must be readable only by the account that
+# runs hy2tun: chmod 600 /etc/hy2tun/client.yaml.
+#
+# This example covers a single server and the fields exposed by the LuCI
+# page. For multiple servers or advanced options, see examples/client.yaml,
+# examples/client-multi.yaml, or the built-in client console.
+
+server: "us.example.com:24443"
+auth: "change-me"
+tls:
+  sni: "us.example.com"
+  insecure: false
+control:
+  token: "0123456789abcdef"
+client:
+  name: "openwrt"
+mappings:
+  - id: ""
+    type: tcp
+    remote_port: 0
+    local_addr: "127.0.0.1:22"
+    enabled: true
+web:
+  listen: "0.0.0.0:7501"
+  username: "admin"
+  password_hash: ""
+log:
+  level: "info"
