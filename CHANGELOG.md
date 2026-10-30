@@ -4,6 +4,26 @@
 
 All notable changes to this project are documented here.
 
+## v1.5.1 - 2026-10-30
+
+### Added
+
+- A committed LuCI controller integration harness with fake CLI/init scripts;
+  it covers route/CSRF registration, save/save-start, service actions, logs,
+  and config read failures without root or a router.
+
+### Fixed
+
+- Web console passwords over bcrypt's 72-byte limit now return a validation
+  error instead of an internal error.
+- The LuCI page rejects HY2 auth shorter than 8 bytes and control tokens
+  shorter than 16 bytes before sending a request.
+- Service status polling is bounded to the requested five seconds.
+- Controller payload temp files are created with mode 600 directly instead of
+  being opened and chmodded afterward.
+- `hy2tun config` init-status checks have a timeout, and `config set` rejects
+  trailing data after the JSON object.
+
 ## v1.5.0 - 2026-10-30
 
 ### Added
