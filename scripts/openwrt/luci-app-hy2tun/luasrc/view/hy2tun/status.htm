@@ -1,50 +1,1338 @@
 <%+header%>
 <h2 name="content">hy2tun</h2>
-<%
-local fs = require "nixio.fs"
-local sys = require "luci.sys"
-local active = (sys.call("/etc/init.d/hy2tun status >/dev/null 2>&1") == 0)
-local configured = (fs.access("/etc/hy2tun/client.yaml") ~= nil)
-%>
+
+<style>
+	.hy2tun-status {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.75rem 2rem;
+		margin: 0.5rem 0 1rem;
+	}
+
+	.hy2tun-status-item {
+		display: flex;
+		flex-direction: column;
+		min-width: 8rem;
+	}
+
+	.hy2tun-status-label {
+		font-size: 0.85em;
+		opacity: 0.75;
+	}
+
+	.hy2tun-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem;
+		align-items: center;
+		margin: 0.75rem 0;
+	}
+
+	.hy2tun-banner {
+		border-left: 4px solid #b00020;
+		background: rgba(127, 127, 127, 0.12);
+		padding: 0.5rem 0.75rem;
+		margin: 0.75rem 0;
+		white-space: pre-line;
+	}
+
+	.hy2tun-banner-notice {
+		border-left-color: #b58900;
+	}
+
+	.hy2tun-banner[hidden],
+	#hy2tun-form-section[hidden],
+	#hy2tun-migration[hidden],
+	#hy2tun-mappings-empty[hidden] {
+		display: none;
+	}
+
+	.hy2tun-fieldset {
+		border: 0;
+		margin: 0;
+		padding: 0;
+		min-width: 0;
+	}
+
+	.hy2tun-table-wrap {
+		overflow-x: auto;
+	}
+
+	.hy2tun-mappings {
+		width: 100%;
+		border-collapse: collapse;
+	}
+
+	.hy2tun-mappings th,
+	.hy2tun-mappings td {
+		padding: 0.3rem 0.4rem;
+		text-align: left;
+		vertical-align: middle;
+		border-bottom: 1px solid rgba(127, 127, 127, 0.25);
+	}
+
+	.hy2tun-mappings input[type="text"],
+	.hy2tun-mappings input[type="number"] {
+		width: 100%;
+		min-width: 6rem;
+		box-sizing: border-box;
+	}
+
+	.hy2tun-mappings .hy2tun-map-note {
+		min-width: 8rem;
+	}
+
+	.hy2tun-center {
+		text-align: center;
+	}
+
+	.hy2tun-logs {
+		max-height: 24rem;
+		overflow: auto;
+		white-space: pre-wrap;
+		word-break: break-word;
+		background: rgba(127, 127, 127, 0.08);
+		padding: 0.5rem;
+	}
+
+	#hy2tun-open-console[aria-disabled="true"] {
+		opacity: 0.5;
+		pointer-events: none;
+	}
+
+	@media (max-width: 600px) {
+		.hy2tun-status {
+			flex-direction: column;
+			gap: 0.5rem;
+		}
+	}
+</style>
+
+<div id="hy2tun-error" class="hy2tun-banner" role="alert" hidden></div>
+<div id="hy2tun-notice" class="hy2tun-banner hy2tun-banner-notice" role="status" hidden></div>
+
 <div class="cbi-section">
-	<h3>客户端状态</h3>
-	<p>
-		<strong>服务：</strong>
-		<% if active then %>
-			<span style="color:#2e7d32">运行中</span>
-		<% else %>
-			<span style="color:#b71c1c">未运行</span>
-		<% end %>
-	</p>
-	<p>
-		<strong>配置文件：</strong>
-		<code>/etc/hy2tun/client.yaml</code>
-		<% if not configured then %>
-			（尚未创建，请先编辑配置）
-		<% end %>
-	</p>
-	<p>
-		首次安装后编辑配置文件，或在 LuCI 的
-		<a href="<%=luci.dispatcher.build_url('admin/system/startup')%>">系统 → 启动项</a>
-		中启用服务。
-	</p>
-	<p>
-		<a id="hy2tun-console" class="cbi-button cbi-button-apply" href="#" target="_blank" rel="noopener">
-			打开客户端 Web 控制台
-		</a>
-	</p>
-	<script>
-		(function () {
-			var link = document.getElementById("hy2tun-console");
-			if (link) {
-				link.href = "http://" + window.location.hostname + ":7501/";
-			}
-		})();
-	</script>
+	<h3>服务状态</h3>
+	<div class="hy2tun-status">
+		<div class="hy2tun-status-item">
+			<span class="hy2tun-status-label">运行状态</span>
+			<strong id="hy2tun-running">加载中…</strong>
+		</div>
+		<div class="hy2tun-status-item">
+			<span class="hy2tun-status-label">开机自启</span>
+			<strong id="hy2tun-enabled">加载中…</strong>
+		</div>
+		<div class="hy2tun-status-item">
+			<span class="hy2tun-status-label">配置文件</span>
+			<strong id="hy2tun-config-state">加载中…</strong>
+		</div>
+	</div>
+	<div class="hy2tun-actions">
+		<button type="button" id="hy2tun-start" class="cbi-button cbi-button-apply" disabled>启动</button>
+		<button type="button" id="hy2tun-stop" class="cbi-button cbi-button-reset" disabled>停止</button>
+		<button type="button" id="hy2tun-restart" class="cbi-button cbi-button-action" disabled>重启</button>
+		<button type="button" id="hy2tun-enable" class="cbi-button" disabled>开机自启</button>
+		<button type="button" id="hy2tun-disable" class="cbi-button" disabled>取消自启</button>
+		<button type="button" id="hy2tun-refresh" class="cbi-button" disabled>刷新</button>
+		<a id="hy2tun-open-console" class="cbi-button cbi-button-apply" target="_blank" rel="noopener noreferrer" aria-disabled="true">打开控制台</a>
+	</div>
+	<p id="hy2tun-console-hint" class="cbi-section-descr"></p>
 	<p class="cbi-section-descr">
-		Web 控制台默认监听 <code>0.0.0.0:7501</code>。若修改了
-		<code>web.listen</code>，请同步修改上面的端口。服务端 <code>hy2tund</code>
-		应部署在公网 Linux 主机上。
+		配置文件路径：<code>/etc/hy2tun/client.yaml</code>
 	</p>
 </div>
+
+<div id="hy2tun-form-section" class="cbi-section" hidden>
+	<h3>基础配置</h3>
+	<p id="hy2tun-form-hint" class="cbi-section-descr"></p>
+	<form id="hy2tun-form" onsubmit="return false;">
+		<input type="hidden" id="hy2tun-csrf-token" name="token" value="<%=token%>" />
+		<fieldset id="hy2tun-form-fields" class="hy2tun-fieldset" disabled>
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="hy2tun-server">服务端地址</label>
+				<div class="cbi-value-field">
+					<input type="text" id="hy2tun-server" class="cbi-input-text" placeholder="example.com:24443" autocomplete="off" />
+					<div id="hy2tun-server-hint" class="cbi-value-description"></div>
+					<div id="hy2tun-migration" class="hy2tun-banner hy2tun-banner-notice" hidden>如果这是不同的服务端，保存时需要重新填写 HY2 认证和 control token。</div>
+				</div>
+			</div>
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="hy2tun-auth">HY2 认证</label>
+				<div class="cbi-value-field">
+					<input type="password" id="hy2tun-auth" class="cbi-input-password" autocomplete="new-password" />
+					<div id="hy2tun-auth-state" class="cbi-value-description"></div>
+				</div>
+			</div>
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="hy2tun-token">Control token</label>
+				<div class="cbi-value-field">
+					<input type="password" id="hy2tun-token" class="cbi-input-password" autocomplete="new-password" />
+					<div id="hy2tun-token-state" class="cbi-value-description"></div>
+					<div id="hy2tun-credential-hint" class="cbi-value-description"></div>
+				</div>
+			</div>
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="hy2tun-sni">TLS SNI</label>
+				<div class="cbi-value-field">
+					<input type="text" id="hy2tun-sni" class="cbi-input-text" placeholder="留空使用服务端主机名" autocomplete="off" />
+					<div class="cbi-value-description">留空时使用服务端地址中的主机名。</div>
+				</div>
+			</div>
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="hy2tun-insecure">跳过证书校验</label>
+				<div class="cbi-value-field">
+					<input type="checkbox" id="hy2tun-insecure" class="cbi-input-checkbox" />
+					<div class="cbi-value-description">启用后会接受任意服务端证书，仅建议在测试环境使用。</div>
+				</div>
+			</div>
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="hy2tun-client-name">客户端名称</label>
+				<div class="cbi-value-field">
+					<input type="text" id="hy2tun-client-name" class="cbi-input-text" placeholder="openwrt" autocomplete="off" />
+				</div>
+			</div>
+
+			<h4>端口映射</h4>
+			<p class="cbi-value-description">远端端口为 0 时由服务端自动分配。映射 ID 由服务端生成。</p>
+			<div class="hy2tun-table-wrap">
+				<table id="hy2tun-mappings" class="hy2tun-mappings">
+					<thead>
+						<tr>
+							<th>类型</th>
+							<th>远端端口</th>
+							<th>本地地址</th>
+							<th>备注</th>
+							<th>启用</th>
+							<th>操作</th>
+						</tr>
+					</thead>
+					<tbody></tbody>
+				</table>
+			</div>
+			<p id="hy2tun-mappings-empty" class="cbi-value-description">暂无映射。</p>
+			<div class="hy2tun-actions">
+				<button type="button" id="hy2tun-mapping-add" class="cbi-button cbi-button-add">添加映射</button>
+			</div>
+
+			<h4>Web 控制台</h4>
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="hy2tun-web-listen">监听地址</label>
+				<div class="cbi-value-field">
+					<input type="text" id="hy2tun-web-listen" class="cbi-input-text" placeholder="0.0.0.0:7501" autocomplete="off" />
+					<div class="cbi-value-description">留空表示禁用 Web 控制台。</div>
+				</div>
+			</div>
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="hy2tun-web-username">用户名</label>
+				<div class="cbi-value-field">
+					<input type="text" id="hy2tun-web-username" class="cbi-input-text" placeholder="admin" autocomplete="username" />
+				</div>
+			</div>
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="hy2tun-web-password">密码</label>
+				<div class="cbi-value-field">
+					<input type="password" id="hy2tun-web-password" class="cbi-input-password" autocomplete="new-password" />
+					<div id="hy2tun-password-state" class="cbi-value-description"></div>
+				</div>
+			</div>
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="hy2tun-web-password-confirm">确认密码</label>
+				<div class="cbi-value-field">
+					<input type="password" id="hy2tun-web-password-confirm" class="cbi-input-password" autocomplete="new-password" />
+				</div>
+			</div>
+		</fieldset>
+
+		<div class="hy2tun-actions">
+			<button type="button" id="hy2tun-save" class="cbi-button cbi-button-apply" disabled>保存</button>
+			<button type="button" id="hy2tun-save-start" class="cbi-button cbi-button-action" disabled>保存并启动</button>
+		</div>
+	</form>
+
+	<template id="hy2tun-mapping-row">
+		<tr class="hy2tun-mapping-row">
+			<td>
+				<select class="cbi-input-select hy2tun-map-type" aria-label="映射类型">
+					<option value="tcp">TCP</option>
+					<option value="udp">UDP</option>
+				</select>
+			</td>
+			<td>
+				<input type="number" min="0" max="65535" step="1" class="cbi-input-text hy2tun-map-port" aria-label="远端端口" />
+			</td>
+			<td>
+				<input type="text" class="cbi-input-text hy2tun-map-local" placeholder="127.0.0.1:22" aria-label="本地地址" />
+			</td>
+			<td>
+				<input type="text" class="cbi-input-text hy2tun-map-note" aria-label="备注" />
+			</td>
+			<td class="hy2tun-center">
+				<input type="checkbox" class="hy2tun-map-enabled" aria-label="启用映射" />
+			</td>
+			<td>
+				<input type="hidden" class="hy2tun-map-id" />
+				<button type="button" class="cbi-button cbi-button-remove hy2tun-map-remove">删除</button>
+			</td>
+		</tr>
+	</template>
+</div>
+
+<div class="cbi-section">
+	<h3>最近日志</h3>
+	<p class="cbi-section-descr">显示最近 50 行日志。</p>
+	<pre id="hy2tun-logs" class="hy2tun-logs">加载中…</pre>
+	<div class="hy2tun-actions">
+		<button type="button" id="hy2tun-refresh-logs" class="cbi-button" disabled>刷新日志</button>
+	</div>
+</div>
+
+<script>
+	(function () {
+		"use strict";
+
+		var dataUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'hy2tun', 'data')%>";
+		var actionUrl = "<%=luci.dispatcher.build_url('admin', 'services', 'hy2tun', 'action')%>";
+
+		var el = {
+			running: document.getElementById("hy2tun-running"),
+			enabled: document.getElementById("hy2tun-enabled"),
+			configState: document.getElementById("hy2tun-config-state"),
+			start: document.getElementById("hy2tun-start"),
+			stop: document.getElementById("hy2tun-stop"),
+			restart: document.getElementById("hy2tun-restart"),
+			enable: document.getElementById("hy2tun-enable"),
+			disable: document.getElementById("hy2tun-disable"),
+			refresh: document.getElementById("hy2tun-refresh"),
+			openConsole: document.getElementById("hy2tun-open-console"),
+			consoleHint: document.getElementById("hy2tun-console-hint"),
+			error: document.getElementById("hy2tun-error"),
+			notice: document.getElementById("hy2tun-notice"),
+			formSection: document.getElementById("hy2tun-form-section"),
+			form: document.getElementById("hy2tun-form"),
+			formFields: document.getElementById("hy2tun-form-fields"),
+			formHint: document.getElementById("hy2tun-form-hint"),
+			server: document.getElementById("hy2tun-server"),
+			serverHint: document.getElementById("hy2tun-server-hint"),
+			migration: document.getElementById("hy2tun-migration"),
+			auth: document.getElementById("hy2tun-auth"),
+			authState: document.getElementById("hy2tun-auth-state"),
+			controlToken: document.getElementById("hy2tun-token"),
+			tokenState: document.getElementById("hy2tun-token-state"),
+			credentialHint: document.getElementById("hy2tun-credential-hint"),
+			sni: document.getElementById("hy2tun-sni"),
+			insecure: document.getElementById("hy2tun-insecure"),
+			clientName: document.getElementById("hy2tun-client-name"),
+			webListen: document.getElementById("hy2tun-web-listen"),
+			webUsername: document.getElementById("hy2tun-web-username"),
+			password: document.getElementById("hy2tun-web-password"),
+			passwordConfirm: document.getElementById("hy2tun-web-password-confirm"),
+			passwordState: document.getElementById("hy2tun-password-state"),
+			table: document.getElementById("hy2tun-mappings"),
+			tableBody: document.querySelector("#hy2tun-mappings tbody"),
+			mappingsEmpty: document.getElementById("hy2tun-mappings-empty"),
+			mappingAdd: document.getElementById("hy2tun-mapping-add"),
+			mappingRowTemplate: document.getElementById("hy2tun-mapping-row"),
+			save: document.getElementById("hy2tun-save"),
+			saveStart: document.getElementById("hy2tun-save-start"),
+			logs: document.getElementById("hy2tun-logs"),
+			refreshLogs: document.getElementById("hy2tun-refresh-logs"),
+			csrfInput: document.getElementById("hy2tun-csrf-token")
+		};
+
+		var csrfToken = el.csrfInput ? el.csrfInput.value : "";
+
+		var state = {
+			loaded: false,
+			loadError: false,
+			busy: false,
+			running: false,
+			enabled: false,
+			config: null,
+			revision: "",
+			loadedServer: "",
+			nextMappingKey: 0
+		};
+
+		function setText(node, text) {
+			if (node) {
+				node.textContent = text == null ? "" : String(text);
+			}
+		}
+
+		function setHidden(node, hidden) {
+			if (node) {
+				node.hidden = !!hidden;
+			}
+		}
+
+		function showError(message) {
+			if (!el.error) {
+				return;
+			}
+			el.error.textContent = message || "";
+			el.error.hidden = !message;
+		}
+
+		function clearError() {
+			showError("");
+		}
+
+		function showNotice(message) {
+			if (!el.notice) {
+				return;
+			}
+			el.notice.textContent = message || "";
+			el.notice.hidden = !message;
+		}
+
+		function clearNotice() {
+			showNotice("");
+		}
+
+		function setBusy(busy) {
+			state.busy = !!busy;
+			updateControls();
+		}
+
+		function renderStatus() {
+			if (!state.loaded) {
+				var pending = state.loadError ? "未知" : "加载中…";
+				setText(el.running, pending);
+				setText(el.enabled, pending);
+				setText(el.configState, pending);
+				return;
+			}
+
+			setText(el.running, state.running ? "运行中" : "未运行");
+			setText(el.enabled, state.enabled ? "已启用" : "未启用");
+
+			var config = state.config;
+			if (!config) {
+				setText(el.configState, "无法读取");
+			} else if (config.multi === true) {
+				setText(el.configState, "多服务端（只读）");
+			} else if (config.exists !== true) {
+				setText(el.configState, "未创建");
+			} else if (config.valid === true) {
+				setText(el.configState, "已创建");
+			} else {
+				setText(el.configState, "已创建（校验未通过）");
+			}
+		}
+
+		function renderLogs(logs) {
+			var text = typeof logs === "string" ? logs : "";
+			el.logs.textContent = text !== "" ? text : "（暂无日志）";
+		}
+
+		function fillForm(config) {
+			if (!config) {
+				return;
+			}
+
+			el.server.value = typeof config.server === "string" ? config.server : "";
+			el.auth.value = "";
+			el.controlToken.value = "";
+			el.sni.value = typeof config.tls_sni === "string" ? config.tls_sni : "";
+			el.insecure.checked = config.tls_insecure === true;
+			el.clientName.value = typeof config.client_name === "string" ? config.client_name : "";
+			el.webListen.value = typeof config.web_listen === "string" ? config.web_listen : "";
+			el.webUsername.value = typeof config.web_username === "string" ? config.web_username : "";
+			el.password.value = "";
+			el.passwordConfirm.value = "";
+
+			el.auth.placeholder = config.auth_set === true ? "已设置，留空保持不变" : "至少 8 个字符";
+			el.controlToken.placeholder = config.control_token_set === true ? "已设置，留空保持不变" : "至少 16 个字符";
+			el.password.placeholder = config.password_set === true ? "已设置，留空保持不变" : "至少 8 个字符";
+
+			setText(el.authState, config.auth_set === true ? "已设置，留空保持不变" : "未设置");
+			setText(el.tokenState, config.control_token_set === true ? "已设置，留空保持不变" : "未设置");
+			if (config.password_set === true) {
+				setText(el.passwordState, "已设置，留空保持不变");
+			} else if (config.web_listen) {
+				setText(el.passwordState, "未设置；启用 Web 控制台时必须设置。");
+			} else {
+				setText(el.passwordState, "未设置。");
+			}
+
+			setText(el.serverHint, config.server_locked === true ?
+				"服务端地址由高级配置或已轮换的凭据锁定，无法在此修改。" : "");
+			setText(el.credentialHint, config.credential_generation > 1 ?
+				"凭据代际大于 1，HY2 认证和 control token 需在客户端控制台轮换。" : "");
+
+			setHidden(el.migration, true);
+		}
+
+		function applyConfig(config) {
+			state.config = config || null;
+			state.revision = config && typeof config.revision === "string" ? config.revision : "";
+			state.loadedServer = config && typeof config.server === "string" ?
+				config.server.trim() : "";
+			fillForm(config);
+			renderMappings(config && config.mappings ? config.mappings : []);
+		}
+
+		function updateMappingsEmpty() {
+			var count = el.tableBody ? el.tableBody.querySelectorAll("tr").length : 0;
+			setHidden(el.mappingsEmpty, count > 0);
+		}
+
+		function addMappingRow(mapping) {
+			mapping = mapping || {};
+
+			var source = el.mappingRowTemplate.content ?
+				el.mappingRowTemplate.content.firstElementChild :
+				el.mappingRowTemplate.firstElementChild;
+			if (!source) {
+				return null;
+			}
+
+			var row = source.cloneNode(true);
+			row.setAttribute("data-key", String(++state.nextMappingKey));
+
+			var idInput = row.querySelector(".hy2tun-map-id");
+			var typeInput = row.querySelector(".hy2tun-map-type");
+			var portInput = row.querySelector(".hy2tun-map-port");
+			var localInput = row.querySelector(".hy2tun-map-local");
+			var noteInput = row.querySelector(".hy2tun-map-note");
+			var enabledInput = row.querySelector(".hy2tun-map-enabled");
+			var removeButton = row.querySelector(".hy2tun-map-remove");
+
+			idInput.value = typeof mapping.id === "string" ? mapping.id : "";
+			typeInput.value = mapping.type === "udp" ? "udp" : "tcp";
+			portInput.value = mapping.remote_port === undefined || mapping.remote_port === null ?
+				"0" : String(mapping.remote_port);
+			localInput.value = typeof mapping.local_addr === "string" ? mapping.local_addr : "";
+			noteInput.value = typeof mapping.note === "string" ? mapping.note : "";
+			enabledInput.checked = mapping.enabled !== false;
+
+			removeButton.addEventListener("click", function () {
+				if (row.parentNode) {
+					row.parentNode.removeChild(row);
+				}
+				updateMappingsEmpty();
+			});
+
+			el.tableBody.appendChild(row);
+			updateMappingsEmpty();
+			return row;
+		}
+
+		function renderMappings(mappings) {
+			if (!el.tableBody) {
+				return;
+			}
+
+			while (el.tableBody.firstChild) {
+				el.tableBody.removeChild(el.tableBody.firstChild);
+			}
+
+			for (var i = 0; i < mappings.length; i++) {
+				addMappingRow(mappings[i]);
+			}
+			updateMappingsEmpty();
+		}
+
+		function collectPayload() {
+			var rows = el.tableBody ? el.tableBody.querySelectorAll("tr.hy2tun-mapping-row") : [];
+			var mappings = [];
+
+			for (var i = 0; i < rows.length; i++) {
+				var row = rows[i];
+				var portRaw = row.querySelector(".hy2tun-map-port").value.trim();
+				var port = 0;
+				if (portRaw !== "") {
+					port = Number(portRaw);
+				}
+
+				mappings.push({
+					id: row.querySelector(".hy2tun-map-id").value,
+					type: row.querySelector(".hy2tun-map-type").value === "udp" ? "udp" : "tcp",
+					remote_port: port,
+					local_addr: row.querySelector(".hy2tun-map-local").value.trim(),
+					note: row.querySelector(".hy2tun-map-note").value.trim(),
+					enabled: row.querySelector(".hy2tun-map-enabled").checked
+				});
+			}
+
+			return {
+				expected_revision: state.revision || "",
+				server: el.server.value.trim(),
+				auth: el.auth.value,
+				control_token: el.controlToken.value,
+				tls_sni: el.sni.value.trim(),
+				tls_insecure: el.insecure.checked,
+				client_name: el.clientName.value.trim(),
+				mappings: mappings,
+				web_listen: el.webListen.value.trim(),
+				web_username: el.webUsername.value.trim(),
+				web_password: el.password.value,
+				web_password_confirm: el.passwordConfirm.value
+			};
+		}
+
+		function validatePayload(payload) {
+			var config = state.config;
+
+			if (!payload.server) {
+				return "请填写服务端地址（host:port）。";
+			}
+			if (!payload.client_name) {
+				return "请填写客户端名称。";
+			}
+
+			// A changed server is only a soft prompt: the backend compares
+			// normalized server identities and requires fresh credentials when
+			// a real migration is needed.
+			var isNew = !config || config.exists !== true;
+			if (isNew) {
+				if (!payload.auth) {
+					return "新配置需要填写 HY2 认证。";
+				}
+				if (!payload.control_token) {
+					return "新配置需要填写 control token。";
+				}
+			}
+
+			if (payload.web_listen) {
+				if (!payload.web_username) {
+					return "启用 Web 控制台时必须填写用户名。";
+				}
+				if (!payload.web_password && !(config && config.password_set === true)) {
+					return "启用 Web 控制台时必须设置密码。";
+				}
+			}
+
+			if (payload.web_password) {
+				if (!payload.web_listen) {
+					return "未启用 Web 控制台时不能设置密码。";
+				}
+				if (payload.web_password.length < 8) {
+					return "Web 控制台密码至少需要 8 个字符。";
+				}
+				if (payload.web_password !== payload.web_password_confirm) {
+					return "两次输入的 Web 控制台密码不一致。";
+				}
+			} else if (payload.web_password_confirm) {
+				return "两次输入的 Web 控制台密码不一致。";
+			}
+
+			for (var i = 0; i < payload.mappings.length; i++) {
+				var mapping = payload.mappings[i];
+				if (!mapping.local_addr) {
+					return "第 " + (i + 1) + " 行映射的本地地址不能为空。";
+				}
+				if (typeof mapping.remote_port !== "number" || !isFinite(mapping.remote_port) ||
+					mapping.remote_port < 0 || mapping.remote_port > 65535 ||
+					Math.floor(mapping.remote_port) !== mapping.remote_port) {
+					return "第 " + (i + 1) + " 行映射的远端端口必须是 0-65535 的整数。";
+				}
+			}
+
+			return "";
+		}
+
+		function parseListen(value) {
+			var text = typeof value === "string" ? value.trim() : "";
+			if (!text) {
+				return null;
+			}
+
+			var host;
+			var port;
+			if (text.charAt(0) === "[") {
+				var end = text.indexOf("]");
+				if (end < 0) {
+					return null;
+				}
+				host = text.slice(1, end);
+				var rest = text.slice(end + 1);
+				if (rest.charAt(0) !== ":") {
+					return null;
+				}
+				port = rest.slice(1);
+			} else {
+				var index = text.lastIndexOf(":");
+				if (index < 0) {
+					host = "";
+					port = text;
+				} else {
+					host = text.slice(0, index);
+					port = text.slice(index + 1);
+				}
+			}
+
+			if (!/^[0-9]+$/.test(port)) {
+				return null;
+			}
+
+			var number = parseInt(port, 10);
+			if (number < 1 || number > 65535) {
+				return null;
+			}
+			if (!/^[A-Za-z0-9._:%-]*$/.test(host)) {
+				return null;
+			}
+
+			return {
+				host: host,
+				port: String(number)
+			};
+		}
+
+		function formatHost(host) {
+			if (!host) {
+				return "127.0.0.1";
+			}
+			if (host.charAt(0) === "[") {
+				return host;
+			}
+			if (host.indexOf(":") !== -1) {
+				return "[" + host + "]";
+			}
+			return host;
+		}
+
+		function consoleTarget(config, running) {
+			if (!config) {
+				return { url: "", hint: "配置不可用，无法打开控制台。" };
+			}
+
+			var listen = typeof config.web_listen === "string" ? config.web_listen.trim() : "";
+			if (!listen) {
+				return { url: "", hint: "未启用 Web 控制台。" };
+			}
+
+			var parsed = parseListen(listen);
+			if (!parsed) {
+				return { url: "", hint: "无法解析 Web 控制台监听地址：" + listen };
+			}
+
+			if (!running) {
+				return { url: "", hint: "启动服务后可打开控制台。" };
+			}
+
+			var host = parsed.host;
+			var loopback = false;
+			var hints = [];
+
+			if (host === "" || host === "0.0.0.0" || host === "::") {
+				host = window.location.hostname || "127.0.0.1";
+			} else if (host === "127.0.0.1" || host === "::1") {
+				loopback = true;
+				host = host === "::1" ? "::1" : "127.0.0.1";
+			}
+
+			var scheme = config.web_tls === true ? "https" : "http";
+			var url = scheme + "://" + formatHost(host) + ":" + parsed.port + "/";
+
+			if (loopback) {
+				hints.push("控制台仅监听回环地址，可能只能从路由器本机访问。");
+			}
+			if (config.web_tls === true) {
+				hints.push("使用 HTTPS，证书可能是自签名的。");
+			}
+
+			return { url: url, hint: hints.join(" ") };
+		}
+
+		function updateConsoleLink() {
+			if (!state.loaded) {
+				el.openConsole.removeAttribute("href");
+				el.openConsole.setAttribute("aria-disabled", "true");
+				el.openConsole.removeAttribute("title");
+				setText(el.consoleHint, state.loadError ?
+					"无法读取配置，无法打开控制台。" : "加载中…");
+				return;
+			}
+
+			var target = consoleTarget(state.config, state.running);
+
+			if (target.url) {
+				el.openConsole.href = target.url;
+				el.openConsole.removeAttribute("aria-disabled");
+				el.openConsole.title = target.url;
+			} else {
+				el.openConsole.removeAttribute("href");
+				el.openConsole.setAttribute("aria-disabled", "true");
+				el.openConsole.removeAttribute("title");
+			}
+
+			setText(el.consoleHint, target.hint || "");
+		}
+
+		function updateFormHint() {
+			var config = state.config;
+
+			if (!config) {
+				setText(el.formHint, "");
+				return;
+			}
+			if (state.running) {
+				setText(el.formHint, "服务运行中，表单只读；停止服务后可修改配置。");
+				return;
+			}
+			if (config.unknown_fields === true) {
+				setText(el.formHint, "配置包含未知顶层字段，保存已禁用。");
+				return;
+			}
+			if (config.server_locked === true) {
+				setText(el.formHint, "服务端地址已锁定；高级配置请使用客户端控制台或 SSH 修改。");
+				return;
+			}
+			if (config.credential_generation > 1) {
+				setText(el.formHint, "凭据代际大于 1，请在客户端控制台轮换 HY2 认证和 control token。");
+				return;
+			}
+
+			setText(el.formHint, "");
+		}
+
+		function updateControls() {
+			var config = state.config;
+			var formAvailable = state.loaded && !!config && config.multi !== true;
+
+			setHidden(el.formSection, !formAvailable);
+			el.formFields.disabled = !formAvailable || state.running || state.busy;
+
+			var saveDisabled = state.busy || !formAvailable || state.running ||
+				!config || config.unknown_fields === true;
+			el.save.disabled = saveDisabled;
+			el.saveStart.disabled = saveDisabled;
+
+			el.start.disabled = state.busy || !state.loaded || !config ||
+				config.exists !== true || state.running;
+			el.stop.disabled = state.busy || !state.loaded || !state.running;
+			el.restart.disabled = state.busy || !state.loaded || !config ||
+				config.exists !== true || !state.running;
+			el.enable.disabled = state.busy || !state.loaded || state.enabled;
+			el.disable.disabled = state.busy || !state.loaded || !state.enabled;
+			var canFetch = typeof fetch === "function";
+			el.refresh.disabled = state.busy || !canFetch;
+			el.refreshLogs.disabled = state.busy || !canFetch;
+
+			el.server.disabled = !formAvailable || state.running ||
+				!!(config && config.server_locked === true);
+			el.auth.disabled = !formAvailable || state.running ||
+				!!(config && config.credential_generation > 1);
+			el.controlToken.disabled = !formAvailable || state.running ||
+				!!(config && config.credential_generation > 1);
+
+			updateConsoleLink();
+			updateFormHint();
+		}
+
+		function actionError(result) {
+			var res = result && result.data ? result.data : {};
+			var status = result ? result.status : 0;
+
+			if (status === 401 || status === 403) {
+				return "会话已过期或无权限，请重新登录 LuCI 后重试。";
+			}
+
+			var message = typeof res.error === "string" && res.error !== "" ?
+				res.error : "请求失败（HTTP " + status + "）。";
+			if (typeof res.config_error === "string" && res.config_error !== "") {
+				message += "\n" + res.config_error;
+			}
+			if (res.advanced === true) {
+				message += "\n高级字段可能无效，请使用客户端控制台或 SSH 检查。";
+			}
+			return message;
+		}
+
+		function networkError(error) {
+			var message = error && error.message ? error.message : "请求失败。";
+			if (message.indexOf("LuCI ") === 0 || message.indexOf("服务端返回了") === 0) {
+				return message;
+			}
+			return "无法连接 LuCI 后端：" + message;
+		}
+
+		function configNotices(config, extraNotices, extraError) {
+			var notices = [];
+			var error = extraError || "";
+
+			if (config) {
+				if (config.multi === true) {
+					notices.push("此配置包含多个服务端，基础表单不可用；请使用客户端控制台管理。");
+				}
+				if (config.unknown_fields === true) {
+					notices.push("配置包含未知顶层字段，保存已禁用；请使用客户端控制台或 SSH 编辑。");
+				}
+				if (config.advanced === true) {
+					notices.push("配置包含高级字段（TLS CA/pin、obfs、带宽、传输、Web TLS、日志文件等）。" +
+						"保存基础配置会保留它们，但 YAML 注释可能丢失；这些字段请通过客户端控制台或 SSH 修改。");
+				}
+				if (config.advanced_error === true) {
+					notices.push("高级字段可能无效，请通过 SSH 或客户端控制台修复：" +
+						(config.validation_error || "未知错误"));
+				} else if (config.exists === true && config.valid === false &&
+					config.validation_error && !error) {
+					error = config.validation_error;
+				}
+			}
+
+			if (extraNotices && extraNotices.length) {
+				notices = notices.concat(extraNotices);
+			}
+
+			if (error) {
+				showError(error);
+			} else {
+				clearError();
+			}
+			showNotice(notices.join("\n"));
+		}
+
+		function fetchJson(url, options) {
+			return fetch(url, options).then(function (response) {
+				var contentType = (response.headers.get("content-type") || "").toLowerCase();
+				if (contentType.indexOf("application/json") === -1) {
+					throw new Error("LuCI 返回了非 JSON 响应（HTTP " + response.status +
+						"），会话可能已过期，请重新登录。");
+				}
+
+				return response.text().then(function (text) {
+					var data = null;
+					if (text) {
+						try {
+							data = JSON.parse(text);
+						} catch (err) {
+							throw new Error("服务端返回了无法解析的响应（HTTP " +
+								response.status + "）。");
+						}
+					}
+					if (!data || typeof data !== "object") {
+						throw new Error("服务端返回了空响应（HTTP " +
+							response.status + "）。");
+					}
+					return {
+						status: response.status,
+						ok: response.ok,
+						data: data
+					};
+				});
+			});
+		}
+
+		function getData() {
+			try {
+				return fetchJson(dataUrl, {
+					method: "GET",
+					credentials: "same-origin",
+					cache: "no-store",
+					headers: {
+						"Accept": "application/json"
+					}
+				});
+			} catch (error) {
+				return Promise.reject(error);
+			}
+		}
+
+		function postAction(op, payload) {
+			try {
+				var parts = [
+					"op=" + encodeURIComponent(op),
+					"token=" + encodeURIComponent(csrfToken)
+				];
+
+				if (payload !== undefined && payload !== null) {
+					parts.push("payload=" + encodeURIComponent(JSON.stringify(payload)));
+				}
+
+				return fetchJson(actionUrl, {
+					method: "POST",
+					credentials: "same-origin",
+					cache: "no-store",
+					headers: {
+						"Accept": "application/json",
+						"Content-Type": "application/x-www-form-urlencoded"
+					},
+					body: parts.join("&")
+				});
+			} catch (error) {
+				return Promise.reject(error);
+			}
+		}
+
+		function load() {
+			state.loadError = false;
+
+			return getData().then(function (result) {
+				if (!result.ok) {
+					if (!state.loaded) {
+						state.loadError = true;
+						renderStatus();
+						updateControls();
+					}
+					if (result.status === 401 || result.status === 403) {
+						showError("会话已过期或无权限，请重新登录 LuCI 后重试。");
+					} else {
+						showError("无法加载配置数据（HTTP " + result.status + "）。");
+					}
+					return false;
+				}
+
+				var data = result.data;
+				state.loaded = true;
+				state.running = data.running === true;
+				state.enabled = data.enabled === true;
+				renderLogs(data.logs);
+
+				if (!data.config) {
+					state.config = null;
+					state.revision = "";
+					renderStatus();
+					configNotices(null, [], "无法读取配置：" +
+						(data.config_error || "未知错误") +
+						"\n请通过 SSH 检查 /etc/hy2tun/client.yaml。");
+					updateControls();
+					return false;
+				}
+
+				applyConfig(data.config);
+				renderStatus();
+				configNotices(data.config, [], "");
+				updateControls();
+				return true;
+			}, function (error) {
+				if (!state.loaded) {
+					state.loadError = true;
+					renderStatus();
+					updateControls();
+				}
+				showError(networkError(error));
+				return false;
+			});
+		}
+
+		function handleSave(op) {
+			if (state.busy) {
+				return;
+			}
+			if (!state.config) {
+				showError("配置不可用，无法保存。");
+				return;
+			}
+			if (state.running) {
+				showError("请先停止 hy2tun 服务再保存配置。");
+				return;
+			}
+			if (state.config.multi === true) {
+				showError("多服务端配置不支持在此保存。");
+				return;
+			}
+			if (state.config.unknown_fields === true) {
+				showError("配置包含未知顶层字段，无法保存；请使用客户端控制台或 SSH 编辑。");
+				return;
+			}
+
+			var payload = collectPayload();
+			var problem = validatePayload(payload);
+			if (problem) {
+				showError(problem);
+				return;
+			}
+
+			setBusy(true);
+			clearError();
+			clearNotice();
+
+			postAction(op, payload).then(function (result) {
+				var res = result.data;
+
+				if (result.status === 409) {
+					if (typeof res.running === "boolean") {
+						state.running = res.running;
+					}
+					if (typeof res.enabled === "boolean") {
+						state.enabled = res.enabled;
+					}
+					if (typeof res.logs === "string") {
+						renderLogs(res.logs);
+					}
+					renderStatus();
+					updateControls();
+					showError("配置已被修改，请刷新。");
+					return;
+				}
+
+				if (res.saved === true) {
+					if (res.config) {
+						applyConfig(res.config);
+						state.revision = res.config.revision || res.revision || state.revision;
+					} else {
+						// The configuration was committed but could not be read
+						// back. Never keep secret input in the page after a save.
+						el.auth.value = "";
+						el.controlToken.value = "";
+						el.password.value = "";
+						el.passwordConfirm.value = "";
+						if (typeof res.revision === "string") {
+							state.revision = res.revision;
+						}
+					}
+
+					state.running = res.running === true;
+					state.enabled = res.enabled === true;
+					renderLogs(res.logs);
+					renderStatus();
+
+					if (res.ok === true) {
+						configNotices(state.config, [
+							op === "save_start" ? "配置已保存并启动。" : "配置已保存。"
+						], "");
+					} else {
+						configNotices(state.config, [
+							op === "save_start" ?
+								"配置已保存，但启动失败；请检查日志后重试。" :
+								"配置已保存，但无法读取新配置；请刷新页面。"
+						], actionError(result));
+					}
+					updateControls();
+					return;
+				}
+
+				if (typeof res.running === "boolean") {
+					state.running = res.running;
+				}
+				if (typeof res.enabled === "boolean") {
+					state.enabled = res.enabled;
+				}
+				if (typeof res.logs === "string") {
+					renderLogs(res.logs);
+				}
+				renderStatus();
+				updateControls();
+				showError(actionError(result));
+			}, function (error) {
+				showError(networkError(error));
+			}).then(function () {
+				setBusy(false);
+			}, function (error) {
+				showError(error && error.message ? error.message : "操作失败。");
+				setBusy(false);
+			});
+		}
+
+		function handleService(op) {
+			if (state.busy) {
+				return;
+			}
+
+			setBusy(true);
+			clearError();
+			clearNotice();
+
+			postAction(op, null).then(function (result) {
+				var res = result.data;
+
+				if (op === "stop" || op === "start" || op === "restart") {
+					return load().then(function (loaded) {
+						if (!res.ok) {
+							showError(actionError(result));
+						} else if (loaded && op === "stop") {
+							showNotice("服务已停止，可以编辑配置。");
+						} else if (loaded && op === "start") {
+							showNotice("服务已启动。");
+						} else if (loaded) {
+							showNotice("服务已重启。");
+						}
+					});
+				}
+
+				if (typeof res.running === "boolean") {
+					state.running = res.running;
+				}
+				if (typeof res.enabled === "boolean") {
+					state.enabled = res.enabled;
+				}
+				if (typeof res.logs === "string") {
+					renderLogs(res.logs);
+				}
+				renderStatus();
+				updateControls();
+
+				if (!res.ok) {
+					showError(actionError(result));
+				} else if (op === "enable") {
+					showNotice("已设置开机自启。");
+				} else if (op === "disable") {
+					showNotice("已取消开机自启。");
+				}
+			}, function (error) {
+				if (op === "stop" || op === "start" || op === "restart") {
+					return load().then(function () {
+						showError(networkError(error));
+					});
+				}
+				showError(networkError(error));
+			}).then(function () {
+				setBusy(false);
+			}, function (error) {
+				showError(error && error.message ? error.message : "操作失败。");
+				setBusy(false);
+			});
+		}
+
+		function handleRefresh() {
+			if (state.busy) {
+				return;
+			}
+			setBusy(true);
+			load().then(function () {
+				setBusy(false);
+			}, function (error) {
+				showError(error && error.message ? error.message : "刷新失败。");
+				setBusy(false);
+			});
+		}
+
+		function handleRefreshLogs() {
+			if (state.busy) {
+				return;
+			}
+			setBusy(true);
+
+			postAction("logs", null).then(function (result) {
+				var res = result.data;
+				if (typeof res.logs === "string") {
+					renderLogs(res.logs);
+				}
+				if (typeof res.running === "boolean") {
+					state.running = res.running;
+				}
+				if (typeof res.enabled === "boolean") {
+					state.enabled = res.enabled;
+				}
+				renderStatus();
+				updateControls();
+				if (!res.ok) {
+					showError(actionError(result));
+				}
+			}, function (error) {
+				showError(networkError(error));
+			}).then(function () {
+				setBusy(false);
+			}, function (error) {
+				showError(error && error.message ? error.message : "操作失败。");
+				setBusy(false);
+			});
+		}
+
+		function handleServerChange() {
+			var config = state.config;
+			if (!config) {
+				return;
+			}
+
+			var changed = config.exists === true &&
+				el.server.value.trim() !== state.loadedServer;
+			setHidden(el.migration, !changed);
+
+			if (changed && el.sni.value) {
+				el.sni.value = "";
+			}
+		}
+
+		function bindEvents() {
+			el.form.addEventListener("submit", function (event) {
+				event.preventDefault();
+			});
+
+			el.server.addEventListener("change", handleServerChange);
+
+			el.mappingAdd.addEventListener("click", function () {
+				var row = addMappingRow({
+					id: "",
+					type: "tcp",
+					remote_port: 0,
+					local_addr: "",
+					note: "",
+					enabled: true
+				});
+				if (row) {
+					var input = row.querySelector(".hy2tun-map-local");
+					if (input) {
+						input.focus();
+					}
+				}
+			});
+
+			el.save.addEventListener("click", function () {
+				handleSave("save");
+			});
+			el.saveStart.addEventListener("click", function () {
+				handleSave("save_start");
+			});
+
+			el.start.addEventListener("click", function () {
+				handleService("start");
+			});
+			el.stop.addEventListener("click", function () {
+				handleService("stop");
+			});
+			el.restart.addEventListener("click", function () {
+				handleService("restart");
+			});
+			el.enable.addEventListener("click", function () {
+				handleService("enable");
+			});
+			el.disable.addEventListener("click", function () {
+				handleService("disable");
+			});
+
+			el.refresh.addEventListener("click", handleRefresh);
+			el.refreshLogs.addEventListener("click", handleRefreshLogs);
+
+			el.openConsole.addEventListener("click", function (event) {
+				if (!el.openConsole.getAttribute("href")) {
+					event.preventDefault();
+				}
+			});
+		}
+
+		function init() {
+			if (!el.form || !el.tableBody || !el.mappingRowTemplate) {
+				return;
+			}
+
+			bindEvents();
+			renderStatus();
+			updateControls();
+
+			if (typeof fetch !== "function") {
+				state.loadError = true;
+				renderStatus();
+				updateControls();
+				showError("当前浏览器不支持 fetch，无法加载页面数据，请升级浏览器。");
+				return;
+			}
+
+			setBusy(true);
+			load().then(function () {
+				setBusy(false);
+			}, function (error) {
+				showError(error && error.message ? error.message : "加载失败。");
+				setBusy(false);
+			});
+		}
+
+		if (document.readyState === "loading") {
+			document.addEventListener("DOMContentLoaded", init);
+		} else {
+			init();
+		}
+	})();
+</script>
 <%+footer%>
