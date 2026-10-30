@@ -110,6 +110,23 @@ the Go architecture; ship the matching file.
 The package requires `ca-bundle` for TLS. The server (`hy2tund`) is intended for
 a normal public Linux host, not OpenWrt.
 
+## Test the LuCI controller
+
+`scripts/openwrt/test-luci-controller.sh` runs an integration harness for the
+controller without OpenWrt, root, or a router. The wrapper copies the controller
+into a temporary directory, rewrites its client and init-script paths to local
+test doubles, and the harness stubs the LuCI/nixio runtime. It requires Lua 5.1
+and `lua-cjson`; set `LUA` to use a different interpreter name.
+
+```bash
+scripts/openwrt/test-luci-controller.sh
+```
+
+The harness covers route registration, the POST/CSRF action target, data and
+log reads, save/save_start, start/stop/restart, enable/disable, and
+`config_error` propagation. It never writes to `/etc/hy2tun`,
+`/usr/bin/hy2tun`, or `/etc/init.d/hy2tun`.
+
 ## Scope
 
 The LuCI app provides service status and control, a basic single-server
