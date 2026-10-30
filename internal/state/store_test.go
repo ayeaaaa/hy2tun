@@ -147,6 +147,22 @@ func TestSetOnlineReservesPortForOfflineClient(t *testing.T) {
 	require.False(t, s.Reserved("c1", 2222, now.Add(2*time.Hour)))
 }
 
+func TestPruneOfflineRemovesOnlyExpiredOfflineClients(t *testing.T) {
+	s, err := Open("", time.Hour)
+	require.NoError(t, err)
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+
+	s.Upsert(ClientState{ID: "old", Online: false, LastSeen: now.Add(-8 * 24 * time.Hour)})
+	s.Upsert(ClientState{ID: "recent", Online: false, LastSeen: now.Add(-time.Hour)})
+	s.Upsert(ClientState{ID: "online", Online: true, LastSeen: now.Add(-8 * 24 * time.Hour)})
+
+	require.Equal(t, 1, s.PruneOffline(now, 7*24*time.Hour))
+	snapshot := s.Snapshot()
+	require.NotContains(t, snapshot.Clients, "old")
+	require.Contains(t, snapshot.Clients, "recent")
+	require.Contains(t, snapshot.Clients, "online")
+}
+
 func TestReservedRequiresOfflineClientAndKnownPort(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "state.json"), time.Hour)
 	require.NoError(t, err)

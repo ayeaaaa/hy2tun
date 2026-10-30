@@ -19,16 +19,16 @@ func New(level, file string) (*slog.Logger, io.Closer, error) {
 		return NewWithWriter(level, os.Stdout)
 	}
 
-	f, err := os.OpenFile(file, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	writer, err := newRotatingWriter(file, defaultRotateSize, defaultRotateBackups)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open log file %s: %w", file, err)
 	}
-	log, _, err := NewWithWriter(level, f)
+	log, _, err := NewWithWriter(level, writer)
 	if err != nil {
-		_ = f.Close()
+		_ = writer.Close()
 		return nil, nil, err
 	}
-	return log, f, nil
+	return log, writer, nil
 }
 
 // NewWithWriter is the test seam for New. It returns a JSON logger at the

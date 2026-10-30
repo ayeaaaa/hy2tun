@@ -51,6 +51,25 @@ func TestNewWritesToFile(t *testing.T) {
 	require.Equal(t, os.FileMode(0600), info.Mode().Perm())
 }
 
+func TestRotatingWriterRotatesAndKeepsBackups(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hy2tun.log")
+	writer, err := newRotatingWriter(path, 10, 2)
+	require.NoError(t, err)
+	defer writer.Close()
+
+	_, err = writer.Write([]byte("1234567890"))
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("abc"))
+	require.NoError(t, err)
+
+	current, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "abc", string(current))
+	backup, err := os.ReadFile(path + ".1")
+	require.NoError(t, err)
+	require.Equal(t, "1234567890", string(backup))
+}
+
 func TestNewRejectsInvalidLevel(t *testing.T) {
 	_, _, err := New("verbose", "")
 	require.ErrorContains(t, err, "level")

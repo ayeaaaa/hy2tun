@@ -33,6 +33,9 @@ func (s *Server) initState() error {
 		store.SetOnline(id, false, now)
 		changed = true
 	}
+	if store.PruneOffline(now, state.DefaultOfflineClientTTL) > 0 {
+		changed = true
+	}
 	if changed {
 		if err := store.Save(); err != nil {
 			s.log.Warn("reconcile loaded client state", "error", err)

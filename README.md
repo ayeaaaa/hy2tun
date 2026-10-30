@@ -1013,8 +1013,9 @@ unchanged. A client credential update is written to `client.yaml` before the
 ## Client management
 
 The server keeps offline clients in its state file so their mappings and port
-reservations survive restarts. To forget a client that will not return, open its
-detail page and choose **Delete client**. This removes the persisted client, all
+reservations survive restarts. Offline clients whose last-seen timestamp is
+older than seven days are pruned automatically at startup. To forget a client
+sooner, open its detail page and choose **Delete client**. This removes the persisted client, all
 of its mappings, and its soft port reservations. The action cannot be undone.
 
 The button is available only while the client is offline. If it is online,

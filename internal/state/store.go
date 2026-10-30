@@ -25,6 +25,11 @@ import (
 // crash; callers must not roll it back in memory.
 var ErrCommitted = errors.New("state: change committed but not durable")
 
+// DefaultOfflineClientTTL is how long an offline client remains in the state
+// file before it is pruned automatically. Port reservations still use the
+// shorter ports.offline_reserve duration.
+const DefaultOfflineClientTTL = 7 * 24 * time.Hour
+
 // syncDirFn is a test seam for the post-rename durability check.
 var syncDirFn = syncDir
 
@@ -175,6 +180,31 @@ func (s *Store) SetOnline(id string, online bool, now time.Time) {
 		client.ReservedUntil = now.Add(time.Duration(s.offlineReserve.Load()))
 	}
 	s.dirty = true
+}
+
+// PruneOffline removes clients that have been offline longer than ttl and
+// returns the number removed. It never removes online clients.
+func (s *Store) PruneOffline(now time.Time, ttl time.Duration) int {
+	if s == nil || ttl <= 0 {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	removed := 0
+	for id, client := range s.state.Clients {
+		if client == nil || client.Online || client.LastSeen.IsZero() {
+			continue
+		}
+		if now.Sub(client.LastSeen) > ttl {
+			delete(s.state.Clients, id)
+			removed++
+		}
+	}
+	if removed > 0 {
+		s.dirty = true
+	}
+	return removed
 }
 
 // Reserved reports whether port is soft-reserved for clientID at now. A

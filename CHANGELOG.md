@@ -25,6 +25,9 @@ All notable changes to this project are documented here.
   invocation cannot block startup indefinitely.
 - Web console password changes over bcrypt's 72-byte limit return a validation
   error instead of an internal error.
+- `log.file` rotates at 10 MiB with five backups instead of growing forever.
+- Offline clients older than seven days are pruned from the server state file
+  at startup.
 
 ## v1.5.1 - 2026-10-30
 
