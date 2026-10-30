@@ -81,6 +81,9 @@ func (c *ClientConfig) ProxyEnabled() bool {
 
 // LoadClient reads, parses, and validates a client config file.
 func LoadClient(path string) (*ClientConfig, error) {
+	if err := ensurePrivateFile(path); err != nil {
+		return nil, fmt.Errorf("secure client config %s: %w", path, err)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read client config %s: %w", path, err)

@@ -34,6 +34,9 @@ type ServerConfig struct {
 
 // LoadServer reads, parses, and validates a server config file.
 func LoadServer(path string) (*ServerConfig, error) {
+	if err := ensurePrivateFile(path); err != nil {
+		return nil, fmt.Errorf("secure server config %s: %w", path, err)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read server config %s: %w", path, err)

@@ -4,6 +4,28 @@
 
 All notable changes to this project are documented here.
 
+## v1.5.2 - 2026-10-30
+
+### Changed
+
+- Docker examples now use a writable config directory and a writable state
+  directory; the previous read-only YAML mounts broke generated passwords,
+  client IDs, assigned ports, and hot settings.
+
+### Fixed
+
+- Configuration files with group/other permissions are tightened to 0600 when
+  loaded.
+- Server resource limits now bound control clients, mappings per client,
+  concurrent public TCP connections per mapping, and pending data-stream
+  tokens.
+- Reverse UDP peers use a 4097-byte read buffer instead of 64 KiB, avoiding
+  up to 64 MiB of buffers per mapping at the peer limit.
+- Firewall command execution has a 10-second timeout, so a hung nft/iptables
+  invocation cannot block startup indefinitely.
+- Web console password changes over bcrypt's 72-byte limit return a validation
+  error instead of an internal error.
+
 ## v1.5.1 - 2026-10-30
 
 ### Added

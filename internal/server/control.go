@@ -66,6 +66,15 @@ func (h *controlHandler) Serve(conn net.Conn) {
 		h.reject(conn, control.CodeBadMessage)
 		return
 	}
+	if len(hello.Mappings) > maxMappingsPerClient {
+		h.reject(conn, control.CodeBadMessage)
+		return
+	}
+	if !h.server.mappings.hasClient(hello.ClientID) &&
+		h.server.mappings.clientCount() >= maxControlClients {
+		h.reject(conn, control.CodeBadMessage)
+		return
+	}
 	if hello.Revision < 0 {
 		h.reject(conn, control.CodeBadMessage)
 		return

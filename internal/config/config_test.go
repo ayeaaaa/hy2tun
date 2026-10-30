@@ -95,6 +95,43 @@ web:
 	require.Equal(t, int64(1), cfg.Credentials.Generation)
 }
 
+func TestLoadServerConfigTightensPermissions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yaml")
+	body := `listen: ":443"
+auth:
+  type: password
+  password: "pw"
+tls:
+  cert: "cert.pem"
+  key: "key.pem"
+control:
+  token: "0123456789abcdef0123456789abcdef"
+`
+	require.NoError(t, os.WriteFile(path, []byte(body), 0644))
+	_, err := LoadServer(path)
+	require.NoError(t, err)
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0600), info.Mode().Perm())
+}
+
+func TestLoadClientConfigTightensPermissions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "client.yaml")
+	body := `server: "127.0.0.1:443"
+auth: "password"
+control:
+  token: "0123456789abcdef"
+`
+	require.NoError(t, os.WriteFile(path, []byte(body), 0644))
+	_, err := LoadClient(path)
+	require.NoError(t, err)
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0600), info.Mode().Perm())
+}
+
 func TestLoadClientConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "client.yaml")

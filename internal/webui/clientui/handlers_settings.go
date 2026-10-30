@@ -102,6 +102,10 @@ func (s *Server) handleUpdateWebSettings(w http.ResponseWriter, r *http.Request)
 		writeJSONErrorCode(w, http.StatusBadRequest, "weak_password", "新密码至少需要 8 个字符")
 		return
 	}
+	if len([]byte(request.NewPassword)) > 72 {
+		writeJSONErrorCode(w, http.StatusBadRequest, "weak_password", "新密码不能超过 72 字节")
+		return
+	}
 	if request.ConfirmPassword != "" && request.ConfirmPassword != request.NewPassword {
 		writeJSONErrorCode(w, http.StatusBadRequest, "password_mismatch", "两次输入的新密码不一致")
 		return

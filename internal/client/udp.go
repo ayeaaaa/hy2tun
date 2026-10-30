@@ -33,8 +33,10 @@ const (
 	// udpMessageBufferSize is the HY2 UDPMessage buffer size. It bounds the
 	// whole message (fixed header + address + payload), not just the payload.
 	udpMessageBufferSize = 4096
-	// udpReadBufferSize is large enough for any IPv4/IPv6 UDP datagram.
-	udpReadBufferSize = 64 * 1024
+	// udpReadBufferSize only needs to detect datagrams that exceed the HY2
+	// message budget; larger payloads are dropped below. One extra byte
+	// distinguishes "exactly at the limit" from "too large".
+	udpReadBufferSize = udpMessageBufferSize + 1
 )
 
 // udpPayloadLimit returns the largest payload that fits in one HY2 UDPMessage

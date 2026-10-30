@@ -176,6 +176,27 @@ func TestMappingUpdateDuringPublicAccept(t *testing.T) {
 	wg.Wait()
 }
 
+func TestDataStreamPendingLimit(t *testing.T) {
+	data := newDataStreams(1)
+	defer data.closeAll()
+
+	first, firstPeer := net.Pipe()
+	defer firstPeer.Close()
+	_, err := data.add(&pendingConn{
+		conn:    first,
+		expires: time.Now().Add(time.Minute),
+	})
+	require.NoError(t, err)
+
+	second, secondPeer := net.Pipe()
+	defer secondPeer.Close()
+	_, err = data.add(&pendingConn{
+		conn:    second,
+		expires: time.Now().Add(time.Minute),
+	})
+	require.ErrorContains(t, err, "pending stream limit")
+}
+
 func TestDataStreamTokenSingleUseAndExpiry(t *testing.T) {
 	data := newDataStreams()
 	defer data.closeAll()

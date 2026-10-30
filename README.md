@@ -257,15 +257,27 @@ docker build --target server -t hy2tun-server .
 docker build --target client -t hy2tun-client .
 ```
 
-Use host networking so the HY2 UDP port and public mapping ports work:
+The image runs as nonroot UID/GID `65532`. The config directory must be
+writable: the server writes generated web passwords, web session keys, and hot
+settings; the client writes its generated ID, assigned ports, and web session
+key.
 
 ```bash
+mkdir -p config state
+cp examples/server.yaml config/server.yaml
+cp cert.pem key.pem config/
+chown -R 65532:65532 config state
+
 docker run --network host --restart unless-stopped \
-  -v "$PWD/server.yaml:/etc/hy2tun/server.yaml:ro" \
-  -v "$PWD/certs:/etc/hy2tun/certs:ro" \
-  -v hy2tund-state:/var/lib/hy2tun \
+  --user 65532:65532 \
+  -v "$PWD/config:/etc/hy2tun" \
+  -v "$PWD/state:/var/lib/hy2tun" \
   hy2tun-server
 ```
+
+Use host networking so the HY2 UDP port and public mapping ports work. For the
+client, use the same writable `config` directory with `client.yaml`; do not
+mount only the YAML file read-only.
 
 See [`docker-compose.yml`](docker-compose.yml) for a two-service example. The
 image runs as `nonroot`; use ports above 1024 or grant
@@ -1388,7 +1400,12 @@ the password and session cookie in transit.
   a client cannot forge a fresh IP per attempt. When trusted, `X-Real-IP` wins
   and the last `X-Forwarded-For` entry is the fallback.
 - Configuration and state files are written with mode `0600` and atomic
-  rename. Previous contents are kept as `.bak`.
+  rename. Previous contents are kept as `.bak`. Existing configuration files
+  with group/other permissions are tightened to `0600` when loaded.
+- Built-in resource limits: 256 control clients, 128 mappings per client,
+  1024 concurrent public TCP connections per mapping, and 4096 pending
+  data-stream tokens. These protect file descriptors and goroutines from
+  accidental or hostile exhaustion.
 - Passwords, tokens, and private keys are never logged.
 - The client console uses HTTP unless `web.tls` is configured. On a LAN,
   enable `web.tls` or use a trusted VPN; otherwise a LAN attacker can sniff the

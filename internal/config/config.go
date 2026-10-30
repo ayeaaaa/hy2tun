@@ -377,6 +377,26 @@ func writeFileAtomic(path string, data []byte) error {
 	return nil
 }
 
+// ensurePrivateFile tightens an existing configuration file to 0600. Config
+// files contain HY2 passwords and control tokens, so group/other access is
+// never appropriate.
+func ensurePrivateFile(path string) error {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm()&0077 == 0 {
+		return nil
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		return fmt.Errorf("secure config %s: %w", path, err)
+	}
+	return nil
+}
+
 func syncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {

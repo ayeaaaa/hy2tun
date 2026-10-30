@@ -67,6 +67,7 @@ func (m *mappingManager) bindLocked(sess *clientSession, rt *mappingRuntime, ign
 				continue
 			}
 			rt.tcpListener = listener
+			rt.connSem = make(chan struct{}, maxConnectionsPerMapping)
 			rt.assignedPort = addrPort(listener.Addr())
 			rt.status = mappingStatusRunning
 			if m.serveTCP != nil {

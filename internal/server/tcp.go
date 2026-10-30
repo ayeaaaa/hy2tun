@@ -35,14 +35,20 @@ type pendingConn struct {
 type dataStreams struct {
 	mu      sync.Mutex
 	pending map[string]*pendingConn
+	max     int
 
 	stop     chan struct{}
 	stopOnce sync.Once
 }
 
-func newDataStreams() *dataStreams {
+func newDataStreams(max ...int) *dataStreams {
+	limit := maxPendingDataStreams
+	if len(max) > 0 && max[0] > 0 {
+		limit = max[0]
+	}
 	return &dataStreams{
 		pending: make(map[string]*pendingConn),
+		max:     limit,
 		stop:    make(chan struct{}),
 	}
 }
@@ -59,6 +65,10 @@ func (d *dataStreams) add(pc *pendingConn) (string, error) {
 		}
 
 		d.mu.Lock()
+		if len(d.pending) >= d.max {
+			d.mu.Unlock()
+			return "", fmt.Errorf("register data stream: pending stream limit reached")
+		}
 		_, exists := d.pending[token]
 		if !exists {
 			d.pending[token] = pc
@@ -201,6 +211,7 @@ func newDataToken() (string, error) {
 type activeConn struct {
 	net.Conn
 	mapping *mappingRuntime
+	sem     chan struct{}
 	once    sync.Once
 }
 
@@ -224,6 +235,9 @@ func (c *activeConn) Close() error {
 	c.once.Do(func() {
 		if c.mapping != nil {
 			c.mapping.untrackActive(c)
+		}
+		if c.sem != nil {
+			<-c.sem
 		}
 	})
 	return c.Conn.Close()
@@ -266,7 +280,19 @@ func (s *Server) serveTCP(sess *clientSession, m *mappingRuntime, listener net.L
 // openPublicConn hands one accepted public connection to the client. The
 // connection is closed when no data stream can be opened for it.
 func (s *Server) openPublicConn(sess *clientSession, m *mappingRuntime, conn net.Conn) {
-	public := &activeConn{Conn: conn, mapping: m}
+	if m.connSem != nil {
+		select {
+		case m.connSem <- struct{}{}:
+		default:
+			s.log.Warn("public mapping connection limit reached",
+				"mapping", m.id,
+				"limit", maxConnectionsPerMapping,
+			)
+			_ = conn.Close()
+			return
+		}
+	}
+	public := &activeConn{Conn: conn, mapping: m, sem: m.connSem}
 	m.trackActive(public)
 
 	if err := s.openDataStream(sess, m, public); err != nil {

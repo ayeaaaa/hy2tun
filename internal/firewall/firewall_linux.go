@@ -3,6 +3,7 @@
 package firewall
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"hy2tun/internal/ports"
 )
@@ -24,7 +26,12 @@ type osCommandRunner struct{}
 func (osCommandRunner) LookPath(file string) (string, error) { return exec.LookPath(file) }
 
 func (osCommandRunner) Run(name string, args ...string) error {
-	out, err := exec.Command(name, args...).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	if ctx.Err() != nil {
+		return fmt.Errorf("%s %v: %w", name, args, ctx.Err())
+	}
 	if err != nil {
 		return fmt.Errorf("%s %v: %w: %s", name, args, err, strings.TrimSpace(string(out)))
 	}

@@ -37,6 +37,7 @@ type mappingRuntime struct {
 
 	activeMu sync.Mutex
 	active   map[net.Conn]struct{}
+	connSem  chan struct{}
 
 	txBytes atomic.Uint64
 	rxBytes atomic.Uint64

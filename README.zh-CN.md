@@ -219,15 +219,25 @@ docker build --target server -t hy2tun-server .
 docker build --target client -t hy2tun-client .
 ```
 
-需要使用 host 网络，HY2 UDP 端口和公网映射端口才能正常工作：
+镜像以 nonroot UID/GID `65532` 运行，配置目录必须可写：服务端会写生成的
+Web 密码、Web session key 和热配置；客户端会写生成的 ID、服务端分配的端口和
+Web session key。
 
 ```bash
+mkdir -p config state
+cp examples/server.yaml config/server.yaml
+cp cert.pem key.pem config/
+chown -R 65532:65532 config state
+
 docker run --network host --restart unless-stopped \
-  -v "$PWD/server.yaml:/etc/hy2tun/server.yaml:ro" \
-  -v "$PWD/certs:/etc/hy2tun/certs:ro" \
-  -v hy2tund-state:/var/lib/hy2tun \
+  --user 65532:65532 \
+  -v "$PWD/config:/etc/hy2tun" \
+  -v "$PWD/state:/var/lib/hy2tun" \
   hy2tun-server
 ```
+
+需要使用 host 网络，HY2 UDP 端口和公网映射端口才能正常工作。客户端使用同一
+个可写 `config` 目录中的 `client.yaml`；不要把单独的 YAML 文件以只读方式挂载。
 
 完整双服务示例见 [`docker-compose.yml`](docker-compose.yml)。镜像以
 `nonroot` 运行；如果需要绑定 1024 以下端口，请使用高权限端口或授予
@@ -1234,6 +1244,10 @@ CSRF 防护，但 TLS 保护传输中的密码和会话 cookie。
   否则忽略转发头，防止客户端伪造新 IP 绕过限制。受信任时优先
   `X-Real-IP`，回退到 `X-Forwarded-For` 的最后一项。
 - 配置和状态文件以 `0600` 权限原子 rename 写入。旧内容保留为 `.bak`。
+  已存在但带 group/other 权限的配置文件会在加载时自动收紧为 `0600`。
+- 内置资源上限：256 个控制客户端、每客户端 128 个映射、每个映射 1024 个
+  并发公网 TCP 连接、4096 个待处理 data-stream token。用于防止文件描述符和
+  goroutine 被意外或恶意耗尽。
 - 密码、令牌和私钥从不记录日志。
 - 客户端控制台默认使用 HTTP，除非配置了 `web.tls`。在局域网中，启用
   `web.tls` 或使用可信 VPN；否则局域网攻击者可以嗅探管理会话。

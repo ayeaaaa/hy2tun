@@ -5,10 +5,16 @@ services:
       target: server
     network_mode: host
     restart: unless-stopped
+    # The image runs as nonroot (UID/GID 65532). Create ./config and ./state
+    # on the host and chown them to that UID/GID before starting:
+    #   mkdir -p config state
+    #   cp examples/server.yaml config/server.yaml
+    #   cp cert.pem key.pem config/
+    #   chown -R 65532:65532 config state
+    user: "${HY2TUN_UID:-65532}:${HY2TUN_GID:-65532}"
     volumes:
-      - ./server.yaml:/etc/hy2tun/server.yaml:ro
-      - ./certs:/etc/hy2tun/certs:ro
-      - hy2tund-state:/var/lib/hy2tun
+      - ./config:/etc/hy2tun
+      - ./state:/var/lib/hy2tun
     # host networking is required for the HY2 UDP port and public mapping
     # ports. The container runs as nonroot; use ports above 1024 or grant
     # CAP_NET_BIND_SERVICE.
@@ -19,11 +25,10 @@ services:
       target: client
     network_mode: host
     restart: unless-stopped
+    # Use the same writable config directory as the server; the client writes
+    # its generated ID, assigned ports, web session key, and web password hash.
+    user: "${HY2TUN_UID:-65532}:${HY2TUN_GID:-65532}"
     volumes:
-      - ./client.yaml:/etc/hy2tun/client.yaml:ro
-      - ./certs:/etc/hy2tun/certs:ro
+      - ./config:/etc/hy2tun
     depends_on:
       - hy2tund
-
-volumes:
-  hy2tund-state:

@@ -97,6 +97,25 @@ func (m *mappingManager) newRuntime(mapping config.Mapping, status string) *mapp
 
 // register replaces any previous session with the same client ID and applies
 // the authoritative mapping list from Hello.
+func (m *mappingManager) clientCount() int {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.sessions)
+}
+
+func (m *mappingManager) hasClient(id string) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.sessions[id]
+	return ok
+}
+
 func (m *mappingManager) register(sess *clientSession, mappings []config.Mapping) []control.Result {
 	now := time.Now()
 
@@ -157,6 +176,9 @@ func (m *mappingManager) updateWithName(sess *clientSession, revision int64, map
 func (m *mappingManager) updateLocked(sess *clientSession, revision int64, mappings []config.Mapping, name string, now time.Time) ([]control.Result, bool, bool) {
 	if m.sessions[sess.id] != sess {
 		return nil, false, false
+	}
+	if len(mappings) > maxMappingsPerClient {
+		return []control.Result{{Error: string(control.CodeBadMessage)}}, false, true
 	}
 	if revision <= sess.appliedRevision {
 		return []control.Result{{Error: string(control.CodeStaleRevision)}}, false, false

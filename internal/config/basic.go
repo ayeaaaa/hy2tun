@@ -112,6 +112,9 @@ func contentRevision(data []byte) string {
 // Invalid-but-parseable configurations must stay editable so the basic form
 // can repair them.
 func loadClientForEdit(path string) (*ClientConfig, []byte, error) {
+	if err := ensurePrivateFile(path); err != nil {
+		return nil, nil, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, nil, err
