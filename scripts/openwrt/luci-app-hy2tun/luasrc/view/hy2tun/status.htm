@@ -358,6 +358,7 @@
 			config: null,
 			revision: "",
 			loadedServer: "",
+			savedSnapshot: null,
 			nextMappingKey: 0
 		};
 
@@ -478,6 +479,7 @@
 				config.server.trim() : "";
 			fillForm(config);
 			renderMappings(config && config.mappings ? config.mappings : []);
+			state.savedSnapshot = JSON.stringify(collectPayload());
 		}
 
 		function updateMappingsEmpty() {
@@ -519,6 +521,7 @@
 					row.parentNode.removeChild(row);
 				}
 				updateMappingsEmpty();
+				updateControls();
 			});
 
 			el.tableBody.appendChild(row);
@@ -577,6 +580,16 @@
 				web_password: el.password.value,
 				web_password_confirm: el.passwordConfirm.value
 			};
+		}
+
+		function isDirty() {
+			if (!state.loaded || !state.config || state.config.multi === true) {
+				return false;
+			}
+			if (state.savedSnapshot === null) {
+				return true;
+			}
+			return JSON.stringify(collectPayload()) !== state.savedSnapshot;
 		}
 
 		function validatePayload(payload) {
@@ -780,6 +793,10 @@
 				setText(el.formHint, "服务运行中，表单只读；停止服务后可修改配置。");
 				return;
 			}
+			if (isDirty()) {
+				setText(el.formHint, "表单有未保存修改，请先保存或使用“保存并启动”。");
+				return;
+			}
 			if (config.unknown_fields === true) {
 				setText(el.formHint, "配置包含未知顶层字段，保存已禁用。");
 				return;
@@ -809,7 +826,7 @@
 			el.saveStart.disabled = saveDisabled;
 
 			el.start.disabled = state.busy || !state.loaded || !config ||
-				config.exists !== true || state.running;
+				config.exists !== true || state.running || isDirty();
 			el.stop.disabled = state.busy || !state.loaded || !state.running;
 			el.restart.disabled = state.busy || !state.loaded || !config ||
 				config.exists !== true || !state.running;
@@ -828,6 +845,38 @@
 
 			updateConsoleLink();
 			updateFormHint();
+		}
+
+		function applyActionStatus(res) {
+			if (typeof res.running === "boolean") {
+				state.running = res.running;
+			}
+			if (typeof res.enabled === "boolean") {
+				state.enabled = res.enabled;
+			}
+			if (typeof res.logs === "string") {
+				renderLogs(res.logs);
+			}
+
+			var configError = "";
+			if (res.config === null) {
+				state.config = null;
+				state.revision = "";
+				state.savedSnapshot = null;
+				clearNotice();
+				el.auth.value = "";
+				el.controlToken.value = "";
+				el.password.value = "";
+				el.passwordConfirm.value = "";
+				configError = typeof res.config_error === "string" && res.config_error !== "" ?
+					res.config_error : "配置不可用";
+			} else if (typeof res.config_error === "string" && res.config_error !== "") {
+				configError = res.config_error;
+			}
+
+			renderStatus();
+			updateControls();
+			return configError;
 		}
 
 		function actionError(result) {
@@ -1071,6 +1120,7 @@
 					if (res.config) {
 						applyConfig(res.config);
 						state.revision = res.config.revision || res.revision || state.revision;
+						state.savedSnapshot = JSON.stringify(collectPayload());
 					} else {
 						// The configuration was committed but could not be read
 						// back. Never keep secret input in the page after a save.
@@ -1078,6 +1128,7 @@
 						el.controlToken.value = "";
 						el.password.value = "";
 						el.passwordConfirm.value = "";
+						state.savedSnapshot = null;
 						if (typeof res.revision === "string") {
 							state.revision = res.revision;
 						}
@@ -1130,6 +1181,12 @@
 				return;
 			}
 
+			if (op === "start" && isDirty()) {
+				clearError();
+				showNotice("表单有未保存修改，请先保存或使用“保存并启动”。");
+				return;
+			}
+
 			setBusy(true);
 			clearError();
 			clearNotice();
@@ -1151,20 +1208,13 @@
 					});
 				}
 
-				if (typeof res.running === "boolean") {
-					state.running = res.running;
-				}
-				if (typeof res.enabled === "boolean") {
-					state.enabled = res.enabled;
-				}
-				if (typeof res.logs === "string") {
-					renderLogs(res.logs);
-				}
-				renderStatus();
-				updateControls();
+				var configError = applyActionStatus(res);
 
 				if (!res.ok) {
 					showError(actionError(result));
+				} else if (configError) {
+					showError((op === "logs" ? "日志已刷新" : "操作已完成") +
+						"，但无法读取配置：" + configError);
 				} else if (op === "enable") {
 					showNotice("已设置开机自启。");
 				} else if (op === "disable") {
@@ -1206,19 +1256,12 @@
 
 			postAction("logs", null).then(function (result) {
 				var res = result.data;
-				if (typeof res.logs === "string") {
-					renderLogs(res.logs);
-				}
-				if (typeof res.running === "boolean") {
-					state.running = res.running;
-				}
-				if (typeof res.enabled === "boolean") {
-					state.enabled = res.enabled;
-				}
-				renderStatus();
-				updateControls();
+				var configError = applyActionStatus(res);
+
 				if (!res.ok) {
 					showError(actionError(result));
+				} else if (configError) {
+					showError("日志已刷新，但无法读取配置：" + configError);
 				}
 			}, function (error) {
 				showError(networkError(error));
@@ -1228,6 +1271,10 @@
 				showError(error && error.message ? error.message : "操作失败。");
 				setBusy(false);
 			});
+		}
+
+		function handleFormEdited() {
+			updateControls();
 		}
 
 		function handleServerChange() {
@@ -1251,6 +1298,8 @@
 			});
 
 			el.server.addEventListener("change", handleServerChange);
+			el.formFields.addEventListener("input", handleFormEdited);
+			el.formFields.addEventListener("change", handleFormEdited);
 
 			el.mappingAdd.addEventListener("click", function () {
 				var row = addMappingRow({
@@ -1267,6 +1316,7 @@
 						input.focus();
 					}
 				}
+				updateControls();
 			});
 
 			el.save.addEventListener("click", function () {
