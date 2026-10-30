@@ -447,11 +447,13 @@ local function send_action(status, res, config, config_error)
 		end
 	else
 		res.config = JSON_NULL
-		if type(config_error) == "string" and config_error ~= "" then
-			res.config_error = config_error
-		elseif res.config_error == "" then
+		if res.config_error == "" then
 			res.config_error = "configuration is unavailable"
 		end
+	end
+
+	if type(config_error) == "string" and config_error ~= "" then
+		res.config_error = config_error
 	end
 
 	res.running = service_running()
@@ -634,7 +636,6 @@ function index()
 	local data = entry({"admin", "services", "hy2tun", "data"}, call("data"), nil)
 	data.leaf = true
 
-	local action = entry({"admin", "services", "hy2tun", "action"}, call("action"), nil)
+	local action = entry({"admin", "services", "hy2tun", "action"}, post("action"), nil)
 	action.leaf = true
-	action.post = true
 end
