@@ -96,6 +96,7 @@ grep -q 'config get' "$work/luci/controller.lua"
 grep -q 'id="hy2tun-server"' "$work/luci/status.htm"
 grep -q 'id="hy2tun-mappings"' "$work/luci/status.htm"
 grep -q 'id="hy2tun-save"' "$work/luci/status.htm"
+grep -q 'https://github.com/ayeaaaa/hy2tun' "$work/luci/status.htm"
 
 # Advanced-field guidance must separate console-editable settings from
 # SSH-only settings.

@@ -987,6 +987,7 @@ func TestServerWebStaticAndLoginPage(t *testing.T) {
 	require.Contains(t, body, "/static/app.css?v=")
 	require.Contains(t, body, `action="/api/login"`)
 	require.Contains(t, body, "登录管理控制台")
+	require.Contains(t, body, "https://github.com/ayeaaaa/hy2tun")
 
 	cookie := login(t, ts)
 	resp = doRequest(t, noRedirectClient(ts), http.MethodGet, ts.URL+"/login", "", cookie, nil)

@@ -4,6 +4,13 @@
 
 All notable changes to this project are documented here.
 
+## v1.5.4 - 2026-10-31
+
+### Added
+
+- A GitHub project link in the client and server web consoles and the OpenWrt
+  LuCI page.
+
 ## v1.5.3 - 2026-10-30
 
 ### Added

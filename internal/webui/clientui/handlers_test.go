@@ -685,6 +685,7 @@ func TestClientWebStaticAndLoginPage(t *testing.T) {
 	body := readClientBody(t, resp)
 	require.Contains(t, body, `action="/api/login"`)
 	require.Contains(t, body, "登录客户端控制台")
+	require.Contains(t, body, "https://github.com/ayeaaaa/hy2tun")
 }
 
 func TestClientWebHSTSBehindTLSProxy(t *testing.T) {
