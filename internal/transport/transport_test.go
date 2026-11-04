@@ -94,3 +94,77 @@ func TestErrorPreservesCause(t *testing.T) {
 	require.NotEmpty(t, (Error{Code: "protocol"}).Error())
 	require.True(t, FallbackAllowed(err))
 }
+
+func TestFallbackAllowedQUICCodes(t *testing.T) {
+	// A blanket QUIC deny would miss these network/session-loss cases. Allowing
+	// every close instead would promote protocol, crypto and local shutdowns.
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"connection refused", &quic.TransportError{Remote: true, ErrorCode: quic.ConnectionRefused}, true},
+		{"no viable path", &quic.TransportError{ErrorCode: quic.NoViablePathError}, true},
+		{"clean QUIC peer shutdown", &quic.TransportError{Remote: true, ErrorCode: quic.NoError}, true},
+		{"clean HY2 peer shutdown", coreErrs.ClosedError{Err: &quic.ApplicationError{Remote: true, ErrorCode: 0x100}}, true},
+		{"local clean HY2 shutdown", &quic.ApplicationError{ErrorCode: 0x100}, false},
+		{"local clean QUIC shutdown", &quic.TransportError{ErrorCode: quic.NoError}, false},
+		{"QUIC crypto", &quic.TransportError{ErrorCode: 0x12a}, false},
+		{"QUIC invalid token", &quic.TransportError{ErrorCode: quic.InvalidToken}, false},
+		{"QUIC protocol", &quic.TransportError{ErrorCode: quic.ProtocolViolation}, false},
+		{"unknown QUIC transport code", &quic.TransportError{ErrorCode: 0xff}, false},
+		{"unknown QUIC application code", &quic.ApplicationError{Remote: true, ErrorCode: 0x102}, false},
+		{"protocol stream reset", coreErrs.ClosedError{Err: &quic.StreamError{Remote: true, ErrorCode: 0x101}}, false},
+		{"clean stream reset is not session loss", coreErrs.ClosedError{Err: &quic.StreamError{Remote: true, ErrorCode: 0x100}}, false},
+		{"unknown cause inside HY2 closed wrapper", coreErrs.ClosedError{Err: errors.New("unclassified operation failure")}, false},
+		{"server dial rejection inside HY2 closed wrapper", coreErrs.ClosedError{Err: coreErrs.DialError{Message: "rejected"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, FallbackAllowed(tc.err))
+			require.Equal(t, tc.want, FallbackAllowed(fmt.Errorf("wrapped: %w", tc.err)))
+			require.Equal(t, tc.want, FallbackAllowed(coreErrs.ClosedError{Err: tc.err}))
+		})
+	}
+}
+
+func TestFallbackAllowedJoinedSecurityDominates(t *testing.T) {
+	// Checking only errors.As's first matching QUIC error can miss a denied
+	// sibling of the same type. Exercise both sibling orders and nested joins.
+	alert := tls.AlertError(42)
+	allowed := []struct {
+		name string
+		err  error
+	}{
+		{"deadline", context.DeadlineExceeded},
+		{"refused", &quic.TransportError{Remote: true, ErrorCode: quic.ConnectionRefused}},
+		{"network path lost", &quic.TransportError{ErrorCode: quic.NoViablePathError}},
+		{"clean HY2 peer shutdown", &quic.ApplicationError{Remote: true, ErrorCode: 0x100}},
+	}
+	denied := []struct {
+		name string
+		err  error
+	}{
+		{"pointer certificate alert", &alert},
+		{"value certificate alert", alert},
+		{"protocol stream reset", &quic.StreamError{Remote: true, ErrorCode: 0x101}},
+		{"QUIC crypto", &quic.TransportError{ErrorCode: 0x12a}},
+		{"QUIC protocol", &quic.TransportError{ErrorCode: quic.ProtocolViolation}},
+		{"QUIC application rejection", &quic.ApplicationError{Remote: true, ErrorCode: 0x101}},
+		{"unknown QUIC application code", &quic.ApplicationError{Remote: true, ErrorCode: 0x102}},
+		{"authentication", ErrAuthentication},
+		{"certificate pin", ErrCertificatePin},
+	}
+	for _, deny := range denied {
+		t.Run(deny.name, func(t *testing.T) {
+			require.False(t, FallbackAllowed(coreErrs.ClosedError{Err: deny.err}))
+			for _, allow := range allowed {
+				t.Run(allow.name, func(t *testing.T) {
+					require.False(t, FallbackAllowed(errors.Join(allow.err, deny.err)), "allowed cause first")
+					require.False(t, FallbackAllowed(errors.Join(deny.err, allow.err)), "denied cause first")
+					nested := errors.Join(allow.err, fmt.Errorf("nested: %w", errors.Join(io.EOF, deny.err)))
+					require.False(t, FallbackAllowed(coreErrs.ClosedError{Err: nested}), "nested denial")
+				})
+			}
+		})
+	}
+}

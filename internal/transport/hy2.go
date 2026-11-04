@@ -18,6 +18,8 @@ type hy2Session struct {
 	closed       chan struct{}
 	closeOnce    sync.Once
 	closeErr     error
+	pendingMu    sync.Mutex
+	pendingUDP   map[*ownedHY2Datagram]struct{}
 }
 
 // WrapHY2 adapts existing clients and test factories without implementing TCP
@@ -118,12 +120,14 @@ func (s *hy2Session) OpenUDP(ctx context.Context, token string) (DatagramConn, e
 		if err != nil || udp == nil {
 			return udp, err
 		}
-		if err := s.operationErr(ctx); err != nil {
-			return udp, err
+		owned := &ownedHY2Datagram{DatagramConn: udp}
+		if err := s.trackUDP(ctx, owned); err != nil {
+			return owned, err
 		}
+		defer s.untrackUDP(owned)
 		// Preserve the existing one-byte reverse-mapping registration datagram.
 		// Subsequent Send/Receive addresses are public peer addresses, unchanged.
-		return udp, udp.Send([]byte{0}, "_hy2tun_udp_"+token+":0")
+		return owned, owned.Send([]byte{0}, "_hy2tun_udp_"+token+":0")
 	})
 	if err != nil {
 		return nil, err
@@ -141,14 +145,56 @@ func (s *hy2Session) Probe(ctx context.Context) (ProbeInfo, error) {
 func (s *hy2Session) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.closed)
+		s.pendingMu.Lock()
+		pending := s.pendingUDP
+		s.pendingUDP = nil
+		s.pendingMu.Unlock()
+		// Own and close children before root shutdown: the public HY2 adapter
+		// contract cannot rely on the root to release a blocked registration.
+		for conn := range pending {
+			s.closeErr = errors.Join(s.closeErr, conn.Close())
+		}
 		if s.client != nil {
-			s.closeErr = s.client.Close()
+			s.closeErr = errors.Join(s.closeErr, s.client.Close())
 		}
 		if s.packets != nil {
 			s.closeErr = errors.Join(s.closeErr, s.packets.Close())
 		}
 	})
 	return s.closeErr
+}
+
+func (s *hy2Session) trackUDP(ctx context.Context, conn *ownedHY2Datagram) error {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	if err := s.operationErr(ctx); err != nil {
+		return err
+	}
+	if s.pendingUDP == nil {
+		s.pendingUDP = make(map[*ownedHY2Datagram]struct{})
+	}
+	s.pendingUDP[conn] = struct{}{}
+	return nil
+}
+
+func (s *hy2Session) untrackUDP(conn *ownedHY2Datagram) {
+	s.pendingMu.Lock()
+	delete(s.pendingUDP, conn)
+	s.pendingMu.Unlock()
+}
+
+// Shutdown and the operation-result cleanup can race to close the same child.
+// Close once makes the ownership handoff safe without assuming fake/upstream
+// datagram Close supports concurrent or repeated calls.
+type ownedHY2Datagram struct {
+	DatagramConn
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (d *ownedHY2Datagram) Close() error {
+	d.closeOnce.Do(func() { d.closeErr = d.DatagramConn.Close() })
+	return d.closeErr
 }
 
 func (s *hy2Session) operationErr(ctx context.Context) error {

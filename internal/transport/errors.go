@@ -70,12 +70,17 @@ func FallbackAllowed(err error) bool {
 		hasError[x509.UnknownAuthorityError](err) || hasError[*x509.UnknownAuthorityError](err) ||
 		hasError[x509.HostnameError](err) || hasError[*x509.HostnameError](err) ||
 		hasError[*tls.CertificateVerificationError](err) ||
-		hasError[tls.RecordHeaderError](err) || hasError[*tls.RecordHeaderError](err) || hasError[tls.AlertError](err) ||
-		hasError[*quic.TransportError](err) || hasError[*quic.ApplicationError](err) || hasError[*quic.VersionNegotiationError](err) {
+		hasError[tls.RecordHeaderError](err) || hasError[*tls.RecordHeaderError](err) ||
+		hasError[tls.AlertError](err) || hasError[*tls.AlertError](err) ||
+		hasError[*quic.StreamError](err) || hasError[*quic.VersionNegotiationError](err) {
+		return false
+	}
+	sessionAllowed, sessionDenied := sessionFailureDisposition(err)
+	if sessionDenied {
 		return false
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) ||
-		hasError[coreErrs.ClosedError](err) || hasError[*coreErrs.ClosedError](err) || hasError[*quic.StatelessResetError](err) {
+		sessionAllowed || hasError[*quic.StatelessResetError](err) {
 		return true
 	}
 	var networkError net.Error
@@ -88,6 +93,57 @@ func FallbackAllowed(err error) bool {
 		}
 	}
 	return false
+}
+
+// Inspect every wrapped/joined branch, not just errors.As's first match: an
+// allowed QUIC error must never hide a protocol/crypto sibling of the same type.
+func sessionFailureDisposition(err error) (allowed, denied bool) {
+	if err == nil {
+		return false, false
+	}
+	switch e := err.(type) {
+	case *quic.TransportError:
+		if e == nil {
+			return false, true
+		}
+		switch e.ErrorCode {
+		case quic.ConnectionRefused, quic.NoViablePathError:
+			allowed = true
+		case quic.NoError:
+			allowed = e.Remote // Local closure is not evidence of peer loss.
+		}
+		denied = !allowed
+	case *quic.ApplicationError:
+		if e == nil {
+			return false, true
+		}
+		// HY2 uses HTTP/3 H3_NO_ERROR (0x100) for clean peer shutdown.
+		allowed = e.Remote && e.ErrorCode == 0x100
+		denied = !allowed
+	case coreErrs.ClosedError:
+		// With a cause, classify that cause instead: HY2 also uses this
+		// wrapper for stream failures, not just whole-session loss.
+		allowed = e.Err == nil
+	case *coreErrs.ClosedError:
+		if e == nil {
+			return false, true
+		}
+		allowed = e.Err == nil
+	}
+	visit := func(cause error) {
+		childAllowed, childDenied := sessionFailureDisposition(cause)
+		allowed = allowed || childAllowed
+		denied = denied || childDenied
+	}
+	switch e := err.(type) {
+	case interface{ Unwrap() []error }:
+		for _, cause := range e.Unwrap() {
+			visit(cause)
+		}
+	case interface{ Unwrap() error }:
+		visit(e.Unwrap())
+	}
+	return allowed, denied
 }
 
 func hasError[T error](err error) bool {

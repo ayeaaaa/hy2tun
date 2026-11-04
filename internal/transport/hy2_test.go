@@ -60,9 +60,9 @@ func TestHY2AdapterVirtualAddresses(t *testing.T) {
 		defer s.Close()
 		conn, err := s.OpenUDP(context.Background(), "0123456789abcdef0123456789abcdef")
 		require.NoError(t, err)
-		require.Equal(t, datagram{[]byte{0}, "_hy2tun_udp_0123456789abcdef0123456789abcdef:0"}, <-udp.sent)
+		require.Equal(t, datagram{[]byte{0}, "_hy2tun_udp_0123456789abcdef0123456789abcdef:0"}, waitDatagram(t, udp.sent))
 		require.NoError(t, conn.Send([]byte("reply"), "198.51.100.1:1234"))
-		require.Equal(t, datagram{[]byte("reply"), "198.51.100.1:1234"}, <-udp.sent)
+		require.Equal(t, datagram{[]byte("reply"), "198.51.100.1:1234"}, waitDatagram(t, udp.sent))
 		udp.incoming <- datagram{[]byte("request"), "198.51.100.1:1234"}
 		data, addr, err := conn.Receive()
 		require.NoError(t, err)
@@ -167,6 +167,49 @@ func TestHY2AdapterCancellationClosesLateUDP(t *testing.T) {
 	waitSignal(t, fake.closed)
 	close(release)
 	waitSignal(t, udp.closed)
+}
+
+func TestHY2AdapterShutdownClosesBlockedUDPRegistration(t *testing.T) {
+	// UDP() has already returned this child. Root Close deliberately does not
+	// propagate to it, so the adapter must close it while registration blocks.
+	// A real pipe write proves the operation is released by child closure.
+	for _, shutdown := range []string{"cancel", "close"} {
+		t.Run(shutdown, func(t *testing.T) {
+			local, remote := net.Pipe()
+			defer remote.Close()
+			udp := &blockedRegistrationDatagram{conn: local, started: make(chan struct{}), finished: make(chan struct{})}
+			defer udp.Close() // Release a broken implementation even on RED.
+			fake := newFakeHY2()
+			fake.udp = func() (hyclient.HyUDPConn, error) { return udp, nil }
+			s := WrapHY2(fake, "secret")
+			defer s.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				conn, err := s.OpenUDP(ctx, "0123456789abcdef0123456789abcdef")
+				if conn != nil {
+					_ = conn.Close()
+					done <- errors.New("delivered an unregistered UDP connection")
+					return
+				}
+				done <- err
+			}()
+			waitSignal(t, udp.started)
+			if shutdown == "cancel" {
+				cancel()
+				require.ErrorIs(t, waitError(t, done), context.Canceled)
+			} else {
+				require.NoError(t, s.Close())
+				require.ErrorIs(t, waitError(t, done), net.ErrClosed)
+			}
+			waitSignal(t, fake.closed)
+			// Wait before reading the peer: a peer read would otherwise release
+			// the blocked write and conceal failure to close the UDP child.
+			waitSignal(t, udp.finished)
+			requirePeerClosed(t, remote)
+		})
+	}
 }
 
 func TestHY2AdapterClosesConnectionsReturnedWithErrors(t *testing.T) {
@@ -354,6 +397,25 @@ func (f *fakeDatagram) Close() error {
 	return nil
 }
 
+type blockedRegistrationDatagram struct {
+	conn              net.Conn
+	started, finished chan struct{}
+}
+
+func (d *blockedRegistrationDatagram) Receive() ([]byte, string, error) {
+	return nil, "", errors.New("unexpected Receive during UDP registration")
+}
+func (d *blockedRegistrationDatagram) Send(data []byte, addr string) error {
+	if len(data) != 1 || data[0] != 0 || addr != "_hy2tun_udp_0123456789abcdef0123456789abcdef:0" {
+		return errors.New("incorrect reverse UDP registration")
+	}
+	close(d.started)
+	defer close(d.finished)
+	_, err := d.conn.Write(data)
+	return err
+}
+func (d *blockedRegistrationDatagram) Close() error { return d.conn.Close() }
+
 type packetFactory struct{ conn net.PacketConn }
 
 func (f packetFactory) New(net.Addr) (net.PacketConn, error) { return f.conn, nil }
@@ -374,6 +436,16 @@ func waitError(t *testing.T, ch <-chan error) error {
 	case <-time.After(2 * time.Second):
 		t.Fatal("operation did not finish")
 		return nil
+	}
+}
+func waitDatagram(t *testing.T, ch <-chan datagram) datagram {
+	t.Helper()
+	select {
+	case d := <-ch:
+		return d
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected datagram was not sent")
+		return datagram{}
 	}
 }
 func requirePeerClosed(t *testing.T, conn net.Conn) {
