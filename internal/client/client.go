@@ -1,4 +1,4 @@
-// Package client implements the hy2tun client: an official Hysteria 2 client
+// Package client implements the hy2tun client over HY2 or TLS/TCP sessions,
 // with a long-lived control stream used to register reverse port mappings.
 package client
 
@@ -6,14 +6,11 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
-	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,6 +23,7 @@ import (
 	"hy2tun/internal/config"
 	"hy2tun/internal/control"
 	"hy2tun/internal/proxy"
+	"hy2tun/internal/transport"
 	"hy2tun/internal/version"
 	"hy2tun/internal/view"
 	"hy2tun/internal/webui/clientui"
@@ -55,16 +53,22 @@ type Client struct {
 	cfg *config.ClientConfig
 	log *slog.Logger
 
+	// Startup validation/diagnostics only; dialSession rebuilds from the latest
+	// snapshot rather than reusing these prepared HY2 values.
 	serverAddr  net.Addr
 	tlsConfig   hyclient.TLSConfig
 	connFactory hyclient.ConnFactory
 	newHY2      func(*hyclient.Config) (hyclient.Client, *hyclient.HandshakeInfo, error)
+	newSession  func(context.Context, transport.Kind, transport.DialOptions) (transport.Session, error)
+	dialLocal   func(context.Context, string, string) (net.Conn, error)
 	startedAt   time.Time
 
-	mu          sync.Mutex
-	hy          hyclient.Client
-	controlConn net.Conn
-	connected   bool
+	mu            sync.Mutex
+	session       transport.Session
+	sessionCtx    context.Context
+	sessionCancel context.CancelFunc
+	controlConn   net.Conn
+	connected     bool
 	// credentialsGeneration mirrors cfg.Credentials.Generation. The server
 	// fields are the last HelloAck values; 0/false mean the server predates
 	// credential rotation, so the generation is unknown rather than 1.
@@ -114,7 +118,7 @@ var (
 	_ clientui.API = (*Client)(nil)
 )
 
-// New validates cfg and prepares a standalone HY2 client. It does not connect;
+// New validates cfg and prepares a standalone tunnel client. It does not connect;
 // call Start for that.
 func New(cfg *config.ClientConfig, log *slog.Logger) (*Client, error) {
 	return newClient(cfg, log, false)
@@ -152,17 +156,21 @@ func newClient(cfg *config.ClientConfig, log *slog.Logger, skipProxyBind bool) (
 		cfg.Client.ID = id
 	}
 
-	serverAddr, err := resolveServerAddr(cfg)
-	if err != nil {
-		return nil, err
-	}
 	tlsConfig, err := buildTLSConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
-	connFactory, err := buildConnFactory(cfg, serverAddr)
-	if err != nil {
-		return nil, err
+	var serverAddr net.Addr
+	var connFactory hyclient.ConnFactory
+	if cfg.Mode.AllowsHY2() {
+		serverAddr, err = resolveServerAddr(cfg)
+		if err != nil {
+			return nil, err
+		}
+		connFactory, err = buildConnFactory(cfg, serverAddr)
+		if err != nil {
+			return nil, err
+		}
 	}
 	credentialsGeneration := cfg.Credentials.Generation
 	if credentialsGeneration < 1 {
@@ -254,7 +262,7 @@ func (c *Client) bindProxiesLocked(cfg config.ProxyConfig) ([]*proxy.Server, err
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		return c.TCP(addr)
+		return c.TCPContext(ctx, addr)
 	}
 	proxies := make([]*proxy.Server, 0, 2)
 	closeOnError := func() {
@@ -424,7 +432,7 @@ func (c *Client) Start(ctx context.Context) error {
 	}
 }
 
-// Close stops the control stream and the underlying HY2 client. It is
+// Close stops the control stream and its underlying transport session. It is
 // idempotent.
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
@@ -437,9 +445,12 @@ func (c *Client) Close() error {
 
 		c.mu.Lock()
 		conn := c.controlConn
-		hy := c.hy
+		session := c.session
+		if c.sessionCancel != nil {
+			c.sessionCancel()
+		}
 		c.controlConn = nil
-		c.hy = nil
+		c.session = nil
 		c.connected = false
 		dataConns := make([]net.Conn, 0, len(c.dataConns))
 		for dataConn := range c.dataConns {
@@ -448,20 +459,17 @@ func (c *Client) Close() error {
 		c.dataConns = make(map[net.Conn]net.Conn)
 		c.mu.Unlock()
 
+		// Close the root before children/waits: managed stream shutdown and UDP
+		// sends may be waiting on root I/O or shared rate tokens.
+		closeLiveConnection(conn, session)
 		for _, dataConn := range dataConns {
 			_ = dataConn.Close()
 		}
-		if conn != nil {
-			_ = conn.Close()
-		}
-		if hy != nil {
-			_ = hy.Close()
-		}
-		// The HY2 client is closed before waiting for proxy handlers, so a
-		// stream request blocked in hy.TCP is released. Proxy listeners stop
+		// The session is closed before waiting for proxy handlers, so pending
+		// stream requests are released. Proxy listeners stop
 		// accepting and their active connections are closed here.
 		c.closeProxies()
-		// The HY2 client is closed first so any blocked UDP send is released
+		// The session is closed first so any blocked UDP send is released
 		// before the mapping waits for its goroutines.
 		c.stopUDPMappings()
 	})
@@ -676,54 +684,63 @@ func (c *Client) WebAddr() string {
 	return c.cfg.Web.Listen
 }
 
-// TCP opens a TCP stream to addr through the live HY2 connection. It is the
+// TCP opens a TCP stream to addr through the current transport. It is the
 // dial path used by the local proxy listeners.
 func (c *Client) TCP(addr string) (net.Conn, error) {
-	if addr == "" {
-		return nil, fmt.Errorf("address is required")
-	}
-	hy := c.hyClient()
-	if hy == nil {
-		return nil, fmt.Errorf("client is not connected")
-	}
-	conn, err := hy.TCP(addr)
-	if err != nil {
-		return nil, err
-	}
-	if conn == nil {
-		return nil, fmt.Errorf("HY2 returned a nil TCP stream")
-	}
-	return conn, nil
+	return c.TCPContext(context.Background(), addr)
 }
 
-// TCPContext opens a TCP stream while honoring ctx. Hysteria's stream API has
-// no context, so the underlying call runs in a goroutine; a canceled request
-// returns immediately and closes any connection that arrives later.
+// TCPContext opens a forward proxy stream through its captured session. Both
+// caller cancellation and owner teardown cancel pending opens; late streams
+// cannot attach to a replacement session.
 func (c *Client) TCPContext(ctx context.Context, addr string) (net.Conn, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	type result struct {
-		conn net.Conn
-		err  error
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	resultCh := make(chan result, 1)
-	go func() {
-		conn, err := c.TCP(addr)
-		resultCh <- result{conn: conn, err: err}
-	}()
-	select {
-	case <-ctx.Done():
-		go func() {
-			res := <-resultCh
-			if res.conn != nil {
-				_ = res.conn.Close()
-			}
-		}()
-		return nil, ctx.Err()
-	case res := <-resultCh:
-		return res.conn, res.err
+	if addr == "" {
+		return nil, fmt.Errorf("address is required")
 	}
+	session, owner, ownerCtx := c.sessionFor(nil)
+	if session == nil {
+		return nil, fmt.Errorf("client is not connected")
+	}
+	openCtx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(ownerCtx, cancel)
+	defer stop()
+	defer cancel()
+	conn, err := session.OpenTCP(openCtx, transport.TCPRequest{Target: addr})
+	if err != nil {
+		if conn != nil {
+			_ = conn.Close()
+		}
+		return nil, err
+	}
+	if conn == nil {
+		return nil, transport.ErrProtocol
+	}
+	tracked := &proxyConn{Conn: conn, client: c}
+	if ctx.Err() != nil || !c.trackData(owner, tracked) {
+		_ = tracked.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, net.ErrClosed
+	}
+	return tracked, nil
+}
+
+// Keep the transport connection (including its deadlines/rate ownership) intact.
+type proxyConn struct {
+	net.Conn
+	client *Client
+}
+
+func (p *proxyConn) Close() error {
+	p.client.untrackData(p)
+	return p.Conn.Close()
 }
 
 // trafficFor returns the shared counters for a mapping, creating them on first
@@ -765,31 +782,44 @@ func (c *Client) isClosed() bool {
 	}
 }
 
-// setCurrent installs the live HY2 client and control stream unless the client
-// has already been closed.
-func (c *Client) setCurrent(hy hyclient.Client, conn net.Conn) bool {
+// setCurrent installs the live session and closes a replaced owner's resources.
+// Cleanup is scoped to the captured old pair, never the newly installed pair.
+func (c *Client) setCurrent(session transport.Session, conn net.Conn) bool {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.isClosed() {
+		c.mu.Unlock()
 		return false
 	}
-	c.hy = hy
+	oldSession, oldConn := c.session, c.controlConn
+	if c.sessionCancel != nil {
+		c.sessionCancel()
+	}
+	c.sessionCtx, c.sessionCancel = context.WithCancel(context.Background())
+	c.session = session
 	c.controlConn = conn
+	c.connected = false
+	c.mu.Unlock()
+	if oldSession != nil && oldSession != session {
+		closeLiveConnection(oldConn, oldSession)
+		c.closeDataFor(oldConn)
+		c.stopUDPMappingsFor(oldSession)
+	}
 	return true
 }
 
 // clearCurrent removes the live connection only when it is still the one
 // passed in, so a reconnect cannot clear a newer connection.
-func (c *Client) clearCurrent(hy hyclient.Client, conn net.Conn) {
+func (c *Client) clearCurrent(session transport.Session, conn net.Conn) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.hy == hy {
-		c.hy = nil
-	}
-	if c.controlConn == conn {
+	if c.session == session && c.controlConn == conn {
+		if c.sessionCancel != nil {
+			c.sessionCancel()
+		}
+		c.session = nil
 		c.controlConn = nil
+		c.connected = false
 	}
-	c.connected = false
 }
 
 // setMappingResults stores per-mapping status from a HelloAck or UpdateAck.
@@ -876,43 +906,14 @@ func newClientID() (string, error) {
 }
 
 func buildTLSConfig(cfg *config.ClientConfig) (hyclient.TLSConfig, error) {
-	tlsConfig := hyclient.TLSConfig{
-		ServerName:         cfg.TLS.SNI,
-		InsecureSkipVerify: cfg.TLS.Insecure,
+	tls, err := transport.ClientTLS(cfg.TLS, cfg.Server)
+	if err != nil {
+		return hyclient.TLSConfig{}, err
 	}
-	if tlsConfig.ServerName == "" {
-		if host, _, err := net.SplitHostPort(strings.TrimSpace(cfg.Server)); err == nil {
-			tlsConfig.ServerName = strings.TrimSpace(host)
-		}
-	}
-	if cfg.TLS.CA != "" {
-		pemData, err := os.ReadFile(cfg.TLS.CA)
-		if err != nil {
-			return hyclient.TLSConfig{}, fmt.Errorf("read TLS CA %s: %w", cfg.TLS.CA, err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pemData) {
-			return hyclient.TLSConfig{}, fmt.Errorf("parse TLS CA %s: no certificates found", cfg.TLS.CA)
-		}
-		tlsConfig.RootCAs = pool
-	}
-	if cfg.TLS.PinSHA256 != "" {
-		pin, err := parsePin(cfg.TLS.PinSHA256)
-		if err != nil {
-			return hyclient.TLSConfig{}, err
-		}
-		tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			if len(rawCerts) == 0 {
-				return fmt.Errorf("server presented no certificate")
-			}
-			sum := sha256.Sum256(rawCerts[0])
-			if subtle.ConstantTimeCompare(sum[:], pin) != 1 {
-				return fmt.Errorf("server certificate pin mismatch")
-			}
-			return nil
-		}
-	}
-	return tlsConfig, nil
+	return hyclient.TLSConfig{
+		ServerName: tls.ServerName, InsecureSkipVerify: tls.InsecureSkipVerify,
+		RootCAs: tls.RootCAs, VerifyPeerCertificate: tls.VerifyPeerCertificate,
+	}, nil
 }
 
 func parsePin(value string) ([]byte, error) {
@@ -927,10 +928,46 @@ func parsePin(value string) ([]byte, error) {
 }
 
 func resolveServerAddr(cfg *config.ClientConfig) (net.Addr, error) {
+	return resolveServerAddrContext(context.Background(), cfg)
+}
+
+func resolveServerAddrContext(ctx context.Context, cfg *config.ClientConfig) (net.Addr, error) {
 	normalized, hopping, err := cfg.NormalizedServer()
 	if err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	host, ports, err := net.SplitHostPort(normalized)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, strings.TrimSpace(host))
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resolve server address %s: %w", normalized, err)
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("resolve server address %s: no addresses", normalized)
+	}
+	ip := ips[0]
+	// Match net.ResolveUDPAddr's preference for an IPv4 address when available.
+	for _, candidate := range ips {
+		if candidate.IP.To4() != nil {
+			ip = candidate
+			break
+		}
+	}
+	host = ip.IP.String()
+	if ip.Zone != "" {
+		host += "%" + ip.Zone
+	}
+	// The remaining UDP/hop parsers see a numeric host and cannot start their
+	// own uncancellable DNS lookup outside the shared setup budget.
+	normalized = net.JoinHostPort(host, ports)
 	if hopping {
 		hopServer, err := normalizeHopServer(normalized)
 		if err != nil {

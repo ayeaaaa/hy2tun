@@ -11,9 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	hyclient "github.com/apernet/hysteria/core/v2/client"
-
 	"hy2tun/internal/config"
+	"hy2tun/internal/transport"
 )
 
 const (
@@ -57,16 +56,18 @@ func udpVirtualAddress(token string) string {
 	return udpVirtualPrefix + token + ":0"
 }
 
-// udpMapping owns one HY2 UDP session and one local UDP socket per public peer
+// udpMapping owns one transport datagram connection and one local UDP socket per public peer
 // for a single reverse UDP mapping.
 type udpMapping struct {
 	id          string
 	virtualAddr string
-	conn        hyclient.HyUDPConn
-	hy          hyclient.Client
+	conn        transport.DatagramConn
+	session     transport.Session
+	owner       net.Conn
 	client      *Client
 	log         *slog.Logger
 	traffic     *mappingTraffic
+	drops       atomic.Uint64
 
 	cancel context.CancelFunc
 
@@ -110,7 +111,7 @@ func (p *udpPeer) close() {
 	p.closeOnce.Do(func() { _ = p.conn.Close() })
 }
 
-// startUDP opens one HY2 UDP session for m, sends the virtual-address probe,
+// startUDP opens one transport datagram connection for m (including registration),
 // and starts the receive, keepalive, and peer-cleanup loops. The caller owns the
 // returned mapping and must close it.
 func (c *Client) startUDP(m config.Mapping, token string) (*udpMapping, error) {
@@ -123,20 +124,29 @@ func (c *Client) startUDP(m config.Mapping, token string) (*udpMapping, error) {
 	if !validDataToken(token) {
 		return nil, fmt.Errorf("mapping %q has a malformed UDP token", m.ID)
 	}
-	hy := c.hyClient()
-	if hy == nil {
-		return nil, fmt.Errorf("HY2 client is not connected")
+	session, owner, ownerCtx := c.sessionFor(nil)
+	if session == nil {
+		return nil, fmt.Errorf("transport is not connected")
 	}
 	target, err := net.ResolveUDPAddr("udp", m.LocalAddr)
 	if err != nil {
 		return nil, fmt.Errorf("resolve UDP target %q: %w", m.LocalAddr, err)
 	}
-	conn, err := hy.UDP()
+	openCtx, cancelOpen := context.WithTimeout(ownerCtx, controlHandshakeTimeout)
+	defer cancelOpen()
+	conn, err := session.OpenUDP(openCtx, token)
 	if err != nil {
-		return nil, fmt.Errorf("open HY2 UDP session: %w", err)
+		if conn != nil {
+			_ = conn.Close()
+		}
+		return nil, fmt.Errorf("open transport UDP session: %w", err)
 	}
 	if conn == nil {
-		return nil, fmt.Errorf("open HY2 UDP session: nil connection")
+		return nil, transport.ErrProtocol
+	}
+	if openCtx.Err() != nil || c.currentSession() != session || c.isClosed() {
+		_ = conn.Close()
+		return nil, net.ErrClosed
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -144,7 +154,8 @@ func (c *Client) startUDP(m config.Mapping, token string) (*udpMapping, error) {
 		id:                m.ID,
 		virtualAddr:       udpVirtualAddress(token),
 		conn:              conn,
-		hy:                hy,
+		session:           session,
+		owner:             owner,
 		client:            c,
 		log:               c.log,
 		traffic:           c.trafficFor(m.ID),
@@ -161,13 +172,7 @@ func (c *Client) startUDP(m config.Mapping, token string) (*udpMapping, error) {
 		u.log = slog.Default()
 	}
 
-	// The probe creates the server-side UDP session and binds it to this
-	// mapping's public socket. It carries no payload.
-	if err := u.send([]byte{0}, u.virtualAddr); err != nil {
-		cancel()
-		_ = conn.Close()
-		return nil, fmt.Errorf("send reverse UDP probe: %w", err)
-	}
+	// OpenUDP owns HY2's registration datagram or TCP's stream token/ack.
 
 	u.wg.Add(3)
 	go func() {
@@ -224,6 +229,7 @@ func (c *Client) reconcileUDPMappings() {
 		mapping, ok := desired[id]
 		token := tokens[id]
 		if ok &&
+			existing.session == c.currentSession() &&
 			token != "" &&
 			existing.virtualAddr == udpVirtualAddress(token) &&
 			existing.targetAddr == mapping.LocalAddr {
@@ -264,7 +270,7 @@ func (c *Client) reconcileUDPMappings() {
 		}
 
 		c.mu.Lock()
-		if c.isClosed() || c.hy != u.hy {
+		if c.isClosed() || c.session != u.session || c.controlConn != u.owner {
 			c.mu.Unlock()
 			u.close()
 			continue
@@ -281,9 +287,19 @@ func (c *Client) reconcileUDPMappings() {
 // stopUDPMappings closes every live reverse UDP session. It is idempotent and
 // safe to call concurrently with startUDPMappings.
 func (c *Client) stopUDPMappings() {
+	c.stopUDPMappingsFor(nil)
+}
+
+// An old runSession must not stop UDP mappings owned by a replacement root.
+func (c *Client) stopUDPMappingsFor(session transport.Session) {
 	c.mu.Lock()
-	mappings := c.udpMappings
-	c.udpMappings = make(map[string]*udpMapping)
+	mappings := make(map[string]*udpMapping)
+	for id, u := range c.udpMappings {
+		if session == nil || u.session == session {
+			mappings[id] = u
+			delete(c.udpMappings, id)
+		}
+	}
 	c.mu.Unlock()
 
 	for _, u := range mappings {
@@ -317,7 +333,7 @@ func (u *udpMapping) receiveLoop(ctx context.Context) {
 				)
 			}
 			if u.client != nil {
-				u.client.forceControlResync()
+				u.client.forceControlResyncFor(u.session, u.owner)
 			}
 			return
 		}
@@ -434,6 +450,9 @@ func (u *udpMapping) replyLoop(peer *udpPeer) {
 			continue
 		}
 		if err := u.send(buf[:n], peer.addr); err != nil {
+			if errors.Is(err, transport.ErrQueueFull) {
+				continue
+			}
 			if !u.isClosed() {
 				u.logger().Debug("send reverse UDP reply",
 					"mapping", u.id,
@@ -551,11 +570,13 @@ func (u *udpMapping) removePeer(peer *udpPeer) {
 	peer.close()
 }
 
-// send serializes every HyUDPConn.Send call and drops datagrams that do not
-// fit in one HY2 UDPMessage (including its header and address) instead of
-// handing them to the core.
+// send preserves HY2's serialized/bounded message behavior and TCP's 4096-byte
+// payload budget. Queue overflow counts a drop, never a whole-session failure.
 func (u *udpMapping) send(data []byte, addr string) error {
-	limit := udpPayloadLimit(addr)
+	limit := udpMessageBufferSize
+	if u.session == nil || u.session.Kind() == transport.HY2 {
+		limit = udpPayloadLimit(addr)
+	}
 	if len(data) > limit {
 		u.logger().Warn("dropping reverse UDP datagram that exceeds the HY2 message buffer",
 			"mapping", u.id,
@@ -570,11 +591,15 @@ func (u *udpMapping) send(data []byte, addr string) error {
 	if u.conn == nil || u.isClosed() {
 		return net.ErrClosed
 	}
-	return u.conn.Send(data, addr)
+	err := u.conn.Send(data, addr)
+	if errors.Is(err, transport.ErrQueueFull) {
+		u.drops.Add(1)
+	}
+	return err
 }
 
-// close stops the loops, closes every local peer socket, and closes the HY2 UDP
-// session. It is idempotent.
+// close stops the loops, closes every local peer socket and its datagram
+// connection. It is idempotent.
 func (u *udpMapping) close() {
 	u.closeOnce.Do(func() {
 		if u.cancel != nil {

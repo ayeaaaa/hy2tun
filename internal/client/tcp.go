@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"encoding/hex"
 	"io"
 	"net"
@@ -8,10 +9,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	hyclient "github.com/apernet/hysteria/core/v2/client"
-
 	"hy2tun/internal/config"
 	"hy2tun/internal/control"
+	"hy2tun/internal/transport"
 )
 
 const (
@@ -44,12 +44,12 @@ func validDataToken(token string) bool {
 // handleOpen dials the local target for an incoming public connection and
 // connects it to the matching reverse data stream. It runs outside the control
 // read loop so a slow local dial cannot stall other messages.
-func (c *Client) handleOpen(msg *control.Open) {
+func (c *Client) handleOpen(owner net.Conn, msg *control.Open) {
 	if msg == nil {
 		return
 	}
-	owner := c.controlStream()
-	if owner == nil {
+	session, _, ownerCtx := c.sessionFor(owner)
+	if owner == nil || session == nil {
 		return
 	}
 	if !validDataToken(msg.Token) {
@@ -63,20 +63,31 @@ func (c *Client) handleOpen(msg *control.Open) {
 		return
 	}
 
-	local, err := net.DialTimeout("tcp", mapping.LocalAddr, dataDialTimeout)
+	ctx, cancel := context.WithTimeout(ownerCtx, dataDialTimeout)
+	defer cancel()
+	dial := c.dialLocal
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
+	}
+	local, err := dial(ctx, "tcp", mapping.LocalAddr)
 	if err != nil {
+		if local != nil {
+			_ = local.Close()
+		}
 		c.sendOpenResult(owner, msg.Token, false, "dial_failed")
 		return
 	}
-
-	hy := c.hyClient()
-	if hy == nil {
-		_ = local.Close()
-		c.sendOpenResult(owner, msg.Token, false, "stream_failed")
+	if local == nil {
+		c.sendOpenResult(owner, msg.Token, false, "dial_failed")
 		return
 	}
-	remote, err := hy.TCP(dataStreamAddress(msg.Token))
+	if ctx.Err() != nil || !c.trackData(owner, local) {
+		_ = local.Close()
+		return
+	}
+	remote, err := session.OpenTCP(ctx, transport.TCPRequest{ReverseToken: msg.Token})
 	if err != nil || remote == nil {
+		c.untrackData(local)
 		if remote != nil {
 			_ = remote.Close()
 		}
@@ -86,6 +97,7 @@ func (c *Client) handleOpen(msg *control.Open) {
 	}
 
 	if !c.trackData(owner, local, remote) {
+		c.untrackData(local)
 		// The control stream this open belonged to is already gone.
 		_ = local.Close()
 		_ = remote.Close()
@@ -174,14 +186,13 @@ func (c *Client) forceControlResync() {
 	}
 }
 
-// hyClient returns the live HY2 client, if any.
-func (c *Client) hyClient() hyclient.Client {
+func (c *Client) forceControlResyncFor(session transport.Session, owner net.Conn) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.hy == nil {
-		return nil
+	current := c.session == session && c.controlConn == owner
+	c.mu.Unlock()
+	if current && owner != nil {
+		_ = owner.Close()
 	}
-	return c.hy
 }
 
 // tcpMapping returns an enabled TCP mapping by ID.
@@ -201,7 +212,7 @@ func (c *Client) tcpMapping(id string) (config.Mapping, bool) {
 func (c *Client) trackData(owner net.Conn, conns ...net.Conn) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if owner == nil || c.controlConn != owner {
+	if owner == nil || c.controlConn != owner || c.isClosed() {
 		return false
 	}
 	if c.dataConns == nil {

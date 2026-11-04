@@ -15,6 +15,7 @@ import (
 
 	"hy2tun/internal/config"
 	"hy2tun/internal/control"
+	"hy2tun/internal/transport"
 	"hy2tun/internal/view"
 )
 
@@ -555,7 +556,7 @@ func TestHandlePushStartsUDPWithServerToken(t *testing.T) {
 
 	fake := newFakePushHY2()
 	cl.mu.Lock()
-	cl.hy = fake
+	cl.session = transport.WrapHY2(fake, cl.cfg.Control.Token)
 	cl.mu.Unlock()
 
 	token := "0123456789abcdef0123456789abcdef"

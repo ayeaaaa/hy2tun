@@ -13,6 +13,7 @@ import (
 	xproxy "golang.org/x/net/proxy"
 
 	"hy2tun/internal/testutil"
+	"hy2tun/internal/transport"
 )
 
 // directHY2Client is a HY2 client test double whose TCP streams connect
@@ -81,7 +82,10 @@ func TestClientProxyDialsThroughHY2TCP(t *testing.T) {
 
 	fake := &directHY2Client{}
 	cl.mu.Lock()
-	cl.hy = fake
+	cl.session = transport.WrapHY2(fake, cl.cfg.Control.Token)
+	owner, ownerPeer := net.Pipe()
+	defer ownerPeer.Close()
+	cl.controlConn = owner
 	cl.mu.Unlock()
 	cl.startProxies()
 

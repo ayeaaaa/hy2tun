@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"hy2tun/internal/config"
+	"hy2tun/internal/transport"
 )
 
 func TestClientWriteConfigTreatsCommittedAsSuccess(t *testing.T) {
@@ -32,7 +33,7 @@ func TestTCPContextCancelsBlockedDial(t *testing.T) {
 	defer cl.Close()
 	fake := newStalledHY2Client()
 	cl.mu.Lock()
-	cl.hy = fake
+	cl.session = transport.WrapHY2(fake, cl.cfg.Control.Token)
 	cl.mu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())

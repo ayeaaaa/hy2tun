@@ -18,6 +18,7 @@ import (
 
 	"hy2tun/internal/config"
 	"hy2tun/internal/testutil"
+	"hy2tun/internal/transport"
 )
 
 type testUDPMessage struct {
@@ -110,7 +111,7 @@ func TestUDPMappingForwardsRepliesAndClosesPeers(t *testing.T) {
 
 	fake := newFakeUDPConn()
 	cl.mu.Lock()
-	cl.hy = &fakeUDPHY2Client{udp: fake}
+	cl.session = transport.WrapHY2(&fakeUDPHY2Client{udp: fake}, cl.cfg.Control.Token)
 	cl.mu.Unlock()
 
 	token := strings.Repeat("a", 32)
@@ -158,7 +159,7 @@ func TestUDPMappingReceiveErrorForcesControlResync(t *testing.T) {
 	controlServer, controlClient := net.Pipe()
 	defer controlClient.Close()
 	cl.mu.Lock()
-	cl.hy = &fakeUDPHY2Client{udp: fake}
+	cl.session = transport.WrapHY2(&fakeUDPHY2Client{udp: fake}, cl.cfg.Control.Token)
 	cl.controlConn = controlServer
 	cl.connected = true
 	cl.mu.Unlock()
@@ -201,7 +202,7 @@ func TestStartUDPMappingsUsesRegistrationTokens(t *testing.T) {
 	fake := newFakeUDPConn()
 	token := strings.Repeat("b", 32)
 	cl.mu.Lock()
-	cl.hy = &fakeUDPHY2Client{udp: fake}
+	cl.session = transport.WrapHY2(&fakeUDPHY2Client{udp: fake}, cl.cfg.Control.Token)
 	cl.udpTokens = map[string]string{"udp1": token}
 	cl.mu.Unlock()
 

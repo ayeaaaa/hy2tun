@@ -5,13 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"sync"
 	"time"
-
-	hyclient "github.com/apernet/hysteria/core/v2/client"
 
 	"hy2tun/internal/config"
 	"hy2tun/internal/control"
+	"hy2tun/internal/transport"
 	"hy2tun/internal/version"
 )
 
@@ -26,224 +24,16 @@ const credentialAckFlushGrace = 50 * time.Millisecond
 // setup. Start treats it as a normal shutdown.
 var errClientClosed = errors.New("client closed")
 
-// runOnce establishes one HY2 connection and control stream. It returns
-// whether the control handshake succeeded so Start can reset its backoff.
-func (c *Client) runOnce(ctx context.Context) (bool, error) {
-	cfg := c.snapshotConfig()
-	cfgGeneration := cfg.Credentials.Generation
-	if cfgGeneration < 1 {
-		cfgGeneration = 1
-	}
-	hyConfig := &hyclient.Config{
-		ServerAddr:  c.serverAddr,
-		Auth:        cfg.Auth,
-		TLSConfig:   c.tlsConfig,
-		ConnFactory: c.connFactory,
-		BandwidthConfig: hyclient.BandwidthConfig{
-			MaxTx: uint64(cfg.Bandwidth.Up),
-			MaxRx: uint64(cfg.Bandwidth.Down),
-		},
-	}
-
-	newHY2 := c.newHY2
-	if newHY2 == nil {
-		newHY2 = hyclient.NewClient
-	}
-	hy, err := c.connect(ctx, hyConfig, newHY2)
-	if err != nil {
-		return false, err
-	}
-	if ctx.Err() != nil {
-		_ = hy.Close()
-		return false, ctx.Err()
-	}
-	if c.isClosed() {
-		_ = hy.Close()
-		return false, nil
-	}
-
-	conn, err := c.openControlStream(ctx, hy)
-	if err != nil {
-		_ = hy.Close()
-		if ctx.Err() != nil {
-			return false, ctx.Err()
-		}
-		if c.isClosed() {
-			return false, nil
-		}
-		return false, fmt.Errorf("open control stream: %w", err)
-	}
-	if ctx.Err() != nil {
-		_ = conn.Close()
-		_ = hy.Close()
-		return false, ctx.Err()
-	}
-	if c.isClosed() {
-		_ = conn.Close()
-		_ = hy.Close()
-		return false, nil
-	}
-
-	var closeOnce sync.Once
-	closeBoth := func() {
-		closeOnce.Do(func() {
-			_ = conn.Close()
-			_ = hy.Close()
-		})
-	}
-
-	if !c.setCurrent(hy, conn) {
-		closeBoth()
-		return false, nil
-	}
-	defer func() {
-		c.clearCurrent(hy, conn)
-		c.closeDataFor(conn)
-		closeBoth()
-	}()
-
-	// The HY2 data plane was built with the snapshot's auth. If a credential
-	// rotation landed while the connection was being established,
-	// forceReconnect may have run before setCurrent and found nothing to
-	// close. Abandon this connection so the next attempt uses the new pair.
-	if current := c.currentCredentialGeneration(); current != cfgGeneration {
-		c.log.Debug("credentials rotated during connection setup",
-			"generation", cfgGeneration,
-			"current_generation", current,
-		)
-		return false, nil
-	}
-
-	stopWatch := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-		case <-c.closed:
-		case <-stopWatch:
-			return
-		}
-		closeBoth()
-	}()
-	defer close(stopWatch)
-
-	if err := c.handshake(conn); err != nil {
-		return false, err
-	}
-	c.markReady()
-	c.startUDPMappings()
-	defer c.stopUDPMappings()
-
-	serveErr := c.serveControl(conn)
-	// Close the HY2 connection before waiting for UDP goroutines: a datagram
-	// send may be blocked on a full QUIC send queue and only unblocks when the
-	// connection closes.
-	closeBoth()
-	return true, serveErr
-}
-
-// connect runs hyclient.NewClient in a goroutine so cancellation and Close can
-// stop it. The result channel is unbuffered and the goroutine closes any client
-// it cannot hand off, so a racing shutdown cannot leak a HY2 client.
-func (c *Client) connect(ctx context.Context, cfg *hyclient.Config, newHY2 func(*hyclient.Config) (hyclient.Client, *hyclient.HandshakeInfo, error)) (hyclient.Client, error) {
-	type connectResult struct {
-		client hyclient.Client
-		err    error
-	}
-	resultCh := make(chan connectResult)
-
-	go func() {
-		hy, _, err := newHY2(cfg)
-		if err == nil && (ctx.Err() != nil || c.isClosed()) {
-			_ = hy.Close()
-			if ctx.Err() != nil {
-				err = ctx.Err()
-			} else {
-				err = errClientClosed
-			}
-		}
-		if err != nil {
-			select {
-			case resultCh <- connectResult{err: err}:
-			case <-ctx.Done():
-			case <-c.closed:
-			}
-			return
-		}
-		select {
-		case resultCh <- connectResult{client: hy}:
-		case <-ctx.Done():
-			_ = hy.Close()
-		case <-c.closed:
-			_ = hy.Close()
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-c.closed:
-		return nil, errClientClosed
-	case result := <-resultCh:
-		if result.err != nil {
-			return nil, fmt.Errorf("connect HY2: %w", result.err)
-		}
-		return result.client, nil
-	}
-}
-
-// openControlStream opens the control stream in a goroutine. Closing the HY2
-// client on cancellation unblocks a stalled TCP stream request.
-func (c *Client) openControlStream(ctx context.Context, hy hyclient.Client) (net.Conn, error) {
-	type streamResult struct {
-		conn net.Conn
-		err  error
-	}
-	resultCh := make(chan streamResult)
-
-	go func() {
-		conn, err := hy.TCP(controlAddress)
-		if err == nil && conn == nil {
-			err = fmt.Errorf("control stream is nil")
-		}
-		if err == nil && (ctx.Err() != nil || c.isClosed()) {
-			_ = conn.Close()
-			conn = nil
-			if ctx.Err() != nil {
-				err = ctx.Err()
-			} else {
-				err = errClientClosed
-			}
-		}
-		if err != nil {
-			select {
-			case resultCh <- streamResult{err: err}:
-			case <-ctx.Done():
-			case <-c.closed:
-			}
-			return
-		}
-		select {
-		case resultCh <- streamResult{conn: conn}:
-		case <-ctx.Done():
-			_ = conn.Close()
-		case <-c.closed:
-			_ = conn.Close()
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-c.closed:
-		return nil, errClientClosed
-	case result := <-resultCh:
-		return result.conn, result.err
-	}
-}
-
 // handshake sends Hello and validates the server's HelloAck.
 func (c *Client) handshake(conn net.Conn) error {
-	_ = conn.SetDeadline(time.Now().Add(controlHandshakeTimeout))
+	ctx, cancel := context.WithTimeout(context.Background(), controlHandshakeTimeout)
+	defer cancel()
+	return c.handshakeContext(ctx, conn)
+}
+
+func (c *Client) handshakeContext(ctx context.Context, conn net.Conn) error {
+	deadline, _ := ctx.Deadline()
+	_ = conn.SetDeadline(deadline)
 	defer func() { _ = conn.SetDeadline(time.Time{}) }()
 
 	cfg := c.snapshotConfig()
@@ -263,26 +53,38 @@ func (c *Client) handshake(conn net.Conn) error {
 		Capabilities:         []string{control.CapabilityCredentialUpdate},
 		Mappings:             cfg.Mappings,
 	}
-	if err := c.writeControl(conn, hello); err != nil {
-		return fmt.Errorf("send control hello: %w", err)
+	c.writeMu.Lock()
+	err := control.WriteMessage(conn, hello)
+	c.writeMu.Unlock()
+	if err != nil {
+		return fmt.Errorf("send control hello: %w", classifyControlError(err))
 	}
 
 	msg, err := control.ReadMessage(conn)
 	if err != nil {
-		return fmt.Errorf("read control hello ack: %w", err)
+		return fmt.Errorf("read control hello ack: %w", classifyControlError(err))
 	}
 	ack, ok := msg.(*control.HelloAck)
 	if !ok {
-		return fmt.Errorf("unexpected control response %T", msg)
+		return fmt.Errorf("%w: unexpected control response %T", transport.ErrProtocol, msg)
 	}
 	if !ack.OK {
-		return fmt.Errorf("control handshake rejected: %s", ack.Error)
+		if ack.Error == string(control.CodeUnauthorized) {
+			return transport.ErrAuthentication
+		}
+		return transport.ErrProtocol
 	}
 
 	// Mark the handshake complete before applying the ack. Local edits that
 	// arrive after this point may send updates, while applyHelloAck still
 	// serializes the write-back under configMu.
-	c.markConnected()
+	c.mu.Lock()
+	if c.isClosed() || c.controlConn != conn {
+		c.mu.Unlock()
+		return net.ErrClosed
+	}
+	c.connected = true
+	c.mu.Unlock()
 	if err := c.applyHelloAck(cfg, ack); err != nil {
 		return err
 	}
@@ -366,13 +168,13 @@ func (c *Client) serveControl(conn net.Conn) error {
 	for {
 		msg, err := control.ReadMessage(conn)
 		if err != nil {
-			return err
+			return classifyControlError(err)
 		}
 
 		switch message := msg.(type) {
 		case *control.Open:
 			c.log.Debug("received control open", "mapping", message.MappingID)
-			go c.handleOpen(message)
+			go c.handleOpen(conn, message)
 		case *control.Push:
 			c.handlePush(conn, message)
 		case *control.UpdateAck:
@@ -389,7 +191,7 @@ func (c *Client) serveControl(conn net.Conn) error {
 		case *control.PushAck, *control.Pong, *control.OpenResult, *control.HelloAck:
 			// No action is required for these messages.
 		default:
-			c.log.Debug("ignoring unexpected control message")
+			return transport.ErrProtocol
 		}
 	}
 }
@@ -612,25 +414,25 @@ func (c *Client) handleCredentialUpdate(conn net.Conn, msg *control.CredentialUp
 	c.forceReconnectAfterCredentialAck(conn)
 }
 
-// forceReconnect closes the live control stream and HY2 client so the Start
+// forceReconnect closes the live control stream and session so the Start
 // loop reconnects with the current configuration. Manual credential rotation
 // has no ack to flush, so the close is immediate.
 func (c *Client) forceReconnect() {
 	c.mu.Lock()
 	conn := c.controlConn
-	hy := c.hy
+	session := c.session
 	c.mu.Unlock()
-	closeLiveConnection(conn, hy)
+	closeLiveConnection(conn, session)
 }
 
 // closeLiveConnection closes a captured connection pair. Either value may be
 // nil when the client is offline.
-func closeLiveConnection(conn net.Conn, hy hyclient.Client) {
+func closeLiveConnection(conn net.Conn, session transport.Session) {
+	if session != nil {
+		_ = session.Close()
+	}
 	if conn != nil {
 		_ = conn.Close()
-	}
-	if hy != nil {
-		_ = hy.Close()
 	}
 }
 
@@ -642,12 +444,12 @@ func (c *Client) forceReconnectAfterCredentialAck(conn net.Conn) {
 	if conn == nil {
 		return
 	}
-	// Capture the HY2 client that owns this control stream. If a newer
+	// Capture the session that owns this control stream. If a newer
 	// connection has already replaced it, leave that connection alone.
 	c.mu.Lock()
-	var hy hyclient.Client
+	var session transport.Session
 	if c.controlConn == conn {
-		hy = c.hy
+		session = c.session
 	}
 	c.mu.Unlock()
 
@@ -656,7 +458,7 @@ func (c *Client) forceReconnectAfterCredentialAck(conn net.Conn) {
 		defer timer.Stop()
 		select {
 		case <-timer.C:
-			closeLiveConnection(conn, hy)
+			closeLiveConnection(conn, session)
 		case <-c.closed:
 		}
 	}()
@@ -696,5 +498,12 @@ func (c *Client) writeControl(conn net.Conn, msg any) error {
 
 	_ = conn.SetWriteDeadline(time.Now().Add(controlHandshakeTimeout))
 	defer func() { _ = conn.SetWriteDeadline(time.Time{}) }()
-	return control.WriteMessage(conn, msg)
+	return classifyControlError(control.WriteMessage(conn, msg))
+}
+
+func classifyControlError(err error) error {
+	if errors.Is(err, control.ErrBadMessage) || errors.Is(err, control.ErrUnknownType) || errors.Is(err, control.ErrFrameTooLarge) {
+		return &transport.Error{Code: transport.ErrProtocol.Code, Cause: err}
+	}
+	return err
 }
