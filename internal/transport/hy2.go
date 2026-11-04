@@ -92,31 +92,46 @@ func (s *hy2Session) OpenControl(ctx context.Context) (net.Conn, error) {
 }
 
 func (s *hy2Session) OpenTCP(ctx context.Context, req TCPRequest) (net.Conn, error) {
+	conn, _, err := s.OpenTCPWithCompletion(ctx, req)
+	return conn, err
+}
+
+func (s *hy2Session) OpenTCPWithCompletion(ctx context.Context, req TCPRequest) (net.Conn, <-chan struct{}, error) {
 	if (req.ReverseToken == "") == (req.Target == "") {
-		return nil, &Error{Code: ErrProtocol.Code, Cause: errors.New("TCP request requires exactly one token or target")}
+		return nil, completedOpen(), &Error{Code: ErrProtocol.Code, Cause: errors.New("TCP request requires exactly one token or target")}
 	}
 	if req.ReverseToken != "" {
 		if !validHY2Token(req.ReverseToken) {
-			return nil, &Error{Code: ErrProtocol.Code, Cause: errors.New("invalid reverse TCP token")}
+			return nil, completedOpen(), &Error{Code: ErrProtocol.Code, Cause: errors.New("invalid reverse TCP token")}
 		}
-		return s.openTCP(ctx, "_hy2tun_data_"+req.ReverseToken+":0")
+		return s.openTCPWithCompletion(ctx, "_hy2tun_data_"+req.ReverseToken+":0")
 	}
-	return s.openTCP(ctx, req.Target)
+	return s.openTCPWithCompletion(ctx, req.Target)
 }
 
 func (s *hy2Session) openTCP(ctx context.Context, addr string) (net.Conn, error) {
-	conn, err := s.open(ctx, func() (io.Closer, error) { return s.client.TCP(addr) })
+	conn, _, err := s.openTCPWithCompletion(ctx, addr)
+	return conn, err
+}
+
+func (s *hy2Session) openTCPWithCompletion(ctx context.Context, addr string) (net.Conn, <-chan struct{}, error) {
+	conn, completion, err := s.openWithCompletion(ctx, func() (io.Closer, error) { return s.client.TCP(addr) })
 	if err != nil {
-		return nil, err
+		return nil, completion, err
 	}
-	return conn.(net.Conn), nil
+	return conn.(net.Conn), completion, nil
 }
 
 func (s *hy2Session) OpenUDP(ctx context.Context, token string) (DatagramConn, error) {
+	conn, _, err := s.OpenUDPWithCompletion(ctx, token)
+	return conn, err
+}
+
+func (s *hy2Session) OpenUDPWithCompletion(ctx context.Context, token string) (DatagramConn, <-chan struct{}, error) {
 	if !validHY2Token(token) {
-		return nil, &Error{Code: ErrProtocol.Code, Cause: errors.New("invalid reverse UDP token")}
+		return nil, completedOpen(), &Error{Code: ErrProtocol.Code, Cause: errors.New("invalid reverse UDP token")}
 	}
-	conn, err := s.open(ctx, func() (io.Closer, error) {
+	conn, completion, err := s.openWithCompletion(ctx, func() (io.Closer, error) {
 		udp, err := s.client.UDP()
 		if err != nil || udp == nil {
 			return udp, err
@@ -131,9 +146,9 @@ func (s *hy2Session) OpenUDP(ctx context.Context, token string) (DatagramConn, e
 		return owned, owned.Send([]byte{0}, "_hy2tun_udp_"+token+":0")
 	})
 	if err != nil {
-		return nil, err
+		return nil, completion, err
 	}
-	return conn.(DatagramConn), nil
+	return conn.(DatagramConn), completion, nil
 }
 
 func (s *hy2Session) Probe(ctx context.Context) (ProbeInfo, error) {
@@ -274,15 +289,31 @@ func (s *hy2Session) operationErr(ctx context.Context) error {
 // open owns a resource until the caller accepts it. Closing the session aborts
 // upstream I/O; a factory returning after shutdown still has its result closed.
 func (s *hy2Session) open(ctx context.Context, operation func() (io.Closer, error)) (io.Closer, error) {
+	conn, _, err := s.openWithCompletion(ctx, operation)
+	return conn, err
+}
+
+func completedOpen() <-chan struct{} {
+	done := make(chan struct{})
+	close(done)
+	return done
+}
+
+func (s *hy2Session) openWithCompletion(ctx context.Context, operation func() (io.Closer, error)) (io.Closer, <-chan struct{}, error) {
 	if err := s.operationErr(ctx); err != nil {
-		return nil, err
+		return nil, completedOpen(), err
 	}
 	type result struct {
 		conn io.Closer
 		err  error
 	}
 	results := make(chan result)
+	completion := make(chan struct{})
+	admitted := make(chan bool, 1)
 	go func() {
+		// This receipt survives prompt open cancellation and root Close. It
+		// covers the native result and all adapter-owned child cleanup.
+		defer close(completion)
 		conn, err := operation()
 		if err == nil && conn == nil {
 			err = &Error{Code: ErrProtocol.Code, Cause: errors.New("HY2 returned no connection")}
@@ -296,6 +327,9 @@ func (s *hy2Session) open(ctx context.Context, operation func() (io.Closer, erro
 		}
 		select {
 		case results <- result{conn: conn, err: err}:
+			if !<-admitted && conn != nil {
+				_ = conn.Close()
+			}
 		case <-ctx.Done():
 			if conn != nil {
 				_ = conn.Close()
@@ -309,20 +343,21 @@ func (s *hy2Session) open(ctx context.Context, operation func() (io.Closer, erro
 	select {
 	case <-ctx.Done():
 		_ = s.Close()
-		return nil, ctx.Err()
+		return nil, completion, ctx.Err()
 	case <-s.closed:
-		return nil, net.ErrClosed
+		return nil, completion, net.ErrClosed
 	case result := <-results:
 		if err := s.operationErr(ctx); err != nil {
-			if result.conn != nil {
-				_ = result.conn.Close()
-			}
+			// The native worker owns rejected handoff cleanup; prompt
+			// caller return is not evidence that this child has finished Close.
+			admitted <- false
 			if ctx.Err() != nil {
 				_ = s.Close()
 			}
-			return nil, err
+			return nil, completion, err
 		}
-		return result.conn, result.err
+		admitted <- true
+		return result.conn, completion, result.err
 	}
 }
 

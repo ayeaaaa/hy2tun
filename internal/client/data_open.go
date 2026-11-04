@@ -12,8 +12,12 @@ import (
 const maxPendingHY2DataOpens = 1024
 
 func (c *Client) openTCPData(ctx, ownerCtx context.Context, session transport.Session, req transport.TCPRequest) (net.Conn, error) {
-	child, err := c.openData(ctx, ownerCtx, session, func(ctx context.Context) (io.Closer, error) {
-		return session.OpenTCP(ctx, req)
+	child, err := c.openData(ctx, ownerCtx, session, func(ctx context.Context) (io.Closer, <-chan struct{}, error) {
+		if tracked, ok := session.(transport.CompletionSession); ok {
+			return tracked.OpenTCPWithCompletion(ctx, req)
+		}
+		conn, err := session.OpenTCP(ctx, req)
+		return conn, nil, err
 	})
 	if err != nil {
 		return nil, err
@@ -22,8 +26,12 @@ func (c *Client) openTCPData(ctx, ownerCtx context.Context, session transport.Se
 }
 
 func (c *Client) openUDPData(ctx, ownerCtx context.Context, session transport.Session, token string) (transport.DatagramConn, error) {
-	child, err := c.openData(ctx, ownerCtx, session, func(ctx context.Context) (io.Closer, error) {
-		return session.OpenUDP(ctx, token)
+	child, err := c.openData(ctx, ownerCtx, session, func(ctx context.Context) (io.Closer, <-chan struct{}, error) {
+		if tracked, ok := session.(transport.CompletionSession); ok {
+			return tracked.OpenUDPWithCompletion(ctx, token)
+		}
+		conn, err := session.OpenUDP(ctx, token)
+		return conn, nil, err
 	})
 	if err != nil {
 		return nil, err
@@ -35,7 +43,7 @@ func (c *Client) openUDPData(ctx, ownerCtx context.Context, session transport.Se
 // cancelling that context owns the entire HY2 root. Instead only owner teardown
 // cancels the native open, and a bounded worker owns its late result/cleanup.
 // TCP supports per-child cancellation natively and keeps its existing budget.
-func (c *Client) openData(ctx, ownerCtx context.Context, session transport.Session, open func(context.Context) (io.Closer, error)) (io.Closer, error) {
+func (c *Client) openData(ctx, ownerCtx context.Context, session transport.Session, open func(context.Context) (io.Closer, <-chan struct{}, error)) (io.Closer, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -47,7 +55,7 @@ func (c *Client) openData(ctx, ownerCtx context.Context, session transport.Sessi
 		stop := context.AfterFunc(ownerCtx, cancel)
 		defer stop()
 		defer cancel()
-		child, err := open(openCtx)
+		child, _, err := open(openCtx)
 		return finishDataOpen(child, errors.Join(err, openCtx.Err()))
 	}
 	c.mu.Lock()
@@ -76,8 +84,18 @@ func (c *Client) openData(ctx, ownerCtx context.Context, session transport.Sessi
 	go func() {
 		// Do not release on caller cancellation: an uncompleted native open or
 		// blocking late-child Close still consumes its original worker budget.
-		defer func() { <-slots }()
-		child, err := open(ownerCtx)
+		var completion <-chan struct{}
+		defer func() {
+			// An adapter may return cancellation before its native worker or
+			// abandoned-child Close finishes. Retain this SAME per-worker slot
+			// through actual completion, even across repeated owner replacements.
+			if completion != nil {
+				<-completion
+			}
+			<-slots
+		}()
+		child, done, err := open(ownerCtx)
+		completion = done
 		child, err = finishDataOpen(child, errors.Join(err, ctx.Err(), ownerCtx.Err()))
 		select {
 		case results <- result{child, err}:

@@ -50,6 +50,24 @@ type Session interface {
 	Close() error
 }
 
+// CompletionSession optionally exposes the actual completion of asynchronous
+// data opens separately from their prompt cancellation return. Each call returns
+// a non-nil channel, closed only after native work and any abandoned/error-child
+// cleanup finish. On successful handoff it does NOT wait for the delivered
+// child's lifetime. Validation/pre-cancelled calls return an already-closed
+// channel. Context cancellation or Session.Close alone is not completion.
+//
+// Asynchronous HY2 wrappers must preserve this contract when a caller accounts
+// for pending work across replacement roots; a HY2 implementation without it is
+// treated as synchronous by that external budget. TCP retains its own native
+// reservation/cleanup budget and need not implement this interface. Existing
+// Session methods and cancellation/root-ownership rules remain unchanged.
+type CompletionSession interface {
+	Session
+	OpenTCPWithCompletion(context.Context, TCPRequest) (net.Conn, <-chan struct{}, error)
+	OpenUDPWithCompletion(context.Context, string) (DatagramConn, <-chan struct{}, error)
+}
+
 type DialOptions struct {
 	// HY2 contains the existing, complete Hysteria configuration. DialHY2
 	// copies it before wrapping its packet factory; it does not mutate it.
