@@ -24,6 +24,10 @@ const credentialAckFlushGrace = 50 * time.Millisecond
 // setup. Start treats it as a normal shutdown.
 var errClientClosed = errors.New("client closed")
 
+var errStaleTransport = errors.New("stale transport attempt")
+
+type generationKey struct{}
+
 // handshake sends Hello and validates the server's HelloAck.
 func (c *Client) handshake(conn net.Conn) error {
 	ctx, cancel := context.WithTimeout(context.Background(), controlHandshakeTimeout)
@@ -42,10 +46,26 @@ func (c *Client) handshakeWithAcceptance(ctx context.Context, conn net.Conn, acc
 	_ = conn.SetDeadline(deadline)
 	defer func() { _ = conn.SetDeadline(time.Time{}) }()
 
-	cfg := c.snapshotConfig()
+	// Snapshot the identity epoch with config, then admit the wire Ack using
+	// mu alone. An unrelated slow file write must not extend setup ownership.
+	c.configMu.Lock()
+	cfg := cloneClientConfig(c.cfg)
+	c.mu.Lock()
+	epoch := c.transportEpoch
+	c.mu.Unlock()
+	c.configMu.Unlock()
+	if a, ok := ctx.Value(attemptKey{}).(*transportAttempt); ok {
+		valid := a.epoch == epoch && sameTransportConfig(a.cfg, cfg)
+		if !valid {
+			return errStaleTransport
+		}
+	}
 	generation := cfg.Credentials.Generation
 	if generation < 1 {
 		generation = 1
+	}
+	if expected, ok := ctx.Value(generationKey{}).(int64); ok && expected != generation {
+		return errStaleTransport
 	}
 	hello := &control.Hello{
 		Type:                 control.TypeHello,
@@ -88,6 +108,14 @@ func (c *Client) handshakeWithAcceptance(ctx context.Context, conn net.Conn, acc
 	if c.isClosed() || c.controlConn != conn {
 		c.mu.Unlock()
 		return net.ErrClosed
+	}
+	if epoch != c.transportEpoch {
+		c.mu.Unlock()
+		return errStaleTransport
+	}
+	if a, ok := ctx.Value(attemptKey{}).(*transportAttempt); ok && a.epoch != c.transportEpoch {
+		c.mu.Unlock()
+		return errStaleTransport
 	}
 	if err := accept(); err != nil {
 		c.mu.Unlock()
@@ -211,7 +239,9 @@ func (c *Client) serveControl(conn net.Conn) error {
 			}); err != nil {
 				return err
 			}
-		case *control.PushAck, *control.Pong, *control.OpenResult, *control.HelloAck:
+		case *control.Pong:
+			c.handlePong(conn, message.TS)
+		case *control.PushAck, *control.OpenResult, *control.HelloAck:
 			// No action is required for these messages.
 		default:
 			return transport.ErrProtocol
@@ -442,6 +472,7 @@ func (c *Client) handleCredentialUpdate(conn net.Conn, msg *control.CredentialUp
 // has no ack to flush, so the close is immediate.
 func (c *Client) forceReconnect() {
 	c.mu.Lock()
+	c.invalidateTransportLocked()
 	conn := c.controlConn
 	session := c.session
 	c.mu.Unlock()
@@ -518,7 +549,10 @@ func (c *Client) applyRejectedUpdateResults(results []control.Result) {
 func (c *Client) writeControl(conn net.Conn, msg any) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	return c.writeControlLocked(conn, msg)
+}
 
+func (c *Client) writeControlLocked(conn net.Conn, msg any) error {
 	_ = conn.SetWriteDeadline(time.Now().Add(controlHandshakeTimeout))
 	defer func() { _ = conn.SetWriteDeadline(time.Time{}) }()
 	return classifyControlError(control.WriteMessage(conn, msg))

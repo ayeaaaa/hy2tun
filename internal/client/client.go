@@ -62,6 +62,7 @@ type Client struct {
 	newSession  func(context.Context, transport.Kind, transport.DialOptions) (transport.Session, error)
 	dialLocal   func(context.Context, string, string) (net.Conn, error)
 	startedAt   time.Time
+	runtime     RuntimeOptions
 
 	mu            sync.Mutex
 	session       transport.Session
@@ -72,6 +73,14 @@ type Client struct {
 	hy2DataOpenSlots chan struct{}
 	controlConn      net.Conn
 	connected        bool
+	transportEpoch   uint64
+	transportWork    *transportAttempt
+	transportChanged chan struct{}
+	transportState   view.TransportState
+	lastTransport    string
+	activeSince      time.Time
+	heartbeat        *heartbeat
+	heartbeatTS      int64
 	// credentialsGeneration mirrors cfg.Credentials.Generation. The server
 	// fields are the last HelloAck values; 0/false mean the server predates
 	// credential rotation, so the generation is unknown rather than 1.
@@ -134,6 +143,11 @@ func NewWorker(cfg *config.ClientConfig, log *slog.Logger) (*Client, error) {
 }
 
 func newClient(cfg *config.ClientConfig, log *slog.Logger, skipProxyBind bool) (*Client, error) {
+	return newClientWithRuntime(cfg, log, skipProxyBind, RuntimeOptions{})
+}
+
+func newClientWithRuntime(cfg *config.ClientConfig, log *slog.Logger, skipProxyBind bool, opts RuntimeOptions) (*Client, error) {
+	opts = opts.defaults()
 	if cfg == nil {
 		return nil, fmt.Errorf("client config is nil")
 	}
@@ -188,6 +202,8 @@ func newClient(cfg *config.ClientConfig, log *slog.Logger, skipProxyBind bool) (
 		connFactory:           connFactory,
 		newHY2:                hyclient.NewClient,
 		startedAt:             time.Now(),
+		runtime:               opts,
+		transportChanged:      make(chan struct{}, 1),
 		configPath:            cfg.ConfigPath,
 		credentialsGeneration: credentialsGeneration,
 		mappings:              mappingViews(cfg.Mappings, nil),
@@ -402,7 +418,7 @@ func (c *Client) Start(ctx context.Context) error {
 			return nil
 		}
 
-		attemptedAt := time.Now()
+		attemptedAt := c.runtime.Clock.Now()
 		connected, err := c.runOnce(ctx)
 		if c.isClosed() || ctx.Err() != nil {
 			return nil
@@ -410,22 +426,23 @@ func (c *Client) Start(ctx context.Context) error {
 		// Reset the backoff only after a connection that stayed healthy for a
 		// full cap interval. A server that accepts and immediately drops the
 		// stream must not be retried every second forever.
-		if connected && time.Since(attemptedAt) >= maxBackoff {
+		if connected && c.runtime.Clock.Now().Sub(attemptedAt) >= maxBackoff {
 			backoff = initialBackoff
 		}
 		if err != nil {
 			c.log.Warn("control connection lost", "error", err)
 		}
 
-		timer := time.NewTimer(backoff)
+		timer := c.runtime.Clock.After(c.runtime.Jitter(backoff))
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return nil
 		case <-c.closed:
-			timer.Stop()
 			return nil
-		case <-timer.C:
+		case <-c.transportChanged:
+			backoff = initialBackoff
+			continue
+		case <-timer:
 		}
 
 		backoff *= 2
@@ -447,6 +464,7 @@ func (c *Client) Close() error {
 		}
 
 		c.mu.Lock()
+		c.invalidateTransportLocked()
 		conn := c.controlConn
 		session := c.session
 		if c.sessionCancel != nil {
@@ -455,6 +473,7 @@ func (c *Client) Close() error {
 		c.controlConn = nil
 		c.session = nil
 		c.connected = false
+		c.transportState.ActiveTransport = ""
 		dataConns := make([]net.Conn, 0, len(c.dataConns))
 		for dataConn := range c.dataConns {
 			dataConns = append(dataConns, dataConn)
@@ -547,6 +566,7 @@ func (c *Client) Status() view.ClientStatus {
 		CredentialGeneration:       credentialGeneration,
 		ServerCredentialGeneration: serverCredentialGeneration,
 		CredentialSynced:           credentialSynced,
+		Transport:                  c.TransportState(),
 	}
 }
 
@@ -797,6 +817,7 @@ func (c *Client) setCurrent(session transport.Session, conn net.Conn) bool {
 	c.session = session
 	c.controlConn = conn
 	c.connected = false
+	c.transportState.ActiveTransport = ""
 	c.mu.Unlock()
 	if oldSession != nil && oldSession != session {
 		closeLiveConnection(oldConn, oldSession)
@@ -818,6 +839,7 @@ func (c *Client) clearCurrent(session transport.Session, conn net.Conn) {
 		c.session = nil
 		c.controlConn = nil
 		c.connected = false
+		c.transportState.ActiveTransport = ""
 	}
 }
 

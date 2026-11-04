@@ -301,10 +301,13 @@ func TestClientRotateDuringConnectAbandonsStaleConnection(t *testing.T) {
 		t.Fatal("runOnce did not abandon the stale connection")
 	}
 
-	require.True(t, fake.isClosed(), "the stale HY2 client must be closed")
+	require.Eventually(t, fake.isClosed, time.Second, time.Millisecond, "the late stale HY2 client must be closed")
 	tracking := fake.trackingConn()
-	require.NotNil(t, tracking)
-	require.False(t, tracking.wrote.Load(), "the stale connection must not reach the Hello handshake")
+	// Epoch cancellation may reject the dial before opening any control stream.
+	// If a control stream was opened before rotation won, it still cannot Hello.
+	if tracking != nil {
+		require.False(t, tracking.wrote.Load(), "the stale connection must not reach the Hello handshake")
+	}
 
 	// The retry must build its HY2 config from the rotated auth.
 	_, err = cl.runOnce(context.Background())

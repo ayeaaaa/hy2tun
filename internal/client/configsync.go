@@ -350,9 +350,17 @@ func (c *Client) currentCredentialGeneration() int64 {
 // storeConfigLocked installs a new configuration and its derived read models.
 // The caller must hold configMu.
 func (c *Client) storeConfigLocked(next *config.ClientConfig, tokens map[string]string, views []view.MappingView) {
+	transportChanged := !sameTransportConfig(c.cfg, next)
+	modeChanged := c.cfg.Mode.Effective() != next.Mode.Effective()
 	c.cfg = next
 
 	c.mu.Lock()
+	if transportChanged {
+		c.invalidateTransportLocked()
+	}
+	if modeChanged && c.sessionCancel != nil {
+		c.sessionCancel()
+	}
 	c.mappingConfigs = mappingConfigMap(next.Mappings)
 	c.udpTokens = tokens
 	c.mappings = views

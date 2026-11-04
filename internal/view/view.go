@@ -57,7 +57,19 @@ type Overview struct {
 	Uptime         time.Duration
 }
 
-// ClientStatus is the local client's connection status.
+// TransportState is one worker's secret-free policy and session snapshot.
+type TransportState struct {
+	Mode            config.TransportMode `json:"mode"`
+	ActiveTransport string               `json:"active_transport"`
+	SwitchReason    string               `json:"switch_reason"`
+	LastSwitchAt    time.Time            `json:"last_switch_at"`
+	LastProbeAt     time.Time            `json:"last_probe_at"`
+	LastProbeError  string               `json:"last_probe_error"`
+	SwitchCount     uint64               `json:"switch_count"`
+}
+
+// ClientStatus includes an internal transport snapshot; HTTP flattening is
+// deliberately left to the web read-model adapter.
 type ClientStatus struct {
 	Name      string
 	Server    string
@@ -75,6 +87,7 @@ type ClientStatus struct {
 	CredentialGeneration       int64
 	ServerCredentialGeneration int64
 	CredentialSynced           bool
+	Transport                  TransportState
 }
 
 // LogEntry is one client log line exposed by the client web UI.

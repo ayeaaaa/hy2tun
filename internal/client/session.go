@@ -35,38 +35,45 @@ func (c *Client) dialSession(ctx context.Context, kind transport.Kind, cfg *conf
 		Auth: cfg.Auth, ControlToken: cfg.Control.Token, ClientID: cfg.Client.ID,
 		Up: uint64(cfg.Bandwidth.Up), Down: uint64(cfg.Bandwidth.Down),
 	}
-	switch kind {
-	case transport.TCP:
-		addr, err := cfg.TCPServerAddress()
-		if err != nil {
-			return nil, err
+	if c.runtime.Dial == nil {
+		switch kind {
+		case transport.TCP:
+			addr, err := cfg.TCPServerAddress()
+			if err != nil {
+				return nil, err
+			}
+			tls, err := transport.ClientTLS(cfg.TLS, addr)
+			if err != nil {
+				return nil, err
+			}
+			opts.TCPAddress, opts.TLS = addr, tls
+		case transport.HY2:
+			addr, err := resolveServerAddrContext(dialCtx, cfg)
+			if err != nil {
+				return nil, err
+			}
+			tls, err := buildTLSConfig(cfg)
+			if err != nil {
+				return nil, err
+			}
+			factory, err := buildConnFactory(cfg, addr)
+			if err != nil {
+				return nil, err
+			}
+			opts.HY2 = &hyclient.Config{
+				ServerAddr: addr, Auth: cfg.Auth, TLSConfig: tls, ConnFactory: factory,
+				BandwidthConfig: hyclient.BandwidthConfig{MaxTx: opts.Up, MaxRx: opts.Down},
+			}
+		default:
+			return nil, transport.ErrProtocol
 		}
-		tls, err := transport.ClientTLS(cfg.TLS, addr)
-		if err != nil {
-			return nil, err
-		}
-		opts.TCPAddress, opts.TLS = addr, tls
-	case transport.HY2:
-		addr, err := resolveServerAddrContext(dialCtx, cfg)
-		if err != nil {
-			return nil, err
-		}
-		tls, err := buildTLSConfig(cfg)
-		if err != nil {
-			return nil, err
-		}
-		factory, err := buildConnFactory(cfg, addr)
-		if err != nil {
-			return nil, err
-		}
-		opts.HY2 = &hyclient.Config{
-			ServerAddr: addr, Auth: cfg.Auth, TLSConfig: tls, ConnFactory: factory,
-			BandwidthConfig: hyclient.BandwidthConfig{MaxTx: opts.Up, MaxRx: opts.Down},
-		}
-	default:
-		return nil, transport.ErrProtocol
 	}
 	dial := c.newSession
+	if c.runtime.Dial != nil {
+		dial = func(ctx context.Context, kind transport.Kind, _ transport.DialOptions) (transport.Session, error) {
+			return c.runtime.Dial(ctx, kind, cloneClientConfig(cfg))
+		}
+	}
 	if dial == nil {
 		dial = func(ctx context.Context, kind transport.Kind, opts transport.DialOptions) (transport.Session, error) {
 			if kind == transport.TCP {
@@ -121,26 +128,10 @@ func (c *Client) dialSession(ctx context.Context, kind transport.Kind, cfg *conf
 	}
 }
 
-func (c *Client) runOnce(ctx context.Context) (bool, error) {
-	cfg := c.snapshotConfig()
-	kind := transport.HY2
-	if cfg.Mode.Effective() == config.ModeTCP {
-		kind = transport.TCP
-	}
-	// Automatic selection/probes belong to Task 7. Auto starts with HY2 here.
-	setupCtx, cancel := context.WithTimeout(ctx, controlHandshakeTimeout)
-	defer cancel()
-	s, err := c.dialSession(setupCtx, kind, cfg)
-	if err != nil {
-		return false, err
-	}
-	return c.runSessionWithSetup(ctx, setupCtx, s, cfg.Credentials.Generation)
-}
-
 // runSession owns an already-dialed session through control/UDP teardown. The
 // caller's context is the lifetime, not a temporary establishment timeout.
 func (c *Client) runSession(ctx context.Context, session transport.Session) (bool, error) {
-	setupCtx, cancel := context.WithTimeout(ctx, controlHandshakeTimeout)
+	setupCtx, cancel := c.setupTimeout(ctx)
 	defer cancel()
 	return c.runSessionWithSetup(ctx, setupCtx, session, c.currentCredentialGeneration())
 }
@@ -156,6 +147,14 @@ func (c *Client) runSessionWithSetup(ctx, setupCtx context.Context, session tran
 	var once sync.Once
 	closeBoth := func() { once.Do(func() { closeLiveConnection(conn, session) }) }
 	defer closeBoth()
+	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
+	var hb *heartbeat
+	defer func() {
+		cancelHeartbeat()
+		if hb != nil {
+			<-hb.done
+		}
+	}()
 	openCtx, cancelOpen := context.WithCancel(setupCtx)
 	stopOpen := make(chan struct{})
 	go func() {
@@ -184,6 +183,7 @@ func (c *Client) runSessionWithSetup(ctx, setupCtx context.Context, session tran
 	if !c.setCurrent(session, conn) {
 		return false, errClientClosed
 	}
+	_, _, ownerCtx := c.sessionFor(conn)
 	defer func() {
 		c.clearCurrent(session, conn)
 		closeBoth()
@@ -196,11 +196,13 @@ func (c *Client) runSessionWithSetup(ctx, setupCtx context.Context, session tran
 	if c.currentCredentialGeneration() != generation {
 		return false, nil
 	}
+	setupCtx = context.WithValue(setupCtx, generationKey{}, generation)
 	stopWatch := make(chan struct{})
 	go func() {
 		select {
 		case <-ctx.Done():
 		case <-c.closed:
+		case <-ownerCtx.Done():
 		case <-stopWatch:
 			return
 		}
@@ -227,14 +229,25 @@ func (c *Client) runSessionWithSetup(ctx, setupCtx context.Context, session tran
 		if err := setupContextError(setupCtx); err != nil {
 			return err
 		}
+		if a, ok := setupCtx.Value(attemptKey{}).(*transportAttempt); ok {
+			if err := a.admit(); err != nil {
+				return err
+			}
+		}
 		accepted = true
 		stopSetup()
+		c.transportAcceptedLocked(session, setupCtx)
+		hb = c.newHeartbeatLocked(conn)
+		go c.runHeartbeat(heartbeatCtx, hb, closeBoth)
 		return nil
 	})
 	stopSetup()
 	// Retain an observed security/protocol error even when the setup timer
 	// races its read. A timeout must never replace its denied classification.
 	if err != nil {
+		if errors.Is(err, errStaleTransport) {
+			return false, nil
+		}
 		if accepted {
 			return false, err
 		}
@@ -245,7 +258,19 @@ func (c *Client) runSessionWithSetup(ctx, setupCtx context.Context, session tran
 	}
 	c.markReady()
 	c.startUDPMappings()
-	err = c.serveControl(conn)
+	candidate, err := c.serveEstablished(ctx, session, conn)
+	if candidate != nil {
+		if run, ok := ctx.Value(sessionRunKey{}).(*sessionRun); ok {
+			run.candidate = candidate
+		} else {
+			c.discardAttempt(candidate)
+		}
+	}
+	select {
+	case heartbeatErr := <-hb.failed:
+		err = errors.Join(err, heartbeatErr)
+	default:
+	}
 	closeBoth()
 	return true, err
 }
