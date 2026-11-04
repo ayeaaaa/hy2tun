@@ -10,6 +10,7 @@ import (
 )
 
 func (m *mappingManager) bindLocked(sess *clientSession, rt *mappingRuntime, ignore map[*mappingRuntime]struct{}, extra []*mappingRuntime) control.Result {
+	rt.owner = sess
 	mapping := rt.mapping
 	if mapping.Type != "tcp" && mapping.Type != "udp" {
 		return m.fail(rt, control.CodeBadMessage)

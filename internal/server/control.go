@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/sha256"
 	"errors"
 	"io"
 	"log/slog"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"hy2tun/internal/control"
+	"hy2tun/internal/transport"
 	"hy2tun/internal/version"
 )
 
@@ -30,12 +32,23 @@ func newControlHandler(s *Server, log *slog.Logger) *controlHandler {
 // Serve authenticates a client, registers its mappings, and then processes
 // control messages until the stream closes.
 func (h *controlHandler) Serve(conn net.Conn) {
+	h.serveWithMeta(conn, sessionMeta{Kind: transport.HY2})
+}
+
+func (h *controlHandler) serveWithMeta(conn net.Conn, meta sessionMeta) {
 	if conn == nil {
 		return
 	}
 	defer conn.Close()
+	if meta.CloseTransport != nil {
+		defer meta.CloseTransport()
+	}
 
-	_ = conn.SetReadDeadline(time.Now().Add(controlHandshakeTimeout))
+	deadline := meta.HandshakeDeadline
+	if deadline.IsZero() {
+		deadline = time.Now().Add(controlHandshakeTimeout)
+	}
+	_ = conn.SetReadDeadline(deadline)
 	msg, err := control.ReadMessage(conn)
 	if err != nil {
 		if errors.Is(err, control.ErrBadMessage) ||
@@ -61,6 +74,13 @@ func (h *controlHandler) Serve(conn net.Conn) {
 	if !ok {
 		h.reject(conn, control.CodeUnauthorized)
 		return
+	}
+	if meta.Kind == transport.TCP {
+		if meta.Principal == nil || meta.Peer == nil || hello.ClientID != meta.Principal.ClientID || sha256.Sum256([]byte(hello.Token)) != meta.Principal.TokenDigest || !tcpPrincipalValid(*meta.Principal, set) || !h.server.currentConfig().Mode.AllowsTCP() {
+			h.reject(conn, control.CodeUnauthorized)
+			return
+		}
+		authenticatedGeneration = meta.Principal.Generation
 	}
 	if hello.ClientID == "" {
 		h.reject(conn, control.CodeBadMessage)
@@ -108,6 +128,8 @@ func (h *controlHandler) Serve(conn net.Conn) {
 		appliedRevision: hello.Revision,
 		credentialAck:   make(chan *control.CredentialAck, 1),
 		conn:            conn,
+		transport:       meta.Kind,
+		tcpPeer:         meta.Peer,
 		ready:           make(chan struct{}),
 		done:            make(chan struct{}),
 	}
@@ -128,6 +150,13 @@ func (h *controlHandler) Serve(conn net.Conn) {
 		h.server.mappings.detach(sess)
 		return
 	}
+	if meta.Kind == transport.TCP {
+		if !tcpPrincipalValid(*meta.Principal, current) || !h.server.currentConfig().Mode.AllowsTCP() {
+			h.server.mappings.detach(sess)
+			return
+		}
+		authenticatedGeneration = meta.Principal.Generation
+	}
 	if authenticatedGeneration < 1 {
 		authenticatedGeneration = 1
 	}
@@ -141,11 +170,18 @@ func (h *controlHandler) Serve(conn net.Conn) {
 		CredentialSynced:     current.Synced(authenticatedGeneration),
 		Results:              results,
 	}
-	if err := sess.write(ack); err != nil {
+	ackDeadline := time.Time{}
+	if meta.Kind == transport.TCP {
+		ackDeadline = deadline
+	}
+	if err := sess.writeWithDeadline(ack, ackDeadline); err != nil {
 		h.server.mappings.detach(sess)
 		return
 	}
 	sess.markReady()
+	if meta.registered != nil {
+		meta.registered()
+	}
 
 	h.log.Info("hy2tun client registered",
 		"client", hello.ClientID,
@@ -177,9 +213,37 @@ func (h *controlHandler) reject(conn net.Conn, code control.ErrorCode) {
 }
 
 func (h *controlHandler) loop(sess *clientSession) {
+	h.loopWithHeartbeat(sess, 10*time.Second, 30*time.Second)
+}
+
+func (h *controlHandler) loopWithHeartbeat(sess *clientSession, interval, idle time.Duration) {
 	defer h.server.mappings.detach(sess)
+	stop := make(chan struct{})
+	defer close(stop)
+	if sess.transport == transport.TCP {
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-sess.done:
+					return
+				case now := <-ticker.C:
+					if err := sess.write(&control.Ping{Type: control.TypePing, TS: now.UnixMilli()}); err != nil {
+						sess.abortStream()
+						return
+					}
+				}
+			}
+		}()
+	}
 
 	for {
+		if sess.transport == transport.TCP {
+			_ = sess.conn.SetReadDeadline(time.Now().Add(idle))
+		}
 		msg, err := control.ReadMessage(sess.conn)
 		if err != nil {
 			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
@@ -227,9 +291,15 @@ func (h *controlHandler) loop(sess *clientSession) {
 			if err := sess.write(&control.Pong{Type: control.TypePong, TS: message.TS}); err != nil {
 				return
 			}
+		case *control.Pong:
+			// Reading any valid control response refreshes the TCP idle deadline.
 		case *control.OpenResult:
 			if !message.OK && h.server.data != nil {
-				h.server.data.fail(message.Token)
+				if sess.transport == transport.TCP {
+					h.server.data.failFor(message.Token, sess)
+				} else {
+					h.server.data.fail(message.Token)
+				}
 			}
 			h.log.Debug("received control open result",
 				"client", sess.id,

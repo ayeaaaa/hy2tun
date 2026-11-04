@@ -47,11 +47,12 @@ type Server struct {
 	packetConn net.PacketConn
 	listenAddr net.Addr
 
-	store    *state.Store
-	mappings *mappingManager
-	control  *controlHandler
-	data     *dataStreams
-	web      *serverui.Server
+	store      *state.Store
+	mappings   *mappingManager
+	control    *controlHandler
+	data       *dataStreams
+	probeSlots chan struct{}
+	web        *serverui.Server
 
 	// credentials is the live credential pair used by the HY2 authenticator
 	// and the control-token check. It is replaced atomically on rotation.
@@ -119,6 +120,7 @@ func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 		listenAddr:  packetConn.LocalAddr(),
 		startedAt:   time.Now(),
 		data:        newDataStreams(),
+		probeSlots:  make(chan struct{}, 32),
 		credentials: credStore,
 		saveConfig:  config.SaveServer,
 	}

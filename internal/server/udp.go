@@ -9,6 +9,7 @@ import (
 	"time"
 
 	hyserver "github.com/apernet/hysteria/core/v2/server"
+	"hy2tun/internal/transport"
 )
 
 // udpVirtualAddress returns the reserved virtual address that carries one
@@ -31,6 +32,7 @@ type publicUDPConn struct {
 	mu       sync.Mutex
 	closed   bool
 	readDone chan struct{}
+	bridge   transport.DatagramConn
 }
 
 // ReadFrom reads one public datagram and reports the public peer address, which
@@ -145,6 +147,9 @@ func (c *publicUDPConn) Close() error {
 	c.mu.Unlock()
 
 	err := c.UDPConn.SetReadDeadline(time.Now())
+	if c.bridge != nil {
+		_ = c.bridge.Close()
+	}
 	if done != nil {
 		<-done
 	}
@@ -163,6 +168,10 @@ func (c *publicUDPConn) logger() *slog.Logger {
 // read is drained before the new wrapper starts reading. This keeps exactly one
 // session consuming datagrams from the shared public socket.
 func (s *Server) publicUDPConn(m *mappingRuntime) *publicUDPConn {
+	return s.attachPublicUDPConn(m, nil)
+}
+
+func (s *Server) attachPublicUDPConn(m *mappingRuntime, bridge transport.DatagramConn) *publicUDPConn {
 	if m == nil || m.udpConn == nil {
 		return nil
 	}
@@ -172,6 +181,7 @@ func (s *Server) publicUDPConn(m *mappingRuntime) *publicUDPConn {
 		mappingID:   m.id,
 		runtime:     m,
 		log:         s.log,
+		bridge:      bridge,
 	}
 
 	m.udpMu.Lock()
@@ -186,6 +196,76 @@ func (s *Server) publicUDPConn(m *mappingRuntime) *publicUDPConn {
 	m.udpMu.Unlock()
 
 	return c
+}
+
+func (s *Server) bridgeTCPUDP(rt *mappingRuntime, public *publicUDPConn, datagrams transport.DatagramConn) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer datagrams.Close()
+		// One extra byte detects over-limit public packets instead of relaying
+		// truncated payloads. The adapter owns the bounded 32-packet send queue.
+		buf := make([]byte, 4097)
+		for {
+			n, addr, err := public.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if n > 4096 || len(addr) > 256 {
+				rt.udpDrops.Add(1)
+				continue
+			}
+			if err := datagrams.Send(buf[:n], addr); err != nil {
+				if errors.Is(err, transport.ErrQueueFull) {
+					rt.udpDrops.Add(1)
+					continue
+				}
+				return
+			}
+		}
+	}()
+	for {
+		payload, addr, err := datagrams.Receive()
+		if err != nil {
+			break
+		}
+		if _, err := public.WriteTo(payload, addr); err != nil {
+			break
+		}
+	}
+	_ = public.Close()
+	_ = datagrams.Close()
+	<-done
+	rt.udpMu.Lock()
+	if rt.udpSession == public {
+		rt.udpSession = nil
+	}
+	rt.udpMu.Unlock()
+}
+
+// UDP tokens are reusable, but only by the exact live TCP runtime owner. The
+// legacy HY2 path above remains a bearer-token route (no authenticated caller).
+func (m *mappingManager) udpRuntimeFor(token string, owner *clientSession) (*mappingRuntime, error) {
+	if m == nil || token == "" {
+		return nil, fmt.Errorf("hy2tun UDP mapping is unavailable")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.liveTCPOwnerLocked(owner) {
+		return nil, fmt.Errorf("hy2tun UDP owner is unavailable")
+	}
+	valid := func(rt *mappingRuntime) bool {
+		return rt != nil && rt.owner == owner && rt.udpToken == token && rt.mapping.Type == "udp" && rt.status == mappingStatusRunning && !rt.closed.Load()
+	}
+	if rt := m.pendingUDP[token]; valid(rt) {
+		return rt, nil
+	}
+	for _, rt := range owner.mappings {
+		if valid(rt) {
+			return rt, nil
+		}
+	}
+	return nil, fmt.Errorf("hy2tun UDP mapping is unavailable")
 }
 
 // udpRuntime returns the running UDP mapping registered under token. The token

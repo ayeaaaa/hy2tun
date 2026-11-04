@@ -71,6 +71,9 @@ func newMappingManager(policy *ports.Policy, store *state.Store, log *slog.Logge
 		pendingUDP: make(map[string]*mappingRuntime),
 	}
 	m.policy.Store(policy)
+	if data != nil {
+		data.manager = m
+	}
 	return m
 }
 
@@ -125,7 +128,7 @@ func (m *mappingManager) register(sess *clientSession, mappings []config.Mapping
 		delete(m.sessions, sess.id)
 		m.closeSessionLocked(old)
 		if old.conn != nil {
-			_ = old.conn.Close()
+			old.abortStream()
 		}
 	}
 
@@ -487,7 +490,7 @@ func (m *mappingManager) closeAll() {
 		sess.lastSeen = now
 		m.closeSessionLocked(sess)
 		if sess.conn != nil {
-			_ = sess.conn.Close()
+			sess.abortStream()
 		}
 		if m.store != nil {
 			m.store.SetOnline(id, false, now)
@@ -500,6 +503,9 @@ func (m *mappingManager) closeAll() {
 
 func (m *mappingManager) closeSessionLocked(sess *clientSession) {
 	sess.markDone()
+	if sess.tcpPeer != nil {
+		_ = sess.tcpPeer.Close()
+	}
 	m.closeMappingsLocked(sess)
 }
 

@@ -16,6 +16,7 @@ const (
 	virtualKindControl = "control"
 	virtualKindData    = "data"
 	virtualKindUDP     = "udp"
+	virtualKindProbe   = "probe"
 )
 
 // parseVirtualAddr reports whether addr is a reserved hy2tun virtual address
@@ -37,6 +38,8 @@ func parseVirtualAddr(addr string) (kind, token string, ok bool) {
 	switch {
 	case rest == virtualKindControl+"_":
 		return virtualKindControl, "", true
+	case rest == virtualKindProbe+"_":
+		return virtualKindProbe, "", true
 	case strings.HasPrefix(rest, virtualKindData+"_"):
 		if token := strings.TrimPrefix(rest, virtualKindData+"_"); token != "" {
 			return virtualKindData, token, true
@@ -64,6 +67,13 @@ func isVirtualHost(addr string) bool {
 // under their one-time token.
 func (o *outbound) virtualTCP(kind, token string) (net.Conn, error) {
 	switch kind {
+	case virtualKindProbe:
+		if o.server == nil {
+			return nil, fmt.Errorf("hy2tun probe is not available")
+		}
+		clientEnd, serverEnd := net.Pipe()
+		go o.server.serveProbe(serverEnd)
+		return clientEnd, nil
 	case virtualKindControl:
 		if o.server == nil || o.server.control == nil {
 			return nil, fmt.Errorf("hy2tun control plane is not available")

@@ -26,6 +26,7 @@ const (
 type pendingConn struct {
 	conn    net.Conn
 	mapping *mappingRuntime
+	owner   *clientSession
 	expires time.Time
 }
 
@@ -33,6 +34,7 @@ type pendingConn struct {
 // waiting for the owning client to open the matching data stream. Tokens are
 // single-use and expire after dataTokenTTL.
 type dataStreams struct {
+	manager *mappingManager
 	mu      sync.Mutex
 	pending map[string]*pendingConn
 	max     int
@@ -105,6 +107,33 @@ func (d *dataStreams) take(token string) (net.Conn, error) {
 	return pc.conn, nil
 }
 
+// takeFor validates ownership under the manager lock before consuming a token.
+// A wrong/obsolete root cannot remove a valid owner's pending connection.
+func (d *dataStreams) takeFor(token string, owner *clientSession) (net.Conn, error) {
+	m := d.manager
+	if m == nil {
+		return nil, fmt.Errorf("hy2tun data owner is unavailable")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.liveTCPOwnerLocked(owner) {
+		return nil, fmt.Errorf("hy2tun data owner is unavailable")
+	}
+	d.mu.Lock()
+	pc := d.pending[token]
+	if pc == nil || pc.owner != owner || pc.mapping == nil || pc.mapping.owner != owner {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("hy2tun data owner is unavailable")
+	}
+	delete(d.pending, token)
+	d.mu.Unlock()
+	if !time.Now().Before(pc.expires) || pc.mapping.closed.Load() {
+		_ = pc.conn.Close()
+		return nil, fmt.Errorf("hy2tun data stream is unavailable")
+	}
+	return pc.conn, nil
+}
+
 // remove drops a token and closes its public connection. It is used when the
 // open request cannot be delivered.
 func (d *dataStreams) remove(token string) {
@@ -122,6 +151,27 @@ func (d *dataStreams) remove(token string) {
 // stream, so the public peer does not wait for the full token TTL.
 func (d *dataStreams) fail(token string) {
 	d.remove(token)
+}
+
+func (d *dataStreams) failFor(token string, owner *clientSession) {
+	m := d.manager
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.liveTCPOwnerLocked(owner) {
+		return
+	}
+	d.mu.Lock()
+	pc := d.pending[token]
+	if pc == nil || pc.owner != owner {
+		d.mu.Unlock()
+		return
+	}
+	delete(d.pending, token)
+	d.mu.Unlock()
+	_ = pc.conn.Close()
 }
 
 // dropMapping closes every pending connection owned by m.
@@ -323,6 +373,7 @@ func (s *Server) openDataStream(sess *clientSession, m *mappingRuntime, public n
 	token, err := s.data.add(&pendingConn{
 		conn:    public,
 		mapping: m,
+		owner:   sess,
 		expires: time.Now().Add(dataTokenTTL),
 	})
 	if err != nil {

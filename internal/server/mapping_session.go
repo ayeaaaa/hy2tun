@@ -8,16 +8,19 @@ import (
 	"time"
 
 	"hy2tun/internal/control"
+	"hy2tun/internal/transport"
 )
 
 type clientSession struct {
-	id       string
-	name     string
-	version  string
-	revision int64
-	online   bool
-	lastSeen time.Time
-	conn     net.Conn
+	id        string
+	name      string
+	version   string
+	revision  int64
+	online    bool
+	lastSeen  time.Time
+	conn      net.Conn
+	transport transport.Kind
+	tcpPeer   *transport.TCPPeer
 
 	mappings map[string]*mappingRuntime
 	order    []string
@@ -107,6 +110,9 @@ func (s *clientSession) setCredentialStateFor(reported, authenticated int64, syn
 		return
 	}
 	s.credentialMu.Lock()
+	if s.transport == transport.TCP && s.tcpPeer != nil {
+		authenticated = s.tcpPeer.Principal().Generation
+	}
 	s.credentialGeneration = reported
 	s.authenticatedGeneration = authenticated
 	s.credentialSynced = synced
@@ -287,10 +293,15 @@ func (s *clientSession) writeWithDeadline(msg any, deadline time.Time) error {
 // re-registers the authoritative configuration. It is used when a push or
 // update transaction can no longer trust the server's cached revision.
 func (s *clientSession) abortStream() {
-	if s == nil || s.conn == nil {
+	if s == nil {
 		return
 	}
-	_ = s.conn.Close()
+	if s.tcpPeer != nil {
+		_ = s.tcpPeer.Close()
+	}
+	if s.conn != nil {
+		_ = s.conn.Close()
+	}
 }
 
 // mappingManager owns all client sessions and serializes port allocation and

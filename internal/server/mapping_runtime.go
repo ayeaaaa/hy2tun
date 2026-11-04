@@ -15,7 +15,8 @@ type mappingRuntime struct {
 	// id is the immutable mapping identifier. Data-plane goroutines may read it
 	// without the manager lock; mapping itself is mutable and must stay under
 	// that lock.
-	id string
+	id    string
+	owner *clientSession // Immutable owner of this runtime, including pre-bound pushes.
 
 	mapping      config.Mapping
 	status       string
@@ -39,8 +40,9 @@ type mappingRuntime struct {
 	active   map[net.Conn]struct{}
 	connSem  chan struct{}
 
-	txBytes atomic.Uint64
-	rxBytes atomic.Uint64
+	txBytes  atomic.Uint64
+	rxBytes  atomic.Uint64
+	udpDrops atomic.Uint64
 }
 
 // trackActive records a live data-plane connection for this mapping.
@@ -91,6 +93,12 @@ func (m *mappingRuntime) close() {
 		if m.udpConn != nil {
 			_ = m.udpConn.Close()
 		}
+		m.udpMu.Lock()
+		if m.udpSession != nil {
+			_ = m.udpSession.Close()
+			m.udpSession = nil
+		}
+		m.udpMu.Unlock()
 		m.closeActive()
 		if m.data != nil {
 			m.data.dropMapping(m)
