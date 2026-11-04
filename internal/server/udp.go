@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -108,18 +109,22 @@ func (c *publicUDPConn) ReadFrom(b []byte) (int, string, error) {
 // HY2 UDP session.
 func (c *publicUDPConn) WriteTo(b []byte, addr string) (int, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
 		return 0, net.ErrClosed
 	}
 	if addr == c.virtualAddr {
 		return len(b), nil
 	}
-	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	// Reverse-tunnel metadata is the public peer's numeric IP/port, not a
+	// hostname target. Parse IPv4/IPv6 (including zones) without DNS and without
+	// holding wrapper/manager locks across an address lookup or socket write.
+	udpAddr, err := netip.ParseAddrPort(addr)
 	if err != nil {
 		return 0, err
 	}
-	n, err := c.UDPConn.WriteTo(b, udpAddr)
+	n, err := c.UDPConn.WriteToUDPAddrPort(b, udpAddr)
 	if n > 0 && c.runtime != nil {
 		c.runtime.txBytes.Add(uint64(n))
 	}
@@ -185,16 +190,21 @@ func (s *Server) attachPublicUDPConn(m *mappingRuntime, bridge transport.Datagra
 	}
 
 	m.udpMu.Lock()
+	defer m.udpMu.Unlock()
+	if m.closed.Load() {
+		return nil
+	}
 	old := m.udpSession
-	m.udpSession = c
 	if old != nil {
 		_ = old.Close()
 	}
+	if m.closed.Load() {
+		return nil
+	}
+	m.udpSession = c
 	// Clear the wake deadline set by the old session before the new session
 	// starts reading.
 	_ = m.udpConn.SetReadDeadline(time.Time{})
-	m.udpMu.Unlock()
-
 	return c
 }
 

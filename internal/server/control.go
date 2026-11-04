@@ -134,7 +134,10 @@ func (h *controlHandler) serveWithMeta(conn net.Conn, meta sessionMeta) {
 		done:            make(chan struct{}),
 	}
 	sess.setCredentialStateFor(generation, authenticatedGeneration, synced, capable)
-	results := h.server.mappings.register(sess, hello.Mappings)
+	results, err := h.server.registerControl(sess, hello, meta, deadline, generation, capable)
+	if err != nil {
+		return
+	}
 
 	// Registration races revoke and rotation sweeps: a hello that authenticated
 	// just before the credential set changed could otherwise register after the
@@ -189,6 +192,65 @@ func (h *controlHandler) serveWithMeta(conn net.Conn, meta sessionMeta) {
 		"mappings", len(hello.Mappings),
 	)
 	h.loop(sess)
+}
+
+// registerControl validates and commits admission atomically before an existing
+// owner can be replaced. Writers use settingsMu for mode/credential swaps. TryRLock
+// avoids the settings-writer -> manager lock order used by hot port updates, and
+// does not prevent revocation while this Hello waits for the manager.
+func (s *Server) registerControl(sess *clientSession, hello *control.Hello, meta sessionMeta, deadline time.Time, reported int64, capable bool) ([]control.Result, error) {
+	m := s.mappings
+	for {
+		m.mu.Lock()
+		if s.settingsMu.TryRLock() {
+			break
+		}
+		m.mu.Unlock()
+		s.settingsMu.RLock()
+		s.settingsMu.RUnlock()
+	}
+	var old *clientSession
+	commit := func() error {
+		current := s.currentCredentials()
+		authenticated, ok := current.AcceptControlToken(hello.Token)
+		if !ok || s.closed.Load() || !time.Now().Before(deadline) {
+			return transport.ErrAuthentication
+		}
+		if meta.Kind == transport.TCP {
+			if meta.Principal == nil || meta.Peer == nil || meta.Peer.Principal() != *meta.Principal || hello.ClientID != meta.Principal.ClientID || sha256.Sum256([]byte(hello.Token)) != meta.Principal.TokenDigest || !tcpPrincipalValid(*meta.Principal, current) || s.cfg == nil || !s.cfg.Mode.AllowsTCP() {
+				return transport.ErrAuthentication
+			}
+			authenticated = meta.Principal.Generation
+		}
+		if m.sessions[sess.id] == nil && len(m.sessions) >= maxControlClients {
+			return transport.ErrAuthentication
+		}
+		sess.setCredentialStateFor(reported, authenticated, current.Synced(authenticated), capable)
+		old = m.admitSessionLocked(sess, time.Now())
+		return nil
+	}
+	var err error
+	if meta.Kind == transport.TCP {
+		if meta.Peer == nil {
+			err = transport.ErrAuthentication
+		} else {
+			err = meta.Peer.WithLive(commit)
+		}
+	} else {
+		err = commit()
+	}
+	var results []control.Result
+	if err == nil {
+		// The short root guard is released before resource cleanup/binding. The
+		// manager still hides partial registration; root timeout/Close can proceed.
+		results = m.finishRegistrationLocked(sess, old, hello.Mappings, time.Now())
+	}
+	s.settingsMu.RUnlock()
+	m.mu.Unlock()
+	if err == nil {
+		m.saveState()
+	}
+	return results, err
 }
 
 // hasCapability reports whether capabilities advertises want.

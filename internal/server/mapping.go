@@ -123,23 +123,34 @@ func (m *mappingManager) register(sess *clientSession, mappings []config.Mapping
 	now := time.Now()
 
 	m.mu.Lock()
+	old := m.admitSessionLocked(sess, now)
+	results := m.finishRegistrationLocked(sess, old, mappings, now)
+	m.mu.Unlock()
+
+	m.saveState()
+	return results
+}
+
+// admitSessionLocked is the ownership commit. It performs no I/O or draining so
+// authentication/root guards can protect the exact replacement boundary.
+func (m *mappingManager) admitSessionLocked(sess *clientSession, now time.Time) *clientSession {
 	old := m.sessions[sess.id]
+	sess.online = true
+	sess.lastSeen = now
+	m.sessions[sess.id] = sess
+	return old
+}
+
+func (m *mappingManager) finishRegistrationLocked(sess, old *clientSession, mappings []config.Mapping, now time.Time) []control.Result {
 	if old != nil {
-		delete(m.sessions, sess.id)
 		m.closeSessionLocked(old)
 		if old.conn != nil {
 			old.abortStream()
 		}
 	}
 
-	sess.online = true
-	sess.lastSeen = now
-	m.sessions[sess.id] = sess
 	results := m.applyLocked(sess, mappings)
 	m.persistLocked(sess, now)
-	m.mu.Unlock()
-
-	m.saveState()
 	return results
 }
 

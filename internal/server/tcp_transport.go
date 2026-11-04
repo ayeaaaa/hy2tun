@@ -207,18 +207,22 @@ func (s *Server) serveTCPStream(ctx context.Context, peer *transport.TCPPeer, ow
 		datagrams := transport.NewDatagramConn(conn)
 		defer datagrams.Close()
 		s.mappings.mu.Lock()
-		var public *publicUDPConn
-		if s.mappings.liveTCPOwnerLocked(owner) && rt.owner == owner && !rt.closed.Load() {
-			public = s.attachPublicUDPConn(rt, datagrams)
-			if public != nil {
-				rt.trackActive(conn)
-			}
+		valid := s.mappings.liveTCPOwnerLocked(owner) && rt.owner == owner && !rt.closed.Load()
+		if valid {
+			rt.trackDatagram(datagrams)
 		}
 		s.mappings.mu.Unlock()
+		if !valid {
+			return
+		}
+		defer rt.untrackDatagram(datagrams)
+		// Serializing/draining the previous public reader belongs only to udpMu,
+		// not the shared manager. Removal can close the socket and cancel this
+		// child meanwhile; attachPublicUDPConn checks closed state before publish.
+		public := s.attachPublicUDPConn(rt, datagrams)
 		if public == nil {
 			return
 		}
-		defer rt.untrackActive(conn)
 		s.bridgeTCPUDP(rt, public, datagrams)
 	case transport.StreamTCPProxy:
 		if isVirtualHost(header.Target) {

@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 
 	"hy2tun/internal/config"
+	"hy2tun/internal/transport"
 )
 
 // mappingRuntime is the server-side state of one registered mapping. Traffic
@@ -36,9 +37,10 @@ type mappingRuntime struct {
 	udpMu      sync.Mutex
 	udpSession *publicUDPConn
 
-	activeMu sync.Mutex
-	active   map[net.Conn]struct{}
-	connSem  chan struct{}
+	activeMu        sync.Mutex
+	active          map[net.Conn]struct{}
+	activeDatagrams map[transport.DatagramConn]struct{}
+	connSem         chan struct{}
 
 	txBytes  atomic.Uint64
 	rxBytes  atomic.Uint64
@@ -65,6 +67,21 @@ func (m *mappingRuntime) untrackActive(conn net.Conn) {
 	m.activeMu.Unlock()
 }
 
+func (m *mappingRuntime) trackDatagram(conn transport.DatagramConn) {
+	m.activeMu.Lock()
+	if m.activeDatagrams == nil {
+		m.activeDatagrams = make(map[transport.DatagramConn]struct{})
+	}
+	m.activeDatagrams[conn] = struct{}{}
+	m.activeMu.Unlock()
+}
+
+func (m *mappingRuntime) untrackDatagram(conn transport.DatagramConn) {
+	m.activeMu.Lock()
+	delete(m.activeDatagrams, conn)
+	m.activeMu.Unlock()
+}
+
 // closeActive closes every live connection for this mapping. It is used when a
 // mapping is removed, disabled, or retargeted.
 func (m *mappingRuntime) closeActive() {
@@ -74,7 +91,21 @@ func (m *mappingRuntime) closeActive() {
 		conns = append(conns, conn)
 	}
 	m.active = make(map[net.Conn]struct{})
+	datagrams := make([]transport.DatagramConn, 0, len(m.activeDatagrams))
+	for conn := range m.activeDatagrams {
+		datagrams = append(datagrams, conn)
+	}
+	m.activeDatagrams = nil
 	m.activeMu.Unlock()
+	// Datagram Close can wait for a managed stream's FIN/reset. Never impose
+	// child draining on a manager-held update/remove/revoke operation.
+	if len(datagrams) > 0 {
+		go func() {
+			for _, conn := range datagrams {
+				_ = conn.Close()
+			}
+		}()
+	}
 
 	for _, conn := range conns {
 		_ = conn.Close()
@@ -92,13 +123,19 @@ func (m *mappingRuntime) close() {
 		}
 		if m.udpConn != nil {
 			_ = m.udpConn.Close()
+			// Closing the owned socket releases the public port immediately. The
+			// child reader/bridge drain, including a concurrent attachment, is
+			// completed outside the shared manager lock.
+			go func() {
+				m.udpMu.Lock()
+				public := m.udpSession
+				m.udpSession = nil
+				m.udpMu.Unlock()
+				if public != nil {
+					_ = public.Close()
+				}
+			}()
 		}
-		m.udpMu.Lock()
-		if m.udpSession != nil {
-			_ = m.udpSession.Close()
-			m.udpSession = nil
-		}
-		m.udpMu.Unlock()
 		m.closeActive()
 		if m.data != nil {
 			m.data.dropMapping(m)

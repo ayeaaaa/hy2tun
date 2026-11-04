@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -37,6 +38,9 @@ type TCPServerOptions struct {
 }
 
 type tcpSession struct {
+	// admissionMu orders server-side admission commits with root invalidation.
+	// It never protects stream I/O or a wait for an upstream operation.
+	admissionMu           sync.Mutex
 	mux                   *yamux.Session
 	ctx                   context.Context
 	cancel                context.CancelFunc
@@ -266,14 +270,47 @@ func tcpMuxConfig() *yamux.Config {
 func newTCPSession(mux *yamux.Session, read, write uint64) *tcpSession {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &tcpSession{mux: mux, ctx: ctx, cancel: cancel, slots: make(chan struct{}, maxTCPStreams), readLimit: newByteLimiter(read), writeLimit: newByteLimiter(write)}
-	go func() { <-mux.CloseChan(); cancel() }()
+	go func() {
+		<-mux.CloseChan()
+		s.admissionMu.Lock()
+		cancel()
+		s.admissionMu.Unlock()
+	}()
 	return s
 }
 
-func (s *tcpSession) Kind() Kind        { return TCP }
-func (s *tcpSession) Close() error      { s.localClosed.Store(true); s.cancel(); return s.mux.Close() }
+func (s *tcpSession) Kind() Kind { return TCP }
+func (s *tcpSession) Close() error {
+	s.admissionMu.Lock()
+	s.localClosed.Store(true)
+	s.cancel()
+	s.admissionMu.Unlock()
+	return s.mux.Close()
+}
 func (p *TCPPeer) Principal() Principal { return p.principal }
 func (p *TCPPeer) Close() error         { return p.session.Close() }
+
+// WithLive executes a short, nonblocking admission commit only if the root is
+// still live. It serializes the commit with local Close and observed remote mux
+// shutdown; Close cannot finish invalidation midway through the commit. A remote
+// shutdown already visible on the mux also prevents callback execution.
+//
+// Callers must acquire their own state/configuration locks before calling this
+// method. The callback must not call Close/WithLive on this same root, perform
+// network/file I/O, or wait for child draining. A successful commit can naturally
+// be followed by root closure; this is not a lease on subsequent business I/O.
+func (p *TCPPeer) WithLive(commit func() error) error {
+	if p == nil || p.session == nil || commit == nil {
+		return errConfig
+	}
+	s := p.session
+	s.admissionMu.Lock()
+	defer s.admissionMu.Unlock()
+	if s.localClosed.Load() || s.ctx.Err() != nil || s.mux.IsClosed() {
+		return s.connectionError(net.ErrClosed)
+	}
+	return commit()
+}
 func (s *tcpSession) Probe(ctx context.Context) (ProbeInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return ProbeInfo{}, err
