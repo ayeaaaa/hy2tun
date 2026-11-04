@@ -236,7 +236,7 @@ TransportState字段使用snake_case JSON tag；`view.ClientStatus.Transport vie
 - [ ] **Step 1: RED 测试**。`TestAutoFallsBackOnNetworkFailure`先HY2再TCP；`TestAutoDoesNotFallbackOnAuthOrTLS`安全错误没有TCP拨号。`TestRecoveryRequiresThreeSuccessesAndHold` fakeclock前2成功不切、3成功但60s前不切、满足才切。`TestProbeFailureResetsRecovery`失败计数清零。`TestRecoveryProbeStaleEpochDiscarded`轮换/mode变化后旧成功不切。`TestProbeDoesNotUseHello` probe假实现一旦OpenControl失败测试。`TestHeartbeatTimeoutClosesSession`30s无Pong结束；正确Pong续期。`TestAutomaticSwitchPreservesLatestMappings`probe期间编辑，回切Hello使用新revision/targets。
 - [ ] **Step 2: RED**：`go test ./internal/client -run 'TestAuto|TestRecovery|TestProbe|TestHeartbeat|TestAutomaticSwitch' -count=1`。
 - [ ] **Step 3: 实现选择状态机**。auto初次HY2网络失败立即TCP；活跃HY2失活先TCP；TCP失败重新尝试HY2再TCP。重试沿用1s→30s指数上限，加±20% jitter；强制模式不启动另一协议的probe。state只在控制HelloAck有效后标记ActiveTransport；首次连接不算switch，已成功传输变化才增加SwitchCount。
-- [ ] **Step 4: 实现独立probe/candidate和心跳**。TCP期间一次最多一个HY2 probe session，每轮成功/失败立即close；达到阈值后新建候选，先用probe验证，失败保持TCP。正式handoff复核`transportEpoch`/mode/credentials，并按最新cfg发送Hello，按批准边界关闭旧业务。心跳复用control.Ping/Pong TS，writer序列化，匹配已发TS；10s周期/30s超时都基于Clock。不在持有configMu时等待长期网络操作；候选HelloAck的write-back仍用现有revision防护。正式失败重新拨TCP；不重放UDP队列。
+- [ ] **Step 4: 实现独立probe/candidate和心跳**。TCP期间一次最多一个HY2 probe session，每轮成功/失败立即close；达到阈值后新建候选，先用probe验证，失败保持TCP。正式handoff复核`transportEpoch`/mode/credentials，并按最新cfg发送Hello，按批准边界关闭旧业务。心跳复用control.Ping/Pong TS，writer序列化，匹配已发TS；10s周期/30s超时都基于Clock。不在持有configMu时等待长期网络操作；候选HelloAck的write-back仍用现有revision防护。正式控制建连的可兜底网络失败重新拨TCP；安全/认证/协议拒绝不再拨TCP，显示错误。HelloAck整体OK但映射级端口/策略失败不切换传输，仅显示失败映射；不重放UDP队列。
 - [ ] **Step 5: GREEN**：`go test -race ./internal/client -count=1`通过，fakeclock测试不等待真实60秒。
 - [ ] **Step 6: Commit**：`feat(client): add automatic TCP fallback and HY2 recovery`。
 
