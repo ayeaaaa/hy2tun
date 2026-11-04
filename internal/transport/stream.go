@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fatedier/yamux"
@@ -86,21 +87,39 @@ func (s *tcpSession) OpenUDP(ctx context.Context, token string) (DatagramConn, e
 	return NewDatagramConn(c), nil
 }
 
-func (s *tcpSession) takeSlot(ctx context.Context) error {
+// A reservation covers both a pending worker and any connection/cleanup it
+// creates. The slot is returned only after both lifetimes have ended.
+type streamReservation struct {
+	session *tcpSession
+	refs    atomic.Int32
+}
+
+func (r *streamReservation) retain() { r.refs.Add(1) }
+func (r *streamReservation) release() {
+	if r.refs.Add(-1) == 0 {
+		<-r.session.slots
+	}
+}
+
+func (s *tcpSession) takeSlot(ctx context.Context, create bool) (*streamReservation, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	if s.ctx.Err() != nil || s.mux.IsClosed() {
-		return s.connectionError(net.ErrClosed)
+		return nil, s.connectionError(net.ErrClosed)
 	}
-	if s.mux.NumStreams() >= maxTCPStreams {
-		return ErrQueueFull
+	// Outbound creation adds a mux stream. Inbound acceptance only claims a
+	// stream already counted by yamux (including its bounded accept backlog).
+	if create && s.mux.NumStreams() >= maxTCPStreams {
+		return nil, ErrQueueFull
 	}
 	select {
 	case s.slots <- struct{}{}:
-		return nil
+		r := &streamReservation{session: s}
+		r.refs.Store(1)
+		return r, nil
 	default:
-		return ErrQueueFull
+		return nil, ErrQueueFull
 	}
 }
 
@@ -116,7 +135,8 @@ func (s *tcpSession) openStream(ctx context.Context, h StreamHeader) (net.Conn, 
 	}
 	opctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
-	if err := s.takeSlot(opctx); err != nil {
+	slot, err := s.takeSlot(opctx, true)
+	if err != nil {
 		return nil, err
 	}
 	type result struct {
@@ -125,12 +145,11 @@ func (s *tcpSession) openStream(ctx context.Context, h StreamHeader) (net.Conn, 
 	}
 	results := make(chan result)
 	go func() {
+		defer slot.release()
 		raw, err := s.mux.OpenStream()
-		if err != nil {
-			<-s.slots
-		} else {
-			c := s.manage(raw, h.Kind)
-			stop := context.AfterFunc(opctx, func() { _ = c.abort() })
+		if err == nil {
+			c := s.manage(raw, h.Kind, slot)
+			stop := context.AfterFunc(opctx, c.cancel)
 			deadline, _ := opctx.Deadline()
 			_ = raw.SetDeadline(deadline)
 			err = writeJSONFrame(raw, h, streamFrameLimit)
@@ -160,7 +179,7 @@ func (s *tcpSession) openStream(ctx context.Context, h StreamHeader) (net.Conn, 
 				_ = raw.SetDeadline(time.Time{})
 			}
 			if err != nil {
-				_ = c.abort()
+				c.cancel()
 			} else {
 				select {
 				case results <- result{c: c}:
@@ -168,7 +187,7 @@ func (s *tcpSession) openStream(ctx context.Context, h StreamHeader) (net.Conn, 
 				case <-opctx.Done():
 				case <-s.ctx.Done():
 				}
-				_ = c.abort()
+				c.cancel()
 				return
 			}
 		}
@@ -186,13 +205,13 @@ func (s *tcpSession) openStream(ctx context.Context, h StreamHeader) (net.Conn, 
 	case r := <-results:
 		if err := opctx.Err(); err != nil {
 			if r.c != nil {
-				_ = r.c.abort()
+				r.c.cancel()
 			}
 			return nil, err
 		}
 		if s.ctx.Err() != nil {
 			if r.c != nil {
-				_ = r.c.abort()
+				r.c.cancel()
 			}
 			if r.err != nil {
 				return nil, s.connectionError(r.err)
@@ -205,17 +224,66 @@ func (s *tcpSession) openStream(ctx context.Context, h StreamHeader) (net.Conn, 
 
 func (p *TCPPeer) Accept(ctx context.Context) (StreamHeader, net.Conn, error) {
 	s := p.session
-	if err := s.takeSlot(ctx); err != nil {
+	slot, err := s.takeSlot(ctx, false)
+	if err != nil {
 		return StreamHeader{}, nil, err
 	}
+	type result struct {
+		h   StreamHeader
+		c   *managedConn
+		err error
+	}
+	results := make(chan result)
+	go func() {
+		defer slot.release()
+		h, c, err := s.acceptStream(ctx, slot)
+		select {
+		case results <- result{h: h, c: c, err: err}:
+			return
+		case <-ctx.Done():
+		case <-s.ctx.Done():
+		}
+		if c != nil {
+			c.cancel()
+		}
+	}()
+	select {
+	case <-ctx.Done():
+		return StreamHeader{}, nil, ctx.Err()
+	case <-s.ctx.Done():
+		return StreamHeader{}, nil, s.connectionError(net.ErrClosed)
+	case r := <-results:
+		if err := ctx.Err(); err != nil {
+			if r.c != nil {
+				r.c.cancel()
+			}
+			return StreamHeader{}, nil, err
+		}
+		if s.ctx.Err() != nil {
+			if r.c != nil {
+				r.c.cancel()
+			}
+			if r.err != nil {
+				return StreamHeader{}, nil, s.connectionError(r.err)
+			}
+			return StreamHeader{}, nil, s.connectionError(net.ErrClosed)
+		}
+		return r.h, r.c, s.connectionError(r.err)
+	}
+}
+
+// The caller's cancellation wait is outside the worker because even yamux's
+// context-aware accept can block writing its committed mux ACK. The reservation
+// remains held until that worker and any child reset/close finish.
+func (s *tcpSession) acceptStream(ctx context.Context, slot *streamReservation) (StreamHeader, *managedConn, error) {
 	raw, err := s.mux.AcceptStreamWithContext(ctx)
 	if err != nil {
-		<-s.slots
 		return StreamHeader{}, nil, contextError(ctx, s.connectionError(err))
 	}
+	c := s.manage(raw, StreamControl, slot)
 	opctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
-	stop := context.AfterFunc(opctx, func() { _ = raw.Reset() })
+	stop := context.AfterFunc(opctx, c.cancel)
 	deadline, _ := opctx.Deadline()
 	_ = raw.SetDeadline(deadline)
 	var h StreamHeader
@@ -224,22 +292,29 @@ func (p *TCPPeer) Accept(ctx context.Context) (StreamHeader, net.Conn, error) {
 		err = ErrProtocol
 	}
 	if err != nil {
+		if opctx.Err() != nil {
+			stop()
+			c.cancel()
+			return StreamHeader{}, nil, opctx.Err()
+		}
 		if errors.Is(err, ErrProtocol) {
 			_ = WriteStreamAck(raw, ErrProtocol)
 		}
 		stop()
-		_ = raw.Close()
-		<-s.slots
+		_ = c.Close()
 		return StreamHeader{}, nil, contextError(opctx, err)
 	}
 	if !stop() || opctx.Err() != nil {
-		_ = raw.Reset()
-		<-s.slots
+		c.cancel()
 		return StreamHeader{}, nil, contextError(opctx, net.ErrClosed)
 	}
 	_ = raw.SetReadDeadline(time.Time{})
+	if h.Kind != StreamControl {
+		c.readLimit = s.readLimit
+		c.writeLimit = s.writeLimit
+	}
 	// Keep the write deadline until the upper layer sends its application ack.
-	return h, s.manage(raw, h.Kind), nil
+	return h, c, nil
 }
 
 type managedConn struct {
@@ -252,11 +327,15 @@ type managedConn struct {
 	closeErr                    error
 	release                     func()
 	readDeadline, writeDeadline deadlineState
+	readMu                      sync.Mutex
+	readBuffer, readPending     []byte
+	readPendingErr              error
 }
 
-func (s *tcpSession) manage(raw *yamux.Stream, kind uint8) *managedConn {
+func (s *tcpSession) manage(raw *yamux.Stream, kind uint8, slot *streamReservation) *managedConn {
+	slot.retain()
 	ctx, cancel := context.WithCancel(s.ctx)
-	c := &managedConn{Conn: raw, session: s, ctx: ctx, cancel: cancel, release: func() { <-s.slots }}
+	c := &managedConn{Conn: raw, session: s, ctx: ctx, cancel: cancel, release: slot.release}
 	if kind != StreamControl {
 		c.readLimit = s.readLimit
 		c.writeLimit = s.writeLimit
@@ -268,9 +347,6 @@ func (s *tcpSession) manage(raw *yamux.Stream, kind uint8) *managedConn {
 func (c *managedConn) shutdown(reset bool) error {
 	c.closeOnce.Do(func() {
 		c.cancel()
-		if c.release != nil {
-			c.release()
-		}
 		if reset {
 			c.closeErr = c.Conn.(*yamux.Stream).Reset()
 		} else {
@@ -278,6 +354,9 @@ func (c *managedConn) shutdown(reset bool) error {
 			// like net.Conn.Close rather than yamux's half-close semantics.
 			_ = c.Conn.SetReadDeadline(time.Now())
 			c.closeErr = c.Conn.Close()
+		}
+		if c.release != nil {
+			c.release()
 		}
 	})
 	return c.closeErr
@@ -289,18 +368,40 @@ func (c *managedConn) Read(p []byte) (int, error) {
 	if c.ctx.Err() != nil {
 		return 0, c.session.connectionError(net.ErrClosed)
 	}
-	if c.readLimit == nil {
+	if c.readLimit == nil || c.readLimit.limiter == nil {
 		n, err := c.Conn.Read(p)
 		return n, c.session.connectionError(err)
 	}
-	if len(p) > rateChunk {
-		p = p[:rateChunk]
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+	if c.ctx.Err() != nil {
+		return 0, c.session.connectionError(net.ErrClosed)
 	}
-	n, err := c.Conn.Read(p)
-	if n > 0 {
-		if e := c.readLimit.waitDeadline(c.ctx, n, &c.readDeadline); e != nil {
-			return 0, c.session.connectionError(e)
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if len(c.readPending) == 0 {
+		if c.readBuffer == nil {
+			c.readBuffer = make([]byte, rateChunk)
 		}
+		n, err := c.Conn.Read(c.readBuffer[:min(len(p), rateChunk)])
+		if n == 0 {
+			return 0, c.session.connectionError(err)
+		}
+		c.readPending, c.readPendingErr = c.readBuffer[:n], err
+	}
+	// Keep unreported read-ahead private and bounded. A failed rate wait must
+	// neither expose these bytes nor let a retry skip them or read newer data.
+	n := min(len(p), len(c.readPending))
+	if err := c.readLimit.waitDeadline(c.ctx, n, &c.readDeadline); err != nil {
+		return 0, c.session.connectionError(err)
+	}
+	copy(p, c.readPending[:n])
+	c.readPending = c.readPending[n:]
+	var err error
+	if len(c.readPending) == 0 {
+		err = c.readPendingErr
+		c.readPendingErr = nil
 	}
 	return n, c.session.connectionError(err)
 }
