@@ -31,101 +31,71 @@ func (c *Client) dialSession(ctx context.Context, kind transport.Kind, cfg *conf
 		case <-stop:
 		}
 	}()
-	opts := transport.DialOptions{
-		Auth: cfg.Auth, ControlToken: cfg.Control.Token, ClientID: cfg.Client.ID,
-		Up: uint64(cfg.Bandwidth.Up), Down: uint64(cfg.Bandwidth.Down),
-	}
-	if c.runtime.Dial == nil {
-		switch kind {
-		case transport.TCP:
-			addr, err := cfg.TCPServerAddress()
-			if err != nil {
-				return nil, err
-			}
-			tls, err := transport.ClientTLS(cfg.TLS, addr)
-			if err != nil {
-				return nil, err
-			}
-			opts.TCPAddress, opts.TLS = addr, tls
-		case transport.HY2:
-			addr, err := resolveServerAddrContext(dialCtx, cfg)
-			if err != nil {
-				return nil, err
-			}
-			tls, err := buildTLSConfig(cfg)
-			if err != nil {
-				return nil, err
-			}
-			factory, err := buildConnFactory(cfg, addr)
-			if err != nil {
-				return nil, err
-			}
-			opts.HY2 = &hyclient.Config{
-				ServerAddr: addr, Auth: cfg.Auth, TLSConfig: tls, ConnFactory: factory,
-				BandwidthConfig: hyclient.BandwidthConfig{MaxTx: opts.Up, MaxRx: opts.Down},
-			}
-		default:
-			return nil, transport.ErrProtocol
+	value, err := c.setupOperation(dialCtx, kind, "dial", func(dialCtx context.Context) (any, <-chan struct{}, error) {
+		opts := transport.DialOptions{
+			Auth: cfg.Auth, ControlToken: cfg.Control.Token, ClientID: cfg.Client.ID,
+			Up: uint64(cfg.Bandwidth.Up), Down: uint64(cfg.Bandwidth.Down),
 		}
-	}
-	dial := c.newSession
-	if c.runtime.Dial != nil {
-		dial = func(ctx context.Context, kind transport.Kind, _ transport.DialOptions) (transport.Session, error) {
-			return c.runtime.Dial(ctx, kind, cloneClientConfig(cfg))
-		}
-	}
-	if dial == nil {
-		dial = func(ctx context.Context, kind transport.Kind, opts transport.DialOptions) (transport.Session, error) {
-			if kind == transport.TCP {
-				return transport.DialTCP(ctx, opts)
-			}
-			return transport.DialHY2(ctx, opts, c.newHY2)
-		}
-	}
-	// Close/cancellation owns even a late result from an injected dialer.
-	type result struct {
-		session transport.Session
-		err     error
-	}
-	results := make(chan result)
-	go func() {
-		s, err := dial(dialCtx, kind, opts)
-		if err == nil && s == nil {
-			err = transport.ErrProtocol
-		}
-		if err == nil {
-			err = dialCtx.Err()
-		}
-		if err != nil && s != nil {
-			_ = s.Close()
-			s = nil
-		}
-		select {
-		case results <- result{s, err}:
-		case <-dialCtx.Done():
-			if s != nil {
-				_ = s.Close()
+		if c.runtime.Dial == nil && c.runtime.DialWithCompletion == nil {
+			switch kind {
+			case transport.TCP:
+				addr, err := cfg.TCPServerAddress()
+				if err != nil {
+					return nil, nil, err
+				}
+				tls, err := transport.ClientTLS(cfg.TLS, addr)
+				if err != nil {
+					return nil, nil, err
+				}
+				opts.TCPAddress, opts.TLS = addr, tls
+			case transport.HY2:
+				addr, err := resolveServerAddrContext(dialCtx, cfg)
+				if err != nil {
+					return nil, nil, err
+				}
+				tls, err := buildTLSConfig(cfg)
+				if err != nil {
+					return nil, nil, err
+				}
+				factory, err := buildConnFactory(cfg, addr)
+				if err != nil {
+					return nil, nil, err
+				}
+				opts.HY2 = &hyclient.Config{
+					ServerAddr: addr, Auth: cfg.Auth, TLSConfig: tls, ConnFactory: factory,
+					BandwidthConfig: hyclient.BandwidthConfig{MaxTx: opts.Up, MaxRx: opts.Down},
+				}
+			default:
+				return nil, nil, transport.ErrProtocol
 			}
 		}
-	}()
-	select {
-	case <-dialCtx.Done():
+		if c.runtime.DialWithCompletion != nil {
+			return c.runtime.DialWithCompletion(dialCtx, kind, cloneClientConfig(cfg))
+		}
+		if c.runtime.Dial != nil {
+			s, err := c.runtime.Dial(dialCtx, kind, cloneClientConfig(cfg))
+			return s, nil, err
+		}
+		if c.newSessionWithCompletion != nil {
+			return c.newSessionWithCompletion(dialCtx, kind, opts)
+		}
+		if c.newSession != nil {
+			s, err := c.newSession(dialCtx, kind, opts)
+			return s, nil, err
+		}
+		if kind == transport.TCP {
+			s, err := transport.DialTCP(dialCtx, opts)
+			return s, nil, err
+		}
+		return transport.DialHY2WithCompletion(dialCtx, opts, c.newHY2)
+	}, func(value any) { _ = value.(transport.Session).Close() })
+	if err != nil {
 		if c.isClosed() {
-			return nil, errClientClosed
+			return nil, errors.Join(err, errClientClosed)
 		}
-		return nil, dialCtx.Err()
-	case res := <-results:
-		if dialCtx.Err() != nil || c.isClosed() {
-			if res.session != nil {
-				_ = res.session.Close()
-			}
-			if c.isClosed() {
-				return nil, errors.Join(res.err, errClientClosed)
-			}
-			return nil, errors.Join(res.err, dialCtx.Err())
-		}
-		return res.session, res.err
+		return nil, err
 	}
+	return value.(transport.Session), nil
 }
 
 // runSession owns an already-dialed session through control/UDP teardown. The
@@ -164,7 +134,7 @@ func (c *Client) runSessionWithSetup(ctx, setupCtx context.Context, session tran
 		case <-stopOpen:
 		}
 	}()
-	opened, err := session.OpenControl(openCtx)
+	opened, err := c.openControlSetup(openCtx, session)
 	close(stopOpen)
 	cancelOpen()
 	conn = opened
@@ -223,7 +193,7 @@ func (c *Client) runSessionWithSetup(ctx, setupCtx context.Context, session tran
 		}
 	})
 	defer stopSetup()
-	err = c.handshakeWithAcceptance(setupCtx, conn, func() error {
+	cfg, ack, err := c.handshakeWire(setupCtx, conn, func() error {
 		admissionMu.Lock()
 		defer admissionMu.Unlock()
 		if err := setupContextError(setupCtx); err != nil {
@@ -253,12 +223,17 @@ func (c *Client) runSessionWithSetup(ctx, setupCtx context.Context, session tran
 		}
 		return false, errors.Join(err, setupCtx.Err())
 	}
+	inbox := c.startControlReader(ctx, conn, closeBoth)
+	defer inbox.stop()
+	if err := c.completeHelloAck(cfg, ack); err != nil {
+		return true, err
+	}
 	if current, _, _ := c.sessionFor(conn); current != session {
 		return false, net.ErrClosed
 	}
 	c.markReady()
 	c.startUDPMappings()
-	candidate, err := c.serveEstablished(ctx, session, conn)
+	candidate, err := c.serveEstablished(ctx, session, conn, inbox)
 	if candidate != nil {
 		if run, ok := ctx.Value(sessionRunKey{}).(*sessionRun); ok {
 			run.candidate = candidate

@@ -3,7 +3,9 @@ package client
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"net"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -95,7 +97,7 @@ func TestHeartbeatLatePongIgnored(t *testing.T) {
 	})
 }
 
-func TestHeartbeatNoFallbackInForcedMode(t *testing.T) {
+func TestForcedModeDialTimeoutDoesNotFallback(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cfg := validTestClientConfig()
 		cfg.Mode = config.ModeTCP
@@ -190,4 +192,100 @@ func TestHeartbeatTimeoutWhilePingWriteBlocked(t *testing.T) {
 			t.Fatal("blocked Ping writer disabled the 30-second heartbeat timeout")
 		}
 	})
+}
+
+func TestHeartbeatMatchingPongCannotRenewAtOrAfterCutoff(t *testing.T) {
+	for _, arrival := range []time.Duration{30*time.Second - time.Nanosecond, 30 * time.Second, 31 * time.Second} {
+		t.Run(arrival.String(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				cl, clock, _, peer, _ := heartbeatFixture(t)
+				clock.advance(10 * time.Second)
+				ping := readHeartbeat(t, peer)
+				synctest.Wait()
+				cl.mu.Lock()
+				h := cl.heartbeat
+				before, owner := h.lastResponse, cl.controlConn
+				cl.mu.Unlock()
+				// Advance Now only: response admission wins scheduling before expiry.
+				clock.mu.Lock()
+				clock.now = before.Add(arrival)
+				clock.mu.Unlock()
+				cl.handlePong(owner, ping.TS)
+				cl.mu.Lock()
+				after := h.lastResponse
+				cl.mu.Unlock()
+				if arrival < 30*time.Second {
+					require.Equal(t, before.Add(arrival), after)
+				} else {
+					require.Equal(t, before, after, "a matching response cannot revive an expired owner")
+				}
+			})
+		})
+	}
+}
+
+type countedProbeSession struct {
+	*sessionStub
+	probes *atomic.Int32
+}
+
+func (s *countedProbeSession) Probe(context.Context) (transport.ProbeInfo, error) {
+	s.probes.Add(1)
+	return transport.ProbeInfo{}, nil
+}
+
+func TestHeartbeatForcedOwnersNeverUseAlternateTransportOrProbe(t *testing.T) {
+	for _, kind := range []transport.Kind{transport.HY2, transport.TCP} {
+		t.Run(string(kind), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				clock := newPolicyClock()
+				cfg := validTestClientConfig()
+				cfg.Mode = config.TransportMode(kind)
+				conn, peer := net.Pipe()
+				s := newSessionStub(kind)
+				s.control = conn
+				var probes atomic.Int32
+				var kinds []transport.Kind
+				cl, err := NewWithRuntime(cfg, nil, RuntimeOptions{Clock: clock, Jitter: func(d time.Duration) time.Duration { return d }, Dial: func(_ context.Context, k transport.Kind, _ *config.ClientConfig) (transport.Session, error) {
+					kinds = append(kinds, k)
+					if len(kinds) > 1 {
+						return nil, errors.New("stop forced retry")
+					}
+					return &countedProbeSession{s, &probes}, nil
+				}})
+				require.NoError(t, err)
+				done := make(chan error, 1)
+				peerDone := make(chan struct{})
+				go func() {
+					defer close(peerDone)
+					defer peer.Close()
+					if _, err := control.ReadMessage(peer); err != nil {
+						return
+					}
+					if control.WriteMessage(peer, &control.HelloAck{Type: control.TypeHelloAck, OK: true}) != nil {
+						return
+					}
+					for {
+						if _, err := control.ReadMessage(peer); err != nil {
+							return
+						}
+					}
+				}()
+				go func() { done <- cl.Start(context.Background()) }()
+				synctest.Wait()
+				defer func() { cl.Close(); peer.Close(); <-done; <-peerDone; synctest.Wait() }()
+				for range 3 {
+					clock.advance(10 * time.Second)
+				}
+				clock.advance(time.Second)
+				require.Equal(t, []transport.Kind{kind, kind}, kinds)
+				require.Zero(t, probes.Load())
+				select {
+				case <-s.closed:
+				default:
+					t.Fatal("forced owner did not expire without Pong")
+				}
+			})
+		})
+	}
 }

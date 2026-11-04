@@ -55,14 +55,15 @@ type Client struct {
 
 	// Startup validation/diagnostics only; dialSession rebuilds from the latest
 	// snapshot rather than reusing these prepared HY2 values.
-	serverAddr  net.Addr
-	tlsConfig   hyclient.TLSConfig
-	connFactory hyclient.ConnFactory
-	newHY2      func(*hyclient.Config) (hyclient.Client, *hyclient.HandshakeInfo, error)
-	newSession  func(context.Context, transport.Kind, transport.DialOptions) (transport.Session, error)
-	dialLocal   func(context.Context, string, string) (net.Conn, error)
-	startedAt   time.Time
-	runtime     RuntimeOptions
+	serverAddr               net.Addr
+	tlsConfig                hyclient.TLSConfig
+	connFactory              hyclient.ConnFactory
+	newHY2                   func(*hyclient.Config) (hyclient.Client, *hyclient.HandshakeInfo, error)
+	newSession               func(context.Context, transport.Kind, transport.DialOptions) (transport.Session, error)
+	newSessionWithCompletion func(context.Context, transport.Kind, transport.DialOptions) (transport.Session, <-chan struct{}, error)
+	dialLocal                func(context.Context, string, string) (net.Conn, error)
+	startedAt                time.Time
+	runtime                  RuntimeOptions
 
 	mu            sync.Mutex
 	session       transport.Session
@@ -70,17 +71,19 @@ type Client struct {
 	sessionCancel context.CancelFunc
 	// Retained until a native HY2 data open AND late-child cleanup finish.
 	// Request cancellation returns promptly without releasing this reservation.
-	hy2DataOpenSlots chan struct{}
-	controlConn      net.Conn
-	connected        bool
-	transportEpoch   uint64
-	transportWork    *transportAttempt
-	transportChanged chan struct{}
-	transportState   view.TransportState
-	lastTransport    string
-	activeSince      time.Time
-	heartbeat        *heartbeat
-	heartbeatTS      int64
+	hy2DataOpenSlots        chan struct{}
+	controlConn             net.Conn
+	connected               bool
+	transportEpoch          uint64
+	fallbackNetworkEligible bool
+	transportWork           *transportAttempt
+	setupSlots              map[setupOperation]chan struct{}
+	transportChanged        chan struct{}
+	transportState          view.TransportState
+	lastTransport           string
+	activeSince             time.Time
+	heartbeat               *heartbeat
+	heartbeatTS             int64
 	// credentialsGeneration mirrors cfg.Credentials.Generation. The server
 	// fields are the last HelloAck values; 0/false mean the server predates
 	// credential rotation, so the generation is unknown rather than 1.

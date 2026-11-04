@@ -32,8 +32,18 @@ func (c *Client) handlePong(owner net.Conn, ts int64) {
 	if h == nil || c.controlConn != owner || h.owner != owner || !c.connected || !h.pending || ts != h.lastTS {
 		return
 	}
+	now := c.runtime.Clock.Now()
+	if !now.Before(h.lastResponse.Add(c.runtime.Policy.HeartbeatTimeout)) {
+		// Response admission and timeout use the same cutoff under mu. Wake
+		// the timer owner without allowing delayed scheduling to revive it.
+		select {
+		case h.wake <- struct{}{}:
+		default:
+		}
+		return
+	}
 	h.pending = false
-	h.lastResponse = c.runtime.Clock.Now()
+	h.lastResponse = now
 	select {
 	case h.wake <- struct{}{}:
 	default:

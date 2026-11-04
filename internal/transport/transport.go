@@ -68,6 +68,21 @@ type CompletionSession interface {
 	OpenUDPWithCompletion(context.Context, string) (DatagramConn, <-chan struct{}, error)
 }
 
+// ProbeCompletionSession reports completion of the native probe exchange and
+// all late/abandoned child cleanup, independently of prompt cancellation/Close.
+// Every receipt is non-nil. Asynchronous decorators must forward the receipt.
+type ProbeCompletionSession interface {
+	Session
+	ProbeWithCompletion(context.Context) (ProbeInfo, <-chan struct{}, error)
+}
+
+// ControlCompletionSession provides the same native-work receipt for setup's
+// control open. Successful completion does not wait for the live control stream.
+type ControlCompletionSession interface {
+	Session
+	OpenControlWithCompletion(context.Context) (net.Conn, <-chan struct{}, error)
+}
+
 type DialOptions struct {
 	// HY2 contains the existing, complete Hysteria configuration. DialHY2
 	// copies it before wrapping its packet factory; it does not mutate it.

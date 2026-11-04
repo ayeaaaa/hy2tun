@@ -33,11 +33,19 @@ func WrapHY2(client hyclient.Client, controlToken string) Session {
 // are tracked before the factory returns, so cancellation can abort handshake
 // I/O immediately. An unbuffered handoff closes any late, undelivered client.
 func DialHY2(ctx context.Context, opts DialOptions, factory HY2Factory) (Session, error) {
+	session, _, err := DialHY2WithCompletion(ctx, opts, factory)
+	return session, err
+}
+
+// DialHY2WithCompletion retains actual factory/late-root cleanup completion.
+// Cancellation closes tracked sockets promptly, but is not a drain guarantee.
+// A success receipt covers native handoff, not the delivered root's lifetime.
+func DialHY2WithCompletion(ctx context.Context, opts DialOptions, factory HY2Factory) (Session, <-chan struct{}, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, completedOpen(), err
 	}
 	if opts.HY2 == nil {
-		return nil, &Error{Code: errConfig.Code, Cause: errors.New("HY2 configuration is required")}
+		return nil, completedOpen(), &Error{Code: errConfig.Code, Cause: errors.New("HY2 configuration is required")}
 	}
 	if factory == nil {
 		factory = hyclient.NewClient
@@ -50,7 +58,10 @@ func DialHY2(ctx context.Context, opts DialOptions, factory HY2Factory) (Session
 		err     error
 	}
 	results := make(chan result)
+	completion := make(chan struct{})
+	admitted := make(chan bool, 1)
 	go func() {
+		defer close(completion)
 		client, _, err := factory(&cfg)
 		session := WrapHY2(client, opts.ControlToken).(*hy2Session)
 		session.packets = packets
@@ -62,26 +73,33 @@ func DialHY2(ctx context.Context, opts DialOptions, factory HY2Factory) (Session
 		}
 		if err != nil {
 			_ = session.Close()
+			session = nil
 		}
 		select {
 		case results <- result{session: session, err: err}:
+			if !<-admitted && session != nil {
+				_ = session.Close()
+			}
 		case <-ctx.Done():
-			_ = session.Close()
+			if session != nil {
+				_ = session.Close()
+			}
 		}
 	}()
 	select {
 	case <-ctx.Done():
 		_ = packets.Close()
-		return nil, ctx.Err()
+		return nil, completion, ctx.Err()
 	case result := <-results:
 		if err := ctx.Err(); err != nil {
-			_ = result.session.Close()
-			return nil, err
+			admitted <- false
+			return nil, completion, errors.Join(result.err, err)
 		}
+		admitted <- true
 		if result.err != nil {
-			return nil, result.err
+			return nil, completion, result.err
 		}
-		return result.session, nil
+		return result.session, completion, nil
 	}
 }
 
@@ -89,6 +107,10 @@ func (s *hy2Session) Kind() Kind { return HY2 }
 
 func (s *hy2Session) OpenControl(ctx context.Context) (net.Conn, error) {
 	return s.openTCP(ctx, "_hy2tun_control_:0")
+}
+
+func (s *hy2Session) OpenControlWithCompletion(ctx context.Context) (net.Conn, <-chan struct{}, error) {
+	return s.openTCPWithCompletion(ctx, "_hy2tun_control_:0")
 }
 
 func (s *hy2Session) OpenTCP(ctx context.Context, req TCPRequest) (net.Conn, error) {
@@ -152,11 +174,16 @@ func (s *hy2Session) OpenUDPWithCompletion(ctx context.Context, token string) (D
 }
 
 func (s *hy2Session) Probe(ctx context.Context) (ProbeInfo, error) {
+	info, _, err := s.ProbeWithCompletion(ctx)
+	return info, err
+}
+
+func (s *hy2Session) ProbeWithCompletion(ctx context.Context) (ProbeInfo, <-chan struct{}, error) {
 	if err := s.operationErr(ctx); err != nil {
-		return ProbeInfo{}, err
+		return ProbeInfo{}, completedOpen(), err
 	}
 	if s.controlToken == "" || len(s.controlToken) > greetingLimit {
-		return ProbeInfo{}, ErrProtocol
+		return ProbeInfo{}, completedOpen(), ErrProtocol
 	}
 	pctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
@@ -164,7 +191,7 @@ func (s *hy2Session) Probe(ctx context.Context) (ProbeInfo, error) {
 	// The complete exchange remains owned until handoff. A session Close also
 	// cancels a child already returned by TCP(), even if upstream root Close
 	// does not propagate to it. This virtual channel never sends Hello.
-	_, err := s.open(pctx, func() (io.Closer, error) {
+	_, completion, err := s.openWithCompletion(pctx, func() (io.Closer, error) {
 		conn, err := s.client.TCP("_hy2tun_probe_:0")
 		if err != nil {
 			return conn, err
@@ -211,9 +238,9 @@ func (s *hy2Session) Probe(ctx context.Context) (ProbeInfo, error) {
 		return conn, nil
 	})
 	if err != nil {
-		return ProbeInfo{}, err
+		return ProbeInfo{}, completion, err
 	}
-	return info, nil
+	return info, completion, nil
 }
 
 func (s *hy2Session) Close() error {

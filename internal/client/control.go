@@ -42,6 +42,16 @@ func (c *Client) handshakeContext(ctx context.Context, conn net.Conn) error {
 // accept ends setup ownership at the validated on-time wire Ack, before local
 // config persistence or follow-up Update. It does not own session lifetime.
 func (c *Client) handshakeWithAcceptance(ctx context.Context, conn net.Conn, accept func() error) error {
+	cfg, ack, err := c.handshakeWire(ctx, conn, accept)
+	if err != nil {
+		return err
+	}
+	return c.completeHelloAck(cfg, ack)
+}
+
+// handshakeWire is the sole setup reader. It transfers reading ownership at
+// wire acceptance, before any local persistence or synchronous handler work.
+func (c *Client) handshakeWire(ctx context.Context, conn net.Conn, accept func() error) (*config.ClientConfig, *control.HelloAck, error) {
 	deadline, _ := ctx.Deadline()
 	_ = conn.SetDeadline(deadline)
 	defer func() { _ = conn.SetDeadline(time.Time{}) }()
@@ -57,7 +67,7 @@ func (c *Client) handshakeWithAcceptance(ctx context.Context, conn net.Conn, acc
 	if a, ok := ctx.Value(attemptKey{}).(*transportAttempt); ok {
 		valid := a.epoch == epoch && sameTransportConfig(a.cfg, cfg)
 		if !valid {
-			return errStaleTransport
+			return nil, nil, errStaleTransport
 		}
 	}
 	generation := cfg.Credentials.Generation
@@ -65,7 +75,7 @@ func (c *Client) handshakeWithAcceptance(ctx context.Context, conn net.Conn, acc
 		generation = 1
 	}
 	if expected, ok := ctx.Value(generationKey{}).(int64); ok && expected != generation {
-		return errStaleTransport
+		return nil, nil, errStaleTransport
 	}
 	hello := &control.Hello{
 		Type:                 control.TypeHello,
@@ -83,22 +93,22 @@ func (c *Client) handshakeWithAcceptance(ctx context.Context, conn net.Conn, acc
 	err := control.WriteMessage(conn, hello)
 	c.writeMu.Unlock()
 	if err != nil {
-		return fmt.Errorf("send control hello: %w", classifyControlError(err))
+		return nil, nil, fmt.Errorf("send control hello: %w", classifyControlError(err))
 	}
 
 	msg, err := control.ReadMessage(conn)
 	if err != nil {
-		return fmt.Errorf("read control hello ack: %w", classifyControlError(err))
+		return nil, nil, fmt.Errorf("read control hello ack: %w", classifyControlError(err))
 	}
 	ack, ok := msg.(*control.HelloAck)
 	if !ok {
-		return fmt.Errorf("%w: unexpected control response %T", transport.ErrProtocol, msg)
+		return nil, nil, fmt.Errorf("%w: unexpected control response %T", transport.ErrProtocol, msg)
 	}
 	if !ack.OK {
 		if ack.Error == string(control.CodeUnauthorized) {
-			return transport.ErrAuthentication
+			return nil, nil, transport.ErrAuthentication
 		}
-		return transport.ErrProtocol
+		return nil, nil, transport.ErrProtocol
 	}
 
 	// Mark the handshake complete before applying the ack. Local edits that
@@ -107,25 +117,29 @@ func (c *Client) handshakeWithAcceptance(ctx context.Context, conn net.Conn, acc
 	c.mu.Lock()
 	if c.isClosed() || c.controlConn != conn {
 		c.mu.Unlock()
-		return net.ErrClosed
+		return nil, nil, net.ErrClosed
 	}
 	if epoch != c.transportEpoch {
 		c.mu.Unlock()
-		return errStaleTransport
+		return nil, nil, errStaleTransport
 	}
 	if a, ok := ctx.Value(attemptKey{}).(*transportAttempt); ok && a.epoch != c.transportEpoch {
 		c.mu.Unlock()
-		return errStaleTransport
+		return nil, nil, errStaleTransport
 	}
 	if err := accept(); err != nil {
 		c.mu.Unlock()
-		return err
+		return nil, nil, err
 	}
 	// The wire handshake has been admitted. Local write-back/follow-up traffic
 	// must not inherit the temporary setup deadline, even while apply blocks.
 	_ = conn.SetDeadline(time.Time{})
 	c.connected = true
 	c.mu.Unlock()
+	return cfg, ack, nil
+}
+
+func (c *Client) completeHelloAck(cfg *config.ClientConfig, ack *control.HelloAck) error {
 	if err := c.applyHelloAck(cfg, ack); err != nil {
 		return err
 	}
@@ -216,37 +230,37 @@ func (c *Client) recordServerCredentials(ack *control.HelloAck) {
 // sessions are started separately after the handshake and closed when this
 // stream ends.
 func (c *Client) serveControl(conn net.Conn) error {
-	for {
-		msg, err := control.ReadMessage(conn)
-		if err != nil {
-			return classifyControlError(err)
-		}
+	inbox := c.startControlReader(context.Background(), conn, func() { _ = conn.Close() })
+	defer inbox.stop()
+	return c.serveControlInbox(conn, inbox)
+}
 
-		switch message := msg.(type) {
-		case *control.Open:
-			c.log.Debug("received control open", "mapping", message.MappingID)
-			go c.handleOpen(conn, message)
-		case *control.Push:
-			c.handlePush(conn, message)
-		case *control.UpdateAck:
-			c.handleUpdateAck(message)
-		case *control.CredentialUpdate:
-			c.handleCredentialUpdate(conn, message)
-		case *control.Ping:
-			if err := c.writeControl(conn, &control.Pong{
-				Type: control.TypePong,
-				TS:   message.TS,
-			}); err != nil {
-				return err
-			}
-		case *control.Pong:
-			c.handlePong(conn, message.TS)
-		case *control.PushAck, *control.OpenResult, *control.HelloAck:
-			// No action is required for these messages.
-		default:
-			return transport.ErrProtocol
+func (c *Client) dispatchControl(conn net.Conn, msg any) error {
+	switch message := msg.(type) {
+	case *control.Open:
+		c.log.Debug("received control open", "mapping", message.MappingID)
+		go c.handleOpen(conn, message)
+	case *control.Push:
+		c.handlePush(conn, message)
+	case *control.UpdateAck:
+		c.handleUpdateAck(message)
+	case *control.CredentialUpdate:
+		c.handleCredentialUpdate(conn, message)
+	case *control.Ping:
+		if err := c.writeControl(conn, &control.Pong{
+			Type: control.TypePong,
+			TS:   message.TS,
+		}); err != nil {
+			return err
 		}
+	case *control.Pong:
+		c.handlePong(conn, message.TS)
+	case *control.PushAck, *control.OpenResult, *control.HelloAck:
+		// No action is required for these messages.
+	default:
+		return transport.ErrProtocol
 	}
+	return nil
 }
 
 // handlePush applies an authoritative mapping list from the server. The client

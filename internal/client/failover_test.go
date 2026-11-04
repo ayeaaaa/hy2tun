@@ -3,9 +3,11 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"testing/synctest"
@@ -83,6 +85,8 @@ type policyHarness struct {
 	dialFailures  map[int]error
 	ackGate       <-chan struct{}
 	registrations []transport.Kind
+	probeCalls    atomic.Int32
+	ackResults    []control.Result
 }
 
 func newPolicyHarness(t *testing.T, policy FailoverPolicy) *policyHarness {
@@ -111,6 +115,7 @@ func (h *policyHarness) dial(_ context.Context, kind transport.Kind, _ *config.C
 	if kind == transport.HY2 {
 		s := &probeSession{sessionStub: newSessionStub(kind)}
 		s.probe = func(ctx context.Context) error {
+			h.probeCalls.Add(1)
 			if h.gate != nil {
 				return h.gate(ctx)
 			}
@@ -160,6 +165,9 @@ func (h *policyHarness) control(kind transport.Kind) net.Conn {
 			return
 		}
 		ack := &control.HelloAck{Type: control.TypeHelloAck, OK: true}
+		if kind == transport.HY2 {
+			ack.Results = h.ackResults
+		}
 		if kind == transport.HY2 && h.ackGate != nil {
 			<-h.ackGate
 		}
@@ -232,15 +240,114 @@ func TestAutoDoesNotFallbackOnAuthOrTLS(t *testing.T) {
 func TestRecoveryRequiresThreeSuccessesAndHold(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		h := newPolicyHarness(t, recoveryTestPolicy())
-		h.tick(2)
-		require.Equal(t, "tcp", h.client.TransportState().ActiveTransport)
-		h.tick(1) // Three successes, but only 30 seconds held.
-		require.Equal(t, "tcp", h.client.TransportState().ActiveTransport)
-		h.tick(3)
+		for n := int32(1); n <= 5; n++ {
+			h.tick(1)
+			require.Equal(t, n, h.probeCalls.Load(), "each completed isolated probe must count exactly once")
+			require.Equal(t, "tcp", h.client.TransportState().ActiveTransport)
+		}
+		h.clock.advance(10*time.Second - time.Nanosecond)
+		require.Equal(t, int32(5), h.probeCalls.Load())
+		require.Equal(t, "tcp", h.client.TransportState().ActiveTransport, "TCP must remain active immediately before the hold cutoff")
+		h.clock.advance(time.Nanosecond)
+		require.Equal(t, int32(7), h.probeCalls.Load(), "sixth isolated probe plus a separately verified candidate")
 		require.Equal(t, "hy2", h.client.TransportState().ActiveTransport)
 		require.Equal(t, uint64(1), h.client.TransportState().SwitchCount)
 		require.Equal(t, "hy2_recovered", h.client.TransportState().SwitchReason)
 	})
+}
+
+func TestRecoveryThirdSuccessCreatesSeparateCandidate(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := recoveryTestPolicy()
+		p.MinTCPHold = time.Second
+		h := newPolicyHarness(t, p)
+		for n := int32(1); n <= 2; n++ {
+			h.tick(1)
+			require.Equal(t, n, h.probeCalls.Load())
+			require.Equal(t, "tcp", h.client.TransportState().ActiveTransport)
+		}
+		h.tick(1)
+		require.Equal(t, int32(4), h.probeCalls.Load())
+		require.Equal(t, "hy2", h.client.TransportState().ActiveTransport)
+		require.Equal(t, []transport.Kind{transport.HY2, transport.TCP, transport.HY2, transport.HY2, transport.HY2, transport.HY2}, h.calls())
+	})
+}
+
+func TestAutoJitteredBackoffHonorsNominalCap(t *testing.T) {
+	for _, numerator := range []time.Duration{4, 6} {
+		t.Run(numerator.String(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				clock := newPolicyClock()
+				cfg := validTestClientConfig()
+				cfg.Mode = config.ModeHY2
+				var calls atomic.Int32
+				inputs := make(chan time.Duration, 20)
+				cl, err := NewWithRuntime(cfg, nil, RuntimeOptions{Clock: clock, Jitter: func(d time.Duration) time.Duration { inputs <- d; return d * numerator / 5 }, Dial: func(context.Context, transport.Kind, *config.ClientConfig) (transport.Session, error) {
+					calls.Add(1)
+					return nil, io.EOF
+				}})
+				require.NoError(t, err)
+				done := make(chan error, 1)
+				go func() { done <- cl.Start(context.Background()) }()
+				synctest.Wait()
+				defer func() { cl.Close(); <-done; synctest.Wait() }()
+				for i, nominal := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second, 30 * time.Second} {
+					require.Equal(t, nominal, <-inputs)
+					clock.advance(nominal*numerator/5 - time.Nanosecond)
+					require.Equal(t, int32(i+1), calls.Load())
+					clock.advance(time.Nanosecond)
+					require.Equal(t, int32(i+2), calls.Load())
+				}
+			})
+		})
+	}
+}
+
+func TestAutoProductionJitterBounds(t *testing.T) {
+	jitter := (RuntimeOptions{}).defaults().Jitter
+	for _, nominal := range []time.Duration{time.Second, 30 * time.Second} {
+		for range 256 {
+			got := jitter(nominal)
+			require.GreaterOrEqual(t, got, nominal*4/5)
+			require.LessOrEqual(t, got, nominal*6/5)
+		}
+	}
+}
+
+func TestRecoveryOverallOKKeepsTransportWithFailedMappings(t *testing.T) {
+	for _, includeSuccess := range []bool{false, true} {
+		t.Run(fmt.Sprint(includeSuccess), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				p := recoveryTestPolicy()
+				p.MinTCPHold = time.Second
+				p.RecoverySuccesses = 1
+				h := newPolicyHarness(t, p)
+				h.ackResults = []control.Result{{ID: "port", Error: "port_in_use"}, {ID: "policy", Error: "port_denied"}}
+				h.client.configMu.Lock()
+				next := cloneClientConfig(h.client.cfg)
+				next.Client.Revision = 1
+				next.Mappings = []config.Mapping{{ID: "port", Type: "tcp", LocalAddr: "127.0.0.1:9", RemotePort: 23456, Enabled: true}, {ID: "policy", Type: "tcp", LocalAddr: "127.0.0.1:9", RemotePort: 23457, Enabled: true}}
+				if includeSuccess {
+					next.Mappings = append(next.Mappings, config.Mapping{ID: "ok", Type: "tcp", LocalAddr: "127.0.0.1:9", RemotePort: 23458, Enabled: true})
+					h.ackResults = append(h.ackResults, control.Result{ID: "ok", OK: true, AssignedPort: 23458})
+				}
+				h.client.storeConfigLocked(next, h.client.udpTokenSnapshot(), h.client.mappingSnapshot())
+				h.client.configMu.Unlock()
+				h.tick(1)
+				require.Equal(t, "hy2", h.client.TransportState().ActiveTransport)
+				require.True(t, h.client.Status().Connected)
+				require.Equal(t, []transport.Kind{transport.HY2, transport.TCP, transport.HY2, transport.HY2}, h.calls())
+				views := h.client.Mappings()
+				require.Equal(t, "failed", views[0].Status)
+				require.Equal(t, "port_in_use", views[0].Error)
+				require.Equal(t, "failed", views[1].Status)
+				require.Equal(t, "port_denied", views[1].Error)
+				if includeSuccess {
+					require.Equal(t, "running", views[2].Status)
+				}
+			})
+		})
+	}
 }
 func TestProbeFailureResetsRecovery(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {

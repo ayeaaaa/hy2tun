@@ -33,6 +33,9 @@ type RuntimeOptions struct {
 	Clock  Clock
 	Jitter func(time.Duration) time.Duration
 	Dial   func(context.Context, transport.Kind, *config.ClientConfig) (transport.Session, error)
+	// Asynchronous injected dials must use this seam and forward the actual
+	// native/late-cleanup receipt. Dial alone is a synchronous boundary.
+	DialWithCompletion func(context.Context, transport.Kind, *config.ClientConfig) (transport.Session, <-chan struct{}, error)
 }
 
 type realClock struct{}
@@ -99,6 +102,7 @@ func sameTransportConfig(a, b *config.ClientConfig) bool {
 // probes and unaccepted candidates are cancelled, not allowed to commit late.
 func (c *Client) invalidateTransportLocked() {
 	c.transportEpoch++
+	c.fallbackNetworkEligible = false
 	if c.transportWork != nil {
 		c.transportWork.cancel()
 	}
@@ -282,7 +286,18 @@ func (c *Client) runOnce(ctx context.Context) (bool, error) {
 		if c.snapshotConfig().Mode.Effective() != config.ModeAuto {
 			return connected, err
 		}
-		if a.kind == transport.HY2 && transport.FallbackAllowed(err) {
+		c.mu.Lock()
+		busy := setupBusyOnly(err)
+		if err != nil && !busy && !transport.FallbackAllowed(errors.Join(err, context.DeadlineExceeded)) {
+			c.fallbackNetworkEligible = false
+		}
+		eligible := transport.FallbackAllowed(err)
+		if a.kind == transport.HY2 && eligible {
+			c.fallbackNetworkEligible = true
+		}
+		allowed := eligible || (busy && c.fallbackNetworkEligible)
+		c.mu.Unlock()
+		if a.kind == transport.HY2 && allowed {
 			reason := "hy2_unavailable"
 			if connected {
 				reason = "hy2_inactive"
@@ -296,6 +311,9 @@ func (c *Client) runOnce(ctx context.Context) (bool, error) {
 
 func (c *Client) transportAcceptedLocked(session transport.Session, setup context.Context) {
 	kind, reason := string(session.Kind()), "connected"
+	if session.Kind() == transport.HY2 {
+		c.fallbackNetworkEligible = false
+	}
 	if a, ok := setup.Value(attemptKey{}).(*transportAttempt); ok {
 		reason = a.reason
 		if c.transportWork == a {
@@ -330,7 +348,7 @@ func (c *Client) probeAttempt(a *transportAttempt) error {
 		return err
 	}
 	a.ownSession(s)
-	_, err = s.Probe(a.setup)
+	err = c.probeSetup(a.setup, s)
 	if err == nil {
 		err = a.setup.Err()
 	}
@@ -349,6 +367,9 @@ func (c *Client) recordProbe(a *transportAttempt, session transport.Session, own
 	c.transportState.LastProbeError = ""
 	if err != nil {
 		c.transportState.LastProbeError = probeErrorCode(err)
+		if !setupBusyOnly(err) {
+			c.fallbackNetworkEligible = transport.FallbackAllowed(err)
+		}
 	}
 	return true
 }
@@ -426,15 +447,15 @@ func (c *Client) recoveryLoop(lifetime, ctx context.Context, session transport.S
 
 // The old control reader and recovery worker are joined before a new formal
 // Hello. No control handlers, queues or connections are replayed on the new root.
-func (c *Client) serveEstablished(ctx context.Context, session transport.Session, owner net.Conn) (*transportAttempt, error) {
+func (c *Client) serveEstablished(ctx context.Context, session transport.Session, owner net.Conn, inbox *controlInbox) (*transportAttempt, error) {
 	if session.Kind() != transport.TCP || c.snapshotConfig().Mode.Effective() != config.ModeAuto {
-		return nil, c.serveControl(owner)
+		return nil, c.serveControlInbox(owner, inbox)
 	}
 	recoveryCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	controlDone := make(chan error, 1)
 	probeDone := make(chan *transportAttempt, 1)
-	go func() { controlDone <- c.serveControl(owner) }()
+	go func() { controlDone <- c.serveControlInbox(owner, inbox) }()
 	go func() { probeDone <- c.recoveryLoop(ctx, recoveryCtx, session, owner) }()
 	select {
 	case err := <-controlDone:
