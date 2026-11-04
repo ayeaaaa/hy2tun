@@ -299,6 +299,9 @@ func (p *TCPPeer) Close() error         { return p.session.Close() }
 // method. The callback must not call Close/WithLive on this same root, perform
 // network/file I/O, or wait for child draining. A successful commit can naturally
 // be followed by root closure; this is not a lease on subsequent business I/O.
+// Closed-root rejection returns net.ErrClosed without consuming queued streams
+// or classifying the underlying I/O failure. Ordinary session/stream I/O retains
+// failure classification outside this admission guard.
 func (p *TCPPeer) WithLive(commit func() error) error {
 	if p == nil || p.session == nil || commit == nil {
 		return errConfig
@@ -307,7 +310,7 @@ func (p *TCPPeer) WithLive(commit func() error) error {
 	s.admissionMu.Lock()
 	defer s.admissionMu.Unlock()
 	if s.localClosed.Load() || s.ctx.Err() != nil || s.mux.IsClosed() {
-		return s.connectionError(net.ErrClosed)
+		return net.ErrClosed
 	}
 	return commit()
 }
@@ -335,8 +338,9 @@ func (s *tcpSession) connectionError(err error) error {
 	if !s.mux.IsClosed() {
 		return err
 	}
-	// Once closed, AcceptStream returns the first recorded shutdown cause
-	// synchronously. Queued streams are already terminal and cannot be delivered.
+	// Obtain the recorded shutdown cause on ordinary I/O error paths. AcceptStream
+	// can wait for physical teardown when it selects a queued stream during
+	// shutdown, so this classifier must not run under application admission locks.
 	_, cause := s.mux.AcceptStream()
 	for _, protocolError := range []error{yamux.ErrInvalidVersion, yamux.ErrInvalidMsgType, yamux.ErrStreamsExhausted, yamux.ErrDuplicateStream, yamux.ErrRecvWindowExceeded, yamux.ErrUnexpectedFlag} {
 		if errors.Is(cause, protocolError) {
