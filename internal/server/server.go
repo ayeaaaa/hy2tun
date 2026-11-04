@@ -77,6 +77,10 @@ type Server struct {
 	// saveConfig persists a configuration file. It is a field so tests can
 	// inject write failures; production uses config.SaveServer.
 	saveConfig func(path string, cfg *config.ServerConfig) error
+	// modeEnterHook runs when an online mode transaction is entered, before
+	// modeMu is acquired. Tests use it to order Close against an in-flight
+	// update deterministically.
+	modeEnterHook func()
 
 	startedAt time.Time
 	started   atomic.Bool

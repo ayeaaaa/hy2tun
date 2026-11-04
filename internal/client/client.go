@@ -80,9 +80,12 @@ type Client struct {
 	setupSlots              map[setupOperation]chan struct{}
 	transportChanged        chan struct{}
 	modeChanged             chan struct{}
-	transportState          view.TransportState
-	lastTransport           string
-	activeSince             time.Time
+	// handoffHook runs between a recovery candidate returning and the handoff
+	// recheck. Tests use it to interleave a mode update deterministically.
+	handoffHook    atomic.Value // func()
+	transportState view.TransportState
+	lastTransport  string
+	activeSince    time.Time
 	// probeWork is the one outstanding probe/candidate, if any. A mode update
 	// that disables probing cancels it without invalidating an allowed owner.
 	probeWork   *transportAttempt

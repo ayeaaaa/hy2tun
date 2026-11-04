@@ -27,6 +27,13 @@ type endpoint interface {
 	// does not report it as a fatal endpoint failure.
 	markRetired()
 	isRetired() bool
+	// ready is closed when Serve has started accepting traffic; tests use it
+	// instead of treating a pre-bound socket as a running endpoint.
+	ready() <-chan struct{}
+	// workerDone is closed when the endpoint's Serve worker has finished,
+	// including its retirement/error publication.
+	workerDone() <-chan struct{}
+	markWorkerDone()
 }
 
 // prepareInitialEndpoints publishes the complete startup set, never a partial
@@ -89,7 +96,10 @@ func (s *Server) prepareEndpoint(kind transport.Kind, cfg *config.ServerConfig, 
 		if err != nil {
 			return nil, fmt.Errorf("listen TCP %s: %w", bindAddr, err)
 		}
-		return &tcpEndpoint{server: s, listener: listener, conns: make(map[net.Conn]bool)}, nil
+		return &tcpEndpoint{
+			server: s, listener: listener, conns: make(map[net.Conn]bool),
+			readyCh: make(chan struct{}), workerDoneCh: make(chan struct{}),
+		}, nil
 	}
 	if kind != transport.HY2 {
 		return nil, fmt.Errorf("unknown endpoint kind %q", kind)
@@ -98,7 +108,11 @@ func (s *Server) prepareEndpoint(kind transport.Kind, cfg *config.ServerConfig, 
 	if err != nil {
 		return nil, fmt.Errorf("listen UDP %s: %w", bindAddr, err)
 	}
-	e := &hy2Endpoint{packetConn: packetConn}
+	e := &hy2Endpoint{
+		packetConn:   packetConn,
+		readyCh:      make(chan struct{}),
+		workerDoneCh: make(chan struct{}),
+	}
 	prepared := false
 	defer func() {
 		if !prepared {
@@ -183,13 +197,23 @@ type hy2Endpoint struct {
 	closeErr   error
 	closed     atomic.Bool
 	retired    atomic.Bool
+
+	readyCh        chan struct{}
+	readyOnce      sync.Once
+	workerDoneCh   chan struct{}
+	workerDoneOnce sync.Once
 }
 
-func (e *hy2Endpoint) Kind() transport.Kind { return transport.HY2 }
-func (e *hy2Endpoint) Addr() net.Addr       { return e.packetConn.LocalAddr() }
-func (e *hy2Endpoint) markRetired()         { e.retired.Store(true) }
-func (e *hy2Endpoint) isRetired() bool      { return e.retired.Load() }
+func (e *hy2Endpoint) Kind() transport.Kind        { return transport.HY2 }
+func (e *hy2Endpoint) Addr() net.Addr              { return e.packetConn.LocalAddr() }
+func (e *hy2Endpoint) markRetired()                { e.retired.Store(true) }
+func (e *hy2Endpoint) isRetired() bool             { return e.retired.Load() }
+func (e *hy2Endpoint) ready() <-chan struct{}      { return e.readyCh }
+func (e *hy2Endpoint) workerDone() <-chan struct{} { return e.workerDoneCh }
+func (e *hy2Endpoint) markReady()                  { e.readyOnce.Do(func() { close(e.readyCh) }) }
+func (e *hy2Endpoint) markWorkerDone()             { e.workerDoneOnce.Do(func() { close(e.workerDoneCh) }) }
 func (e *hy2Endpoint) Serve(ctx context.Context) error {
+	e.markReady()
 	stop := context.AfterFunc(ctx, func() { _ = e.Close() })
 	defer stop()
 	return e.server.Serve()
@@ -229,12 +253,21 @@ type tcpEndpoint struct {
 	closeOnce      sync.Once
 	closeErr       error
 	retired        atomic.Bool
+
+	readyCh        chan struct{}
+	readyOnce      sync.Once
+	workerDoneCh   chan struct{}
+	workerDoneOnce sync.Once
 }
 
-func (e *tcpEndpoint) Kind() transport.Kind { return transport.TCP }
-func (e *tcpEndpoint) Addr() net.Addr       { return e.listener.Addr() }
-func (e *tcpEndpoint) markRetired()         { e.retired.Store(true) }
-func (e *tcpEndpoint) isRetired() bool      { return e.retired.Load() }
+func (e *tcpEndpoint) Kind() transport.Kind        { return transport.TCP }
+func (e *tcpEndpoint) Addr() net.Addr              { return e.listener.Addr() }
+func (e *tcpEndpoint) markRetired()                { e.retired.Store(true) }
+func (e *tcpEndpoint) isRetired() bool             { return e.retired.Load() }
+func (e *tcpEndpoint) ready() <-chan struct{}      { return e.readyCh }
+func (e *tcpEndpoint) workerDone() <-chan struct{} { return e.workerDoneCh }
+func (e *tcpEndpoint) markReady()                  { e.readyOnce.Do(func() { close(e.readyCh) }) }
+func (e *tcpEndpoint) markWorkerDone()             { e.workerDoneOnce.Do(func() { close(e.workerDoneCh) }) }
 func (e *tcpEndpoint) Serve(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -245,6 +278,7 @@ func (e *tcpEndpoint) Serve(ctx context.Context) error {
 	}
 	e.cancel = cancel
 	e.mu.Unlock()
+	e.markReady()
 	stop := context.AfterFunc(ctx, func() { _ = e.Close() })
 	defer stop()
 	for {
@@ -340,6 +374,7 @@ func (s *Server) startEndpointLocked(ep endpoint) {
 	s.serving[ep] = struct{}{}
 	s.log.Info("server listening", "transport", ep.Kind(), "listen", ep.Addr().String())
 	go func() {
+		defer ep.markWorkerDone()
 		err := ep.Serve(context.Background())
 		s.retireEndpoint(ep)
 		if ep.isRetired() {

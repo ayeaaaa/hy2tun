@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -91,6 +93,52 @@ func TestModeAutoKeepsAllowedTCPAndStartsProbe(t *testing.T) {
 	})
 }
 
+func TestModeChangeDuringCandidateHandoffResumesProbing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := recoveryTestPolicy()
+		p.MinTCPHold = time.Second
+		p.RecoverySuccesses = 1
+		h := newPolicyHarness(t, p)
+		h.client.SetPersist(func(*config.ClientConfig) error { return nil })
+		// Fail later probes so the resumed loop stays on the retained owner
+		// instead of immediately handing off to another HY2 session.
+		h.gate = func(context.Context) error {
+			if h.probeCalls.Load() > 2 {
+				return syscall.ECONNREFUSED
+			}
+			return nil
+		}
+		old := h.client.currentSession()
+		var hookRan, hookDone atomic.Bool
+		var hookErr atomic.Value
+		h.client.handoffHook.Store(func() {
+			if !hookRan.CompareAndSwap(false, true) {
+				return
+			}
+			if err := applyClientMode(h.client, config.ModeTCP); err != nil {
+				hookErr.Store(err)
+			}
+			if err := applyClientMode(h.client, config.ModeAuto); err != nil {
+				hookErr.Store(err)
+			}
+			hookDone.Store(true)
+		})
+
+		h.tick(1)
+		require.True(t, hookRan.Load(), "handoff hook did not run")
+		require.True(t, hookDone.Load(), "handoff hook did not finish")
+		if err, _ := hookErr.Load().(error); err != nil {
+			require.NoError(t, err)
+		}
+		require.Equal(t, int32(2), h.probeCalls.Load(), "first probe plus handoff candidate")
+		require.Same(t, old, h.client.currentSession(), "mode toggle must retain the TCP owner")
+
+		h.tick(1)
+		require.Greater(t, h.probeCalls.Load(), int32(2), "auto must resume probing on the retained owner")
+		require.Same(t, old, h.client.currentSession())
+	})
+}
+
 func TestClientModeDisallowedOwnerReconnects(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		h := newTCPModeHarness(t)
@@ -157,12 +205,18 @@ func TestModeUpdateRaceWithRotationAndClose(t *testing.T) {
 	defer cl.Close()
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); require.NoError(t, applyClientMode(cl, config.ModeTCP)) }()
+	var modeErr, rotateErr error
 	go func() {
 		defer wg.Done()
-		require.NoError(t, cl.RotateLocalCredentials(2, "rotated-password", "rotated-control-token"))
+		modeErr = applyClientMode(cl, config.ModeTCP)
+	}()
+	go func() {
+		defer wg.Done()
+		rotateErr = cl.RotateLocalCredentials(2, "rotated-password", "rotated-control-token")
 	}()
 	wg.Wait()
+	require.NoError(t, modeErr)
+	require.NoError(t, rotateErr)
 	require.Equal(t, "rotated-password", cl.CredentialsSnapshot().Auth)
 	require.Equal(t, config.ModeTCP, cl.TransportState().Mode)
 	require.NoError(t, cl.Close())

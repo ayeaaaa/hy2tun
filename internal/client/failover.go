@@ -561,29 +561,40 @@ func (c *Client) serveEstablished(ctx context.Context, session transport.Session
 	if session.Kind() != transport.TCP {
 		return nil, c.serveControlInbox(owner, inbox)
 	}
-	recoveryCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	controlDone := make(chan error, 1)
-	probeDone := make(chan *transportAttempt, 1)
 	go func() { controlDone <- c.serveControlInbox(owner, inbox) }()
-	go func() { probeDone <- c.recoveryLoop(ctx, recoveryCtx, session, owner) }()
-	select {
-	case err := <-controlDone:
-		cancel()
-		c.discardAttempt(<-probeDone)
-		return nil, err
-	case candidate := <-probeDone:
-		if candidate == nil {
-			return nil, <-controlDone
+	for {
+		recoveryCtx, cancel := context.WithCancel(ctx)
+		probeDone := make(chan *transportAttempt, 1)
+		go func() { probeDone <- c.recoveryLoop(ctx, recoveryCtx, session, owner) }()
+		select {
+		case err := <-controlDone:
+			cancel()
+			c.discardAttempt(<-probeDone)
+			return nil, err
+		case candidate := <-probeDone:
+			cancel()
+			if candidate == nil {
+				return nil, <-controlDone
+			}
+			if hook, _ := c.handoffHook.Load().(func()); hook != nil {
+				hook()
+			}
+			// Recheck immediately at handoff; changes after this are rejected by
+			// formal wire-Ack admission using the same epoch/credential snapshot.
+			if !c.recoveryCurrent(candidate, session, owner) {
+				c.discardAttempt(candidate)
+				// A mode-only change advances the epoch but retains an allowed
+				// owner. Keep the probe policy alive on that owner instead of
+				// losing the recovery loop until the TCP session reconnects.
+				if ctx.Err() == nil && c.recoveryOwnerLive(session, owner) && c.recoveryIdentityCurrent(candidate.cfg) {
+					continue
+				}
+				return nil, <-controlDone
+			}
+			closeLiveConnection(owner, session)
+			<-controlDone
+			return candidate, nil
 		}
-		// Recheck immediately at handoff; changes after this are rejected by
-		// formal wire-Ack admission using the same epoch/credential snapshot.
-		if !c.recoveryCurrent(candidate, session, owner) {
-			c.discardAttempt(candidate)
-			return nil, <-controlDone
-		}
-		closeLiveConnection(owner, session)
-		<-controlDone
-		return candidate, nil
 	}
 }

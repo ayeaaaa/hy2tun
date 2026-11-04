@@ -27,6 +27,9 @@ func (s *Server) UpdateMode(mode config.TransportMode) error {
 	if err := mode.Validate(); err != nil {
 		return fmt.Errorf("update mode: %w", err)
 	}
+	if s.modeEnterHook != nil {
+		s.modeEnterHook()
+	}
 
 	// Serialize listener transactions with Close and other mode updates. No
 	// settings or listener lock is held while binding a candidate.

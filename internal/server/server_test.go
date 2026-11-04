@@ -110,24 +110,73 @@ func startTestServer(t *testing.T) (*Server, func()) {
 func startServer(t *testing.T, cfg *config.ServerConfig) (*Server, func()) {
 	t.Helper()
 
+	srv, stop, _, _ := startServerObserved(t, cfg)
+	return srv, stop
+}
+
+// startServerObserved is startServer plus the channel that receives Start's
+// return, so tests can prove that an intentional retirement did not terminate
+// the serve loop.
+func startServerObserved(t *testing.T, cfg *config.ServerConfig) (*Server, func(), <-chan error, <-chan struct{}) {
+	t.Helper()
+
 	srv, err := New(cfg, slog.Default())
 	require.NoError(t, err)
+	stop, startErr, startDone := startExistingServer(t, srv)
+	return srv, stop, startErr, startDone
+}
+
+// startExistingServer starts Serve for an already constructed server and waits
+// until every initial endpoint's Serve loop has begun. The readiness signal is
+// the endpoint itself, not the pre-bound ListenAddr.
+func startExistingServer(t *testing.T, srv *Server) (func(), <-chan error, <-chan struct{}) {
+	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { _ = srv.Start(ctx) }()
-	require.Eventually(t, func() bool {
-		return srv.ListenAddr() != nil
-	}, 2*time.Second, 10*time.Millisecond)
+	startErr := make(chan error, 1)
+	startDone := make(chan struct{})
+	go func() {
+		defer close(startDone)
+		startErr <- srv.Start(ctx)
+	}()
+	waitServerServing(t, srv)
 
 	var once sync.Once
 	stop := func() {
 		once.Do(func() {
 			cancel()
 			_ = srv.Close()
+			<-startDone
 		})
 	}
 	t.Cleanup(stop)
-	return srv, stop
+	return stop, startErr, startDone
+}
+
+// waitServerServing waits for each currently owned endpoint's Serve loop to
+// start. Sockets are bound during New, so ListenAddr alone proves nothing.
+func waitServerServing(t *testing.T, srv *Server) {
+	t.Helper()
+
+	require.Eventually(t, func() bool {
+		srv.listenersMu.Lock()
+		endpoints := make([]endpoint, 0, len(srv.endpoints))
+		for _, ep := range srv.endpoints {
+			endpoints = append(endpoints, ep)
+		}
+		srv.listenersMu.Unlock()
+		if len(endpoints) == 0 {
+			return false
+		}
+		for _, ep := range endpoints {
+			select {
+			case <-ep.ready():
+			default:
+				return false
+			}
+		}
+		return true
+	}, 2*time.Second, time.Millisecond)
 }
 
 func TestStandardHY2ClientCanProxyTCP(t *testing.T) {
