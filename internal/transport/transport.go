@@ -70,6 +70,8 @@ type CompletionSession interface {
 
 // ProbeCompletionSession reports completion of the native probe exchange and
 // all late/abandoned child cleanup, independently of prompt cancellation/Close.
+// This includes any started cancellation/root-close callback: stopping future
+// callbacks or another Close returning is not proof that started cleanup ended.
 // Every receipt is non-nil. Asynchronous decorators must forward the receipt.
 type ProbeCompletionSession interface {
 	Session

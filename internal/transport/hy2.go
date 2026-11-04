@@ -199,17 +199,33 @@ func (s *hy2Session) ProbeWithCompletion(ctx context.Context) (ProbeInfo, <-chan
 		if conn == nil {
 			return nil, ErrProtocol
 		}
-		defer conn.Close()
-		stop := context.AfterFunc(pctx, func() { _ = conn.Close() })
-		defer stop()
-		done := make(chan struct{})
-		defer close(done)
+		cancelFinished := make(chan struct{})
+		stopCancel := context.AfterFunc(pctx, func() {
+			defer close(cancelFinished)
+			_ = conn.Close()
+		})
+		watchStop := make(chan struct{})
+		watchFinished := make(chan struct{})
 		go func() {
+			defer close(watchFinished)
 			select {
 			case <-s.closed:
 				_ = conn.Close()
-			case <-done:
+			case <-watchStop:
 			}
+		}()
+		defer func() {
+			// Stop only prevents a callback that has not started; it never
+			// proves an already-running Close has finished. Join both owned
+			// paths before this native operation can complete its receipt.
+			// Fixed channels avoid registration-vs-WaitGroup Add/Wait races.
+			stopped := stopCancel()
+			close(watchStop)
+			if !stopped {
+				<-cancelFinished
+			}
+			<-watchFinished
+			_ = conn.Close()
 		}()
 		deadline, _ := pctx.Deadline()
 		_ = conn.SetDeadline(deadline)
