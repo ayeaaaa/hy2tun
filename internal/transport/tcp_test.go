@@ -193,6 +193,80 @@ func TestTCPGreetingAuthenticationCancellation(t *testing.T) {
 	require.ErrorIs(t, waitError(t, done), context.Canceled)
 }
 
+func TestTCPRemoteRootLossAllowsFallbackButLocalCloseDoesNot(t *testing.T) {
+	s, peer, ctx := tcpPair(t, RateLimits{}, 0, 0)
+	accepted := make(chan net.Conn, 1)
+	done := make(chan error, 1)
+	go func() {
+		_, c, e := peer.Accept(ctx)
+		if e == nil {
+			e = WriteStreamAck(c, nil)
+			accepted <- c
+		}
+		done <- e
+	}()
+	control, err := s.OpenControl(ctx)
+	require.NoError(t, err)
+	defer control.Close()
+	require.NoError(t, waitError(t, done))
+	serverControl := <-accepted
+	defer serverControl.Close()
+	require.NoError(t, peer.Close())
+	require.Eventually(t, func() bool { return s.(*tcpSession).mux.IsClosed() }, time.Second, time.Millisecond)
+	_, err = control.Read(make([]byte, 1))
+	require.Error(t, err)
+	require.True(t, FallbackAllowed(err))
+	_, err = s.OpenControl(ctx)
+	require.Error(t, err)
+	require.True(t, FallbackAllowed(err), "remote TCP root loss must retain the existing lost-session classification")
+	require.NoError(t, s.Close())
+	_, err = s.OpenControl(ctx)
+	require.ErrorIs(t, err, net.ErrClosed)
+	require.False(t, FallbackAllowed(err), "explicit local shutdown is not a network failure")
+}
+
+func TestTCPMalformedYamuxRetainsProtocolClass(t *testing.T) {
+	cert, err := testutil.SelfSignedCert("tunnel.test")
+	require.NoError(t, err)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	type result struct {
+		p   *TCPPeer
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		c, e := listener.Accept()
+		if e != nil {
+			done <- result{err: e}
+			return
+		}
+		p, e := AcceptTCP(ctx, c, TCPServerOptions{TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, Authenticate: testTCPAuth, Mode: config.ModeAuto})
+		done <- result{p, e}
+	}()
+	c, err := (&net.Dialer{}).DialContext(ctx, "tcp", listener.Addr().String())
+	require.NoError(t, err)
+	defer c.Close()
+	client := tls.Client(c, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13})
+	require.NoError(t, client.HandshakeContext(ctx))
+	require.NoError(t, writeJSONFrame(client, Greeting{Magic: "hy2tun-tcp", Version: 1, Auth: "auth", ControlToken: "secret", ClientID: "client"}, 65536))
+	var ack GreetingAck
+	require.NoError(t, readJSONFrame(client, &ack, 65536))
+	require.True(t, ack.OK)
+	r := <-done
+	require.NoError(t, r.err)
+	defer r.p.Close()
+	_, err = client.Write([]byte{99, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return r.p.session.mux.IsClosed() }, time.Second, time.Millisecond)
+	_, _, err = r.p.Accept(ctx)
+	require.ErrorIs(t, err, ErrProtocol)
+	require.False(t, FallbackAllowed(err))
+}
+
 func testTCPAuth(ctx context.Context, addr net.Addr, g Greeting) (Principal, error) {
 	if g.Auth != "auth" || g.ControlToken != "secret" {
 		return Principal{}, errors.New("sensitive auth/token must not be echoed")

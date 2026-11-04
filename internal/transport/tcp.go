@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/fatedier/yamux"
@@ -42,6 +43,7 @@ type tcpSession struct {
 	slots                 chan struct{}
 	readLimit, writeLimit *byteLimiter
 	info                  ProbeInfo
+	localClosed           atomic.Bool
 }
 
 type TCPPeer struct {
@@ -269,15 +271,46 @@ func newTCPSession(mux *yamux.Session, read, write uint64) *tcpSession {
 }
 
 func (s *tcpSession) Kind() Kind        { return TCP }
-func (s *tcpSession) Close() error      { s.cancel(); return s.mux.Close() }
+func (s *tcpSession) Close() error      { s.localClosed.Store(true); s.cancel(); return s.mux.Close() }
 func (p *TCPPeer) Principal() Principal { return p.principal }
 func (p *TCPPeer) Close() error         { return p.session.Close() }
 func (s *tcpSession) Probe(ctx context.Context) (ProbeInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return ProbeInfo{}, err
 	}
-	if s.ctx.Err() != nil {
-		return ProbeInfo{}, net.ErrClosed
+	if s.ctx.Err() != nil || s.mux.IsClosed() {
+		return ProbeInfo{}, s.connectionError(net.ErrClosed)
 	}
 	return s.info, nil
+}
+
+// A cancelled internal lifecycle context is not necessarily caller
+// cancellation: the remote mux may have failed. Retain its actual cause for
+// the existing fallback classifier, without turning local shutdown or malformed
+// yamux into an allowed network failure.
+func (s *tcpSession) connectionError(err error) error {
+	if err == nil || errors.Is(err, ErrAuthentication) || errors.Is(err, ErrProtocol) {
+		return err
+	}
+	if s.localClosed.Load() {
+		return net.ErrClosed
+	}
+	if !s.mux.IsClosed() {
+		return err
+	}
+	// Once closed, AcceptStream returns the first recorded shutdown cause
+	// synchronously. Queued streams are already terminal and cannot be delivered.
+	_, cause := s.mux.AcceptStream()
+	for _, protocolError := range []error{yamux.ErrInvalidVersion, yamux.ErrInvalidMsgType, yamux.ErrStreamsExhausted, yamux.ErrDuplicateStream, yamux.ErrRecvWindowExceeded, yamux.ErrUnexpectedFlag} {
+		if errors.Is(cause, protocolError) {
+			return &Error{Code: ErrProtocol.Code, Cause: cause}
+		}
+	}
+	if errors.Is(cause, yamux.ErrKeepAliveTimeout) || errors.Is(cause, yamux.ErrConnectionWriteTimeout) {
+		return errors.Join(cause, context.DeadlineExceeded)
+	}
+	if cause == nil || errors.Is(cause, yamux.ErrSessionShutdown) {
+		return io.EOF
+	}
+	return cause
 }

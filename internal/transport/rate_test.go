@@ -30,19 +30,24 @@ func TestTCPRateLimitCancels(t *testing.T) {
 			}
 			s, peer, ctx := tcpPair(t, limits, up, down)
 			done := make(chan error, 1)
+			counts := make(chan int64, 1)
 			go func() {
+				var count int64
 				_, c, e := peer.Accept(ctx)
 				if e == nil {
 					e = WriteStreamAck(c, nil)
 				}
 				if e == nil {
 					if side == "client_up" || side == "server_up" {
-						_, e = io.Copy(io.Discard, c)
+						count, e = io.Copy(io.Discard, c)
 					} else {
-						_, e = c.Write(make([]byte, 32768))
+						var n int
+						n, e = c.Write(make([]byte, 32768))
+						count = int64(n)
 					}
 				}
 				done <- e
+				counts <- count
 			}()
 			c, err := s.OpenTCP(ctx, TCPRequest{Target: "example.test:80"})
 			require.NoError(t, err)
@@ -69,8 +74,13 @@ func TestTCPRateLimitCancels(t *testing.T) {
 				require.Error(t, waitError(t, operation))
 			}
 			peerErr := waitError(t, done)
-			if side != "client_down" {
+			if side == "server_down" {
 				require.Error(t, peerErr)
+			}
+			if side == "client_up" || side == "server_up" || side == "server_down" {
+				require.LessOrEqual(t, <-counts, int64(16384))
+			} else {
+				<-counts
 			}
 		})
 	}

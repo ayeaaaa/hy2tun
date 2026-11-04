@@ -90,8 +90,8 @@ func (s *tcpSession) takeSlot(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if s.ctx.Err() != nil {
-		return net.ErrClosed
+	if s.ctx.Err() != nil || s.mux.IsClosed() {
+		return s.connectionError(net.ErrClosed)
 	}
 	if s.mux.NumStreams() >= maxTCPStreams {
 		return ErrQueueFull
@@ -154,7 +154,7 @@ func (s *tcpSession) openStream(ctx context.Context, h StreamHeader) (net.Conn, 
 				err = contextError(opctx, net.ErrClosed)
 			}
 			if err == nil && s.ctx.Err() != nil {
-				err = net.ErrClosed
+				err = s.connectionError(net.ErrClosed)
 			}
 			if err == nil {
 				_ = raw.SetDeadline(time.Time{})
@@ -182,7 +182,7 @@ func (s *tcpSession) openStream(ctx context.Context, h StreamHeader) (net.Conn, 
 	case <-opctx.Done():
 		return nil, opctx.Err()
 	case <-s.ctx.Done():
-		return nil, net.ErrClosed
+		return nil, s.connectionError(net.ErrClosed)
 	case r := <-results:
 		if err := opctx.Err(); err != nil {
 			if r.c != nil {
@@ -194,9 +194,12 @@ func (s *tcpSession) openStream(ctx context.Context, h StreamHeader) (net.Conn, 
 			if r.c != nil {
 				_ = r.c.abort()
 			}
-			return nil, net.ErrClosed
+			if r.err != nil {
+				return nil, s.connectionError(r.err)
+			}
+			return nil, s.connectionError(net.ErrClosed)
 		}
-		return r.c, r.err
+		return r.c, s.connectionError(r.err)
 	}
 }
 
@@ -208,7 +211,7 @@ func (p *TCPPeer) Accept(ctx context.Context) (StreamHeader, net.Conn, error) {
 	raw, err := s.mux.AcceptStreamWithContext(ctx)
 	if err != nil {
 		<-s.slots
-		return StreamHeader{}, nil, contextError(ctx, err)
+		return StreamHeader{}, nil, contextError(ctx, s.connectionError(err))
 	}
 	opctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
@@ -241,6 +244,7 @@ func (p *TCPPeer) Accept(ctx context.Context) (StreamHeader, net.Conn, error) {
 
 type managedConn struct {
 	net.Conn
+	session                     *tcpSession
 	ctx                         context.Context
 	cancel                      context.CancelFunc
 	readLimit, writeLimit       *byteLimiter
@@ -252,7 +256,7 @@ type managedConn struct {
 
 func (s *tcpSession) manage(raw *yamux.Stream, kind uint8) *managedConn {
 	ctx, cancel := context.WithCancel(s.ctx)
-	c := &managedConn{Conn: raw, ctx: ctx, cancel: cancel, release: func() { <-s.slots }}
+	c := &managedConn{Conn: raw, session: s, ctx: ctx, cancel: cancel, release: func() { <-s.slots }}
 	if kind != StreamControl {
 		c.readLimit = s.readLimit
 		c.writeLimit = s.writeLimit
@@ -283,10 +287,11 @@ func (c *managedConn) abort() error { return c.shutdown(true) }
 
 func (c *managedConn) Read(p []byte) (int, error) {
 	if c.ctx.Err() != nil {
-		return 0, net.ErrClosed
+		return 0, c.session.connectionError(net.ErrClosed)
 	}
 	if c.readLimit == nil {
-		return c.Conn.Read(p)
+		n, err := c.Conn.Read(p)
+		return n, c.session.connectionError(err)
 	}
 	if len(p) > rateChunk {
 		p = p[:rateChunk]
@@ -294,18 +299,19 @@ func (c *managedConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
 	if n > 0 {
 		if e := c.readLimit.waitDeadline(c.ctx, n, &c.readDeadline); e != nil {
-			return 0, e
+			return 0, c.session.connectionError(e)
 		}
 	}
-	return n, err
+	return n, c.session.connectionError(err)
 }
 
 func (c *managedConn) Write(p []byte) (int, error) {
 	if c.ctx.Err() != nil {
-		return 0, net.ErrClosed
+		return 0, c.session.connectionError(net.ErrClosed)
 	}
 	if c.writeLimit == nil {
-		return c.Conn.Write(p)
+		n, err := c.Conn.Write(p)
+		return n, c.session.connectionError(err)
 	}
 	total := 0
 	for len(p) > 0 {
@@ -314,13 +320,13 @@ func (c *managedConn) Write(p []byte) (int, error) {
 			n = rateChunk
 		}
 		if err := c.writeLimit.waitDeadline(c.ctx, n, &c.writeDeadline); err != nil {
-			return total, err
+			return total, c.session.connectionError(err)
 		}
 		written, err := c.Conn.Write(p[:n])
 		total += written
 		p = p[written:]
 		if err != nil {
-			return total, err
+			return total, c.session.connectionError(err)
 		}
 		if written == 0 {
 			return total, net.ErrClosed
