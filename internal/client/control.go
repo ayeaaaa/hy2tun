@@ -32,6 +32,12 @@ func (c *Client) handshake(conn net.Conn) error {
 }
 
 func (c *Client) handshakeContext(ctx context.Context, conn net.Conn) error {
+	return c.handshakeWithAcceptance(ctx, conn, func() error { return setupContextError(ctx) })
+}
+
+// accept ends setup ownership at the validated on-time wire Ack, before local
+// config persistence or follow-up Update. It does not own session lifetime.
+func (c *Client) handshakeWithAcceptance(ctx context.Context, conn net.Conn, accept func() error) error {
 	deadline, _ := ctx.Deadline()
 	_ = conn.SetDeadline(deadline)
 	defer func() { _ = conn.SetDeadline(time.Time{}) }()
@@ -83,6 +89,13 @@ func (c *Client) handshakeContext(ctx context.Context, conn net.Conn) error {
 		c.mu.Unlock()
 		return net.ErrClosed
 	}
+	if err := accept(); err != nil {
+		c.mu.Unlock()
+		return err
+	}
+	// The wire handshake has been admitted. Local write-back/follow-up traffic
+	// must not inherit the temporary setup deadline, even while apply blocks.
+	_ = conn.SetDeadline(time.Time{})
 	c.connected = true
 	c.mu.Unlock()
 	if err := c.applyHelloAck(cfg, ack); err != nil {
@@ -92,6 +105,16 @@ func (c *Client) handshakeContext(ctx context.Context, conn net.Conn) error {
 		"client", cfg.Client.ID,
 		"server_version", ack.ServerVersion,
 	)
+	return nil
+}
+
+func setupContextError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
 	return nil
 }
 

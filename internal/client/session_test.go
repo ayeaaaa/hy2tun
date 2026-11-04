@@ -89,18 +89,28 @@ func TestForcedTCPNoUDPDial(t *testing.T) {
 }
 
 func TestForcedHY2NeverTCP(t *testing.T) {
-	cl, err := New(validTestClientConfig(), nil)
-	require.NoError(t, err)
-	defer cl.Close()
-	var kinds []transport.Kind
-	cl.newSession = func(_ context.Context, kind transport.Kind, opts transport.DialOptions) (transport.Session, error) {
-		kinds = append(kinds, kind)
-		require.NotNil(t, opts.HY2)
-		return nil, io.EOF
+	for _, mode := range []config.TransportMode{"", config.ModeHY2} {
+		name := string(mode)
+		if name == "" {
+			name = "default"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := validTestClientConfig()
+			cfg.Mode = mode
+			cl, err := New(cfg, nil)
+			require.NoError(t, err)
+			defer cl.Close()
+			var kinds []transport.Kind
+			cl.newSession = func(_ context.Context, kind transport.Kind, opts transport.DialOptions) (transport.Session, error) {
+				kinds = append(kinds, kind)
+				require.NotNil(t, opts.HY2)
+				return nil, io.EOF
+			}
+			_, err = cl.runOnce(context.Background())
+			require.ErrorIs(t, err, io.EOF)
+			require.Equal(t, []transport.Kind{transport.HY2}, kinds)
+		})
 	}
-	_, err = cl.runOnce(context.Background())
-	require.ErrorIs(t, err, io.EOF)
-	require.Equal(t, []transport.Kind{transport.HY2}, kinds)
 }
 
 func TestTransportCloseUnblocksUDPAndDials(t *testing.T) {

@@ -134,7 +134,7 @@ func (c *Client) startUDP(m config.Mapping, token string) (*udpMapping, error) {
 	}
 	openCtx, cancelOpen := context.WithTimeout(ownerCtx, controlHandshakeTimeout)
 	defer cancelOpen()
-	conn, err := session.OpenUDP(openCtx, token)
+	conn, err := c.openUDPData(openCtx, ownerCtx, session, token)
 	if err != nil {
 		if conn != nil {
 			_ = conn.Close()

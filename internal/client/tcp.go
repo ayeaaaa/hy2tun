@@ -85,7 +85,7 @@ func (c *Client) handleOpen(owner net.Conn, msg *control.Open) {
 		_ = local.Close()
 		return
 	}
-	remote, err := session.OpenTCP(ctx, transport.TCPRequest{ReverseToken: msg.Token})
+	remote, err := c.openTCPData(ctx, ownerCtx, session, transport.TCPRequest{ReverseToken: msg.Token})
 	if err != nil || remote == nil {
 		c.untrackData(local)
 		if remote != nil {

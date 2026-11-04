@@ -207,21 +207,38 @@ func (c *Client) runSessionWithSetup(ctx, setupCtx context.Context, session tran
 		closeBoth()
 	}()
 	defer close(stopWatch)
-	// Only the handshake child watches setupCtx. Remove that cancellation
-	// before starting data/control service; parent cancellation still closes root.
-	stopSetup := context.AfterFunc(setupCtx, closeBoth)
-	err = c.handshakeContext(setupCtx, conn)
-	stopped := stopSetup()
+	// Wire acceptance and timer expiry arbitrate under one lock. A scheduled
+	// callback cannot retroactively close an already-admitted root, including
+	// when local persistence takes longer than the remaining setup budget.
+	var admissionMu sync.Mutex
+	accepted := false
+	stopSetup := context.AfterFunc(setupCtx, func() {
+		admissionMu.Lock()
+		closeRoot := !accepted
+		admissionMu.Unlock()
+		if closeRoot {
+			closeBoth()
+		}
+	})
+	defer stopSetup()
+	err = c.handshakeWithAcceptance(setupCtx, conn, func() error {
+		admissionMu.Lock()
+		defer admissionMu.Unlock()
+		if err := setupContextError(setupCtx); err != nil {
+			return err
+		}
+		accepted = true
+		stopSetup()
+		return nil
+	})
+	stopSetup()
 	// Retain an observed security/protocol error even when the setup timer
 	// races its read. A timeout must never replace its denied classification.
 	if err != nil {
+		if accepted {
+			return false, err
+		}
 		return false, errors.Join(err, setupCtx.Err())
-	}
-	if setupCtx.Err() != nil {
-		return false, setupCtx.Err()
-	}
-	if !stopped {
-		return false, context.DeadlineExceeded
 	}
 	if current, _, _ := c.sessionFor(conn); current != session {
 		return false, net.ErrClosed

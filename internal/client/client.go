@@ -67,8 +67,11 @@ type Client struct {
 	session       transport.Session
 	sessionCtx    context.Context
 	sessionCancel context.CancelFunc
-	controlConn   net.Conn
-	connected     bool
+	// Retained until a native HY2 data open AND late-child cleanup finish.
+	// Request cancellation returns promptly without releasing this reservation.
+	hy2DataOpenSlots chan struct{}
+	controlConn      net.Conn
+	connected        bool
 	// credentialsGeneration mirrors cfg.Credentials.Generation. The server
 	// fields are the last HelloAck values; 0/false mean the server predates
 	// credential rotation, so the generation is unknown rather than 1.
@@ -707,11 +710,7 @@ func (c *Client) TCPContext(ctx context.Context, addr string) (net.Conn, error) 
 	if session == nil {
 		return nil, fmt.Errorf("client is not connected")
 	}
-	openCtx, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(ownerCtx, cancel)
-	defer stop()
-	defer cancel()
-	conn, err := session.OpenTCP(openCtx, transport.TCPRequest{Target: addr})
+	conn, err := c.openTCPData(ctx, ownerCtx, session, transport.TCPRequest{Target: addr})
 	if err != nil {
 		if conn != nil {
 			_ = conn.Close()
