@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -13,7 +14,7 @@ import (
 
 type hy2Session struct {
 	client       hyclient.Client
-	controlToken string // Reserved for the isolated probe protocol in Task 3.
+	controlToken string
 	packets      *packetTracker
 	closed       chan struct{}
 	closeOnce    sync.Once
@@ -139,7 +140,65 @@ func (s *hy2Session) Probe(ctx context.Context) (ProbeInfo, error) {
 	if err := s.operationErr(ctx); err != nil {
 		return ProbeInfo{}, err
 	}
-	return ProbeInfo{}, &Error{Code: ErrProtocol.Code, Cause: errors.New("HY2 probe unsupported")}
+	if s.controlToken == "" || len(s.controlToken) > greetingLimit {
+		return ProbeInfo{}, ErrProtocol
+	}
+	pctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+	defer cancel()
+	var info ProbeInfo
+	// The complete exchange remains owned until handoff. A session Close also
+	// cancels a child already returned by TCP(), even if upstream root Close
+	// does not propagate to it. This virtual channel never sends Hello.
+	_, err := s.open(pctx, func() (io.Closer, error) {
+		conn, err := s.client.TCP("_hy2tun_probe_:0")
+		if err != nil {
+			return conn, err
+		}
+		if conn == nil {
+			return nil, ErrProtocol
+		}
+		defer conn.Close()
+		stop := context.AfterFunc(pctx, func() { _ = conn.Close() })
+		defer stop()
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			select {
+			case <-s.closed:
+				_ = conn.Close()
+			case <-done:
+			}
+		}()
+		deadline, _ := pctx.Deadline()
+		_ = conn.SetDeadline(deadline)
+		var nonce [16]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return nil, err
+		}
+		text := hex.EncodeToString(nonce[:])
+		if err := WriteProbeRequest(conn, ProbeRequest{Version: protocolVersion, Token: s.controlToken, Nonce: text}); err != nil {
+			return nil, err
+		}
+		reply, err := ReadProbeReply(conn)
+		if err != nil {
+			return nil, err
+		}
+		if !reply.OK {
+			if reply.Error == "unauthorized" {
+				return nil, ErrAuthentication
+			}
+			return nil, ErrProtocol
+		}
+		if reply.Info.Nonce != text {
+			return nil, ErrProtocol
+		}
+		info = reply.Info
+		return conn, nil
+	})
+	if err != nil {
+		return ProbeInfo{}, err
+	}
+	return info, nil
 }
 
 func (s *hy2Session) Close() error {

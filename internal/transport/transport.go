@@ -33,10 +33,10 @@ type DatagramConn interface {
 }
 
 type ProbeInfo struct {
-	Version       int
-	Nonce         string
-	Mode          config.TransportMode
-	ServerVersion string
+	Version       int                  `json:"version"`
+	Nonce         string               `json:"nonce"`
+	Mode          config.TransportMode `json:"mode"`
+	ServerVersion string               `json:"server_version"`
 }
 
 // Session owns its transport. Cancellation of an in-flight HY2 open closes the

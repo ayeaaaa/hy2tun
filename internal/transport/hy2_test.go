@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	hyclient "github.com/apernet/hysteria/core/v2/client"
 	"github.com/apernet/quic-go"
 	"github.com/stretchr/testify/require"
+	"hy2tun/internal/config"
 )
 
 // The fake replaces only HY2 network operations. Literal virtual addresses and
@@ -90,8 +92,96 @@ func TestHY2AdapterRejectsInvalidRequests(t *testing.T) {
 	conn, err := s.OpenUDP(context.Background(), "")
 	require.Nil(t, conn)
 	require.ErrorIs(t, err, ErrProtocol)
-	_, err = s.Probe(context.Background())
-	require.ErrorIs(t, err, ErrProtocol) // Must not call TCP/Hello for Task 2.
+}
+
+func TestHY2ProbeBoundedIsolatedAndValidatesNonce(t *testing.T) {
+	for _, mismatch := range []bool{false, true} {
+		t.Run(fmt.Sprint(mismatch), func(t *testing.T) {
+			local, remote := net.Pipe()
+			defer remote.Close()
+			fake := newFakeHY2()
+			fake.tcp = func(addr string) (net.Conn, error) {
+				if addr != "_hy2tun_probe_:0" {
+					return nil, errors.New("probe sent ordinary control/Hello")
+				}
+				return local, nil
+			}
+			s := WrapHY2(fake, "secret")
+			defer s.Close()
+			done := make(chan error, 1)
+			go func() {
+				req, e := ReadProbeRequest(remote)
+				if e == nil && (req.Token != "secret" || req.Version != 1 || len(req.Nonce) != 32) {
+					e = errors.New("incorrect probe credentials")
+				}
+				if e == nil {
+					nonce := req.Nonce
+					if mismatch {
+						nonce = "00000000000000000000000000000000"
+					}
+					e = WriteProbeReply(remote, ProbeReply{OK: true, Info: ProbeInfo{Version: 1, Nonce: nonce, Mode: config.ModeAuto, ServerVersion: "test"}})
+				}
+				done <- e
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			info, err := s.Probe(ctx)
+			if mismatch {
+				require.ErrorIs(t, err, ErrProtocol)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, config.ModeAuto, info.Mode)
+			}
+			require.NoError(t, waitError(t, done))
+			requirePeerClosed(t, remote)
+		})
+	}
+}
+
+func TestHY2ProbeCancellationClosesChildNotActiveTCP(t *testing.T) {
+	active, peer, activectx := tcpPair(t, RateLimits{}, 0, 0)
+	local, remote := net.Pipe()
+	defer remote.Close()
+	fake := newFakeHY2()
+	fake.tcp = func(addr string) (net.Conn, error) {
+		if addr != "_hy2tun_probe_:0" {
+			return nil, ErrProtocol
+		}
+		return local, nil
+	}
+	probe := WrapHY2(fake, "secret")
+	defer probe.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	serverDone := make(chan error, 1)
+	go func() {
+		_, e := ReadProbeRequest(remote)
+		close(started)
+		if e == nil {
+			_, e = remote.Read(make([]byte, 1))
+		}
+		serverDone <- e
+	}()
+	done := make(chan error, 1)
+	go func() { _, e := probe.Probe(ctx); done <- e }()
+	waitSignal(t, started)
+	cancel()
+	require.ErrorIs(t, waitError(t, done), context.Canceled)
+	require.Error(t, waitError(t, serverDone))
+	waitSignal(t, fake.closed)
+	go func() {
+		_, c, e := peer.Accept(activectx)
+		if e == nil {
+			defer c.Close()
+			e = WriteStreamAck(c, nil)
+		}
+		done <- e
+	}()
+	control, err := active.OpenControl(activectx)
+	require.NoError(t, err)
+	defer control.Close()
+	require.NoError(t, waitError(t, done))
 }
 
 func TestHY2AdapterCancellationClosesLateTCP(t *testing.T) {
