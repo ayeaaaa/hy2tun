@@ -19,6 +19,7 @@ var ErrProxyConflict = errors.New("proxy address conflict")
 // shares mappings, credentials, or proxy listeners with another server.
 type ClientServerConfig struct {
 	Name        string                 `yaml:"name" json:"name"`
+	Mode        TransportMode          `yaml:"mode,omitempty" json:"mode,omitempty"`
 	Server      string                 `yaml:"server" json:"server"`
 	Auth        string                 `yaml:"auth" json:"-"`
 	TLS         ClientTLSConfig        `yaml:"tls" json:"tls"`
@@ -54,6 +55,7 @@ func (c *ClientConfig) ServerConfigs() []ClientServerConfig {
 	proxy.ResolveLegacyProxy()
 	return []ClientServerConfig{{
 		Name:        "default",
+		Mode:        c.Mode,
 		Server:      c.Server,
 		Auth:        c.Auth,
 		TLS:         c.TLS,
@@ -89,6 +91,7 @@ func cloneTransport(value *ClientTransportConfig) *ClientTransportConfig {
 // ToClientConfig builds the single-server worker configuration for this server.
 func (s ClientServerConfig) ToClientConfig(web WebConfig, log LogConfig, path string) *ClientConfig {
 	return &ClientConfig{
+		Mode:        s.Mode,
 		Server:      s.Server,
 		Auth:        s.Auth,
 		TLS:         s.TLS,
@@ -135,7 +138,7 @@ func (c *ClientConfig) validateMultiServer() error {
 }
 
 func (c *ClientConfig) legacyFieldsSet() bool {
-	return c.Server != "" || c.Auth != "" || c.TLS != (ClientTLSConfig{}) ||
+	return c.Mode != "" || c.Server != "" || c.Auth != "" || c.TLS != (ClientTLSConfig{}) ||
 		c.Obfs != (ObfsConfig{}) || c.Bandwidth != (BandwidthConfig{}) ||
 		c.Transport != nil || c.Control != (ControlConfig{}) ||
 		c.Client != (ClientIdentity{}) || len(c.Mappings) > 0 ||
@@ -166,11 +169,25 @@ func (s ClientServerConfig) validate(index int) error {
 		}
 		return fmt.Errorf("%s.name contains an invalid character", field)
 	}
-	if _, _, hopping, err := parseClientServer(s.Server); err != nil {
+	if err := s.Mode.Validate(); err != nil {
+		return fmt.Errorf("%s.mode: %w", field, err)
+	}
+	_, _, hopping, err := parseClientServer(s.Server)
+	if err != nil {
 		return fmt.Errorf("%s.server: %w", field, err)
-	} else if _, _, err := s.hopInterval(); err != nil {
+	}
+	if s.Mode.Effective() == ModeTCP {
+		if err := validateTCPPort(s.Server); err != nil {
+			return fmt.Errorf("%s.server: %w", field, err)
+		}
+		if hasHopInterval(s.Transport) {
+			return fmt.Errorf("%s.transport: mode tcp does not support transport.udp hop intervals", field)
+		}
+	}
+	if _, _, err := s.hopInterval(); err != nil {
 		return fmt.Errorf("%s.transport: %w", field, err)
-	} else if !hopping && hasHopInterval(s.Transport) {
+	}
+	if !hopping && hasHopInterval(s.Transport) {
 		return fmt.Errorf("%s.transport.udp hop interval requires a multi-port server address", field)
 	}
 	if s.Auth == "" {

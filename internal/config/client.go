@@ -30,6 +30,7 @@ const DefaultClientWebListen = "0.0.0.0:7501"
 
 // ClientConfig is the hy2tun configuration.
 type ClientConfig struct {
+	Mode      TransportMode          `yaml:"mode,omitempty" json:"mode,omitempty"`
 	Server    string                 `yaml:"server" json:"server"`
 	Servers   []ClientServerConfig   `yaml:"servers,omitempty" json:"servers,omitempty"`
 	Auth      string                 `yaml:"auth" json:"-"`
@@ -125,9 +126,20 @@ func (c *ClientConfig) Validate() error {
 }
 
 func (c *ClientConfig) validateSingleServer() error {
+	if err := c.Mode.Validate(); err != nil {
+		return err
+	}
 	_, _, hopping, err := parseClientServer(c.Server)
 	if err != nil {
 		return err
+	}
+	if c.Mode.Effective() == ModeTCP {
+		if err := validateTCPPort(c.Server); err != nil {
+			return fmt.Errorf("server: %w", err)
+		}
+		if hasHopInterval(c.Transport) {
+			return fmt.Errorf("mode tcp does not support transport.udp hop intervals")
+		}
 	}
 	minHop, maxHop, err := c.HopInterval()
 	if err != nil {
@@ -224,6 +236,16 @@ func (c *ClientConfig) NormalizedServer() (string, bool, error) {
 		return "", false, fmt.Errorf("server must include a port")
 	}
 	return net.JoinHostPort(host, strconv.Itoa(ranges[0].Start)), false, nil
+}
+
+// TCPServerAddress derives the TCP endpoint from the first specified range's
+// start port. Port order is significant and is not sorted or merged.
+func (c *ClientConfig) TCPServerAddress() (string, error) {
+	host, ranges, _, err := parseClientServer(c.Server)
+	if err != nil {
+		return "", err
+	}
+	return net.JoinHostPort(host, strconv.Itoa(ranges[0].Start)), nil
 }
 
 // HopInterval returns the configured UDP hop interval bounds. A zero, zero

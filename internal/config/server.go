@@ -2,7 +2,9 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
+	"strconv"
 
 	"gopkg.in/yaml.v3"
 
@@ -11,6 +13,7 @@ import (
 
 // ServerConfig is the hy2tund configuration.
 type ServerConfig struct {
+	Mode         TransportMode   `yaml:"mode,omitempty" json:"mode,omitempty"`
 	Listen       string          `yaml:"listen" json:"listen"`
 	ListenHost   string          `yaml:"listen_host" json:"listen_host"`
 	ListenRanges []ports.Range   `yaml:"-" json:"-"`
@@ -70,9 +73,17 @@ func SaveServer(path string, cfg *ServerConfig) error {
 func (c *ServerConfig) Validate() error {
 	c.applyDefaults()
 
+	if err := c.Mode.Validate(); err != nil {
+		return err
+	}
 	_, ranges, err := ParseListen(c.Listen)
 	if err != nil {
 		return err
+	}
+	if c.Mode.Effective() == ModeTCP {
+		if err := validateTCPPort(c.Listen); err != nil {
+			return fmt.Errorf("listen: %w", err)
+		}
 	}
 	c.ListenRanges = ranges
 	if err := c.Auth.validate(); err != nil {
@@ -106,6 +117,16 @@ func (c *ServerConfig) Validate() error {
 		return fmt.Errorf("ports.offline_reserve must not be negative")
 	}
 	return nil
+}
+
+// TCPListenAddress derives the TCP bind address from the first specified range's
+// start port, preserving the listen host and the input's port order.
+func (c *ServerConfig) TCPListenAddress() (string, error) {
+	host, ranges, err := ParseListen(c.Listen)
+	if err != nil {
+		return "", err
+	}
+	return net.JoinHostPort(host, strconv.Itoa(ranges[0].Start)), nil
 }
 
 func (c *ServerConfig) applyDefaults() {
