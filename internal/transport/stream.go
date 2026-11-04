@@ -218,7 +218,16 @@ func (s *tcpSession) openStream(ctx context.Context, h StreamHeader) (net.Conn, 
 			}
 			return nil, s.connectionError(net.ErrClosed)
 		}
-		return r.c, s.connectionError(r.err)
+		if r.err != nil {
+			if r.c != nil {
+				r.c.cancel()
+			}
+			return nil, s.connectionError(r.err)
+		}
+		if r.c == nil {
+			return nil, ErrProtocol
+		}
+		return r.c, nil
 	}
 }
 
@@ -268,7 +277,17 @@ func (p *TCPPeer) Accept(ctx context.Context) (StreamHeader, net.Conn, error) {
 			}
 			return StreamHeader{}, nil, s.connectionError(net.ErrClosed)
 		}
-		return r.h, r.c, s.connectionError(r.err)
+		// Do not convert a nil *managedConn to a non-nil net.Conn interface.
+		if r.err != nil {
+			if r.c != nil {
+				r.c.cancel()
+			}
+			return StreamHeader{}, nil, s.connectionError(r.err)
+		}
+		if r.c == nil {
+			return StreamHeader{}, nil, ErrProtocol
+		}
+		return r.h, r.c, nil
 	}
 }
 

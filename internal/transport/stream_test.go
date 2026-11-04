@@ -24,7 +24,7 @@ func TestTCPStreamAckRejectsBadKind(t *testing.T) {
 	defer raw.Close()
 	require.NoError(t, writeJSONFrame(raw, StreamHeader{Kind: 99, Token: "sensitive", Target: "private:80"}, 4096))
 	_, c, err := peer.Accept(ctx)
-	require.Nil(t, c)
+	require.True(t, c == nil, "failed Accept must return a nil net.Conn interface, not a typed-nil pointer")
 	require.ErrorIs(t, err, ErrProtocol)
 	var ack streamAck
 	require.NoError(t, readJSONFrame(raw, &ack, 4096))
@@ -53,6 +53,33 @@ func TestTCPStreamAckRejectsBadKind(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "ok", string(b))
 	require.NoError(t, waitError(t, done))
+}
+
+func TestTCPStreamRejectedOpenReturnsNilInterface(t *testing.T) {
+	for _, reject := range []error{ErrAuthentication, ErrProtocol} {
+		t.Run(reject.Error(), func(t *testing.T) {
+			s, peer, ctx := tcpPair(t, RateLimits{}, 0, 0)
+			done := make(chan error, 1)
+			go func() {
+				_, c, e := peer.Accept(ctx)
+				if e == nil {
+					defer c.Close()
+					e = WriteStreamAck(c, reject)
+				}
+				done <- e
+			}()
+			c, err := s.OpenControl(ctx)
+			require.ErrorIs(t, err, reject)
+			require.True(t, c == nil, "a rejected application ack must return a nil net.Conn interface")
+			// Exercise the ordinary cleanup guard which would panic on typed nil.
+			require.NotPanics(t, func() {
+				if c != nil {
+					_ = c.Close()
+				}
+			})
+			require.NoError(t, waitError(t, done))
+		})
+	}
 }
 
 // A failed limiter wait must not skip consumed bytes, and retrying pending
@@ -102,31 +129,29 @@ func TestTCPStreamReadDeadlineRetainsBytesAndRate(t *testing.T) {
 func TestTCPStreamCancelClosesPending(t *testing.T) {
 	s, peer, ctx := tcpPair(t, RateLimits{}, 0, 0)
 	opctx, cancel := context.WithCancel(ctx)
-	done := make(chan error, 1)
+	outcomes := make(chan streamOutcome, 1)
 	go func() {
 		c, e := s.OpenTCP(opctx, TCPRequest{Target: "example.test:80"})
-		if c != nil {
-			_ = c.Close()
-			e = errors.New("delivered before ack")
-		}
-		done <- e
+		outcomes <- streamOutcome{conn: c, err: e}
 	}()
 	_, c, err := peer.Accept(ctx)
 	require.NoError(t, err)
 	defer c.Close()
 	select {
-	case <-done:
+	case <-outcomes:
 		t.Fatal("open did not wait for application ack")
 	default:
 	}
 	cancel()
-	require.ErrorIs(t, waitError(t, done), context.Canceled)
+	r := waitStreamOutcome(t, outcomes)
+	require.ErrorIs(t, r.err, context.Canceled)
+	require.True(t, r.conn == nil, "cancelled OpenTCP must return a nil net.Conn interface")
 	require.NoError(t, c.SetReadDeadline(time.Now().Add(time.Second)))
 	_, err = c.Read(make([]byte, 1))
 	require.Error(t, err)
 	// Unlike HY2's synchronous open, cancelling one pending TCP stream leaves
 	// the root session alive.
-	done = make(chan error, 1)
+	done := make(chan error, 1)
 	go func() {
 		_, c, e := peer.Accept(ctx)
 		if e == nil {
@@ -260,7 +285,7 @@ func TestTCPStreamAcceptQueuedAtCapacity(t *testing.T) {
 			require.NoError(t, writeJSONFrame(extra, StreamHeader{Kind: StreamControl}, 4096))
 			require.Eventually(t, func() bool { return peer.session.mux.NumStreams() == 1025 }, time.Second, time.Millisecond)
 			_, c, e := peer.Accept(ctx)
-			require.Nil(t, c)
+			require.True(t, c == nil, "capacity rejection must return a nil net.Conn interface")
 			require.ErrorIs(t, e, ErrQueueFull)
 			require.NoError(t, held[0].Close())
 			require.NoError(t, held[1].Close())
@@ -394,14 +419,10 @@ func TestTCPStreamAcceptCancellationRetainsCleanupBudget(t *testing.T) {
 			defer raw.Close()
 			pending, cancel := context.WithCancel(ctx)
 			defer cancel()
-			done := make(chan error, 1)
+			done := make(chan streamOutcome, 1)
 			go func() {
 				_, c, e := peer.Accept(pending)
-				if c != nil {
-					_ = c.Close()
-					e = errors.New("cancelled accept delivered a connection")
-				}
-				done <- e
+				done <- streamOutcome{conn: c, err: e}
 			}()
 			if tc.flags == 8 {
 				waitSignal(t, gate.ackSent)
@@ -409,7 +430,9 @@ func TestTCPStreamAcceptCancellationRetainsCleanupBudget(t *testing.T) {
 				waitSignal(t, gate.started)
 			}
 			cancel()
-			require.ErrorIs(t, waitError(t, done), context.Canceled)
+			r := waitStreamOutcome(t, done)
+			require.ErrorIs(t, r.err, context.Canceled)
+			require.True(t, r.conn == nil, "cancelled Accept must return a nil net.Conn interface")
 			if tc.flags == 8 {
 				waitSignal(t, gate.started)
 			}
@@ -417,6 +440,22 @@ func TestTCPStreamAcceptCancellationRetainsCleanupBudget(t *testing.T) {
 			gate.unblock()
 			require.Eventually(t, func() bool { return len(peer.session.slots) == 0 }, time.Second, time.Millisecond)
 		})
+	}
+}
+
+type streamOutcome struct {
+	conn net.Conn
+	err  error
+}
+
+func waitStreamOutcome(t *testing.T, ch <-chan streamOutcome) streamOutcome {
+	t.Helper()
+	select {
+	case r := <-ch:
+		return r
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream operation did not finish")
+		return streamOutcome{}
 	}
 }
 
