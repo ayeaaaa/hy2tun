@@ -79,11 +79,15 @@ type Client struct {
 	transportWork           *transportAttempt
 	setupSlots              map[setupOperation]chan struct{}
 	transportChanged        chan struct{}
+	modeChanged             chan struct{}
 	transportState          view.TransportState
 	lastTransport           string
 	activeSince             time.Time
-	heartbeat               *heartbeat
-	heartbeatTS             int64
+	// probeWork is the one outstanding probe/candidate, if any. A mode update
+	// that disables probing cancels it without invalidating an allowed owner.
+	probeWork   *transportAttempt
+	heartbeat   *heartbeat
+	heartbeatTS int64
 	// credentialsGeneration mirrors cfg.Credentials.Generation. The server
 	// fields are the last HelloAck values; 0/false mean the server predates
 	// credential rotation, so the generation is unknown rather than 1.
@@ -207,6 +211,7 @@ func newClientWithRuntime(cfg *config.ClientConfig, log *slog.Logger, skipProxyB
 		startedAt:             time.Now(),
 		runtime:               opts,
 		transportChanged:      make(chan struct{}, 1),
+		modeChanged:           make(chan struct{}, 1),
 		configPath:            cfg.ConfigPath,
 		credentialsGeneration: credentialsGeneration,
 		mappings:              mappingViews(cfg.Mappings, nil),
@@ -538,38 +543,40 @@ func (c *Client) Mappings() []view.MappingView {
 	return views
 }
 
-// Status returns the local connection status and aggregate traffic.
+// Status returns the local connection status and aggregate traffic. Config,
+// connection, credential and transport fields are sampled under one
+// configMu -> mu critical section so a concurrent transition cannot combine
+// metadata from different snapshots.
 func (c *Client) Status() view.ClientStatus {
 	c.configMu.Lock()
+	defer c.configMu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	name := c.cfg.Client.Name
 	server := c.cfg.Server
-	c.configMu.Unlock()
-
-	c.mu.Lock()
-	connected := c.connected
-	credentialGeneration := c.credentialsGeneration
-	serverCredentialGeneration := c.serverCredentialGeneration
-	credentialSynced := c.credentialSynced
-	c.mu.Unlock()
-
-	mappings := c.Mappings()
+	transport := c.transportState
+	transport.Mode = c.cfg.Mode.Effective()
+	mappings := c.mappings
 	var txBytes, rxBytes uint64
-	for _, mapping := range mappings {
-		txBytes += mapping.TxBytes
-		rxBytes += mapping.RxBytes
+	for i := range mappings {
+		if traffic := c.traffic[mappings[i].ID]; traffic != nil {
+			txBytes += traffic.tx.Load()
+			rxBytes += traffic.rx.Load()
+		}
 	}
 	return view.ClientStatus{
 		Name:                       name,
 		Server:                     server,
 		Version:                    version.Version,
-		Connected:                  connected,
+		Connected:                  c.connected,
 		Uptime:                     time.Since(c.startedAt),
 		TxBytes:                    txBytes,
 		RxBytes:                    rxBytes,
-		CredentialGeneration:       credentialGeneration,
-		ServerCredentialGeneration: serverCredentialGeneration,
-		CredentialSynced:           credentialSynced,
-		Transport:                  c.TransportState(),
+		CredentialGeneration:       c.credentialsGeneration,
+		ServerCredentialGeneration: c.serverCredentialGeneration,
+		CredentialSynced:           c.credentialSynced,
+		Transport:                  transport,
 	}
 }
 
@@ -625,6 +632,7 @@ func (c *Client) Settings() clientui.SettingsView {
 		WebUsername:           cfg.Web.Username,
 		WebPasswordConfigured: cfg.Web.PasswordHash != "",
 		Name:                  cfg.Client.Name,
+		Transport:             c.TransportState(),
 		Proxy: clientui.ProxyView{
 			Enabled: proxyState.Enabled,
 			SOCKS5:  proxyState.SOCKS5,

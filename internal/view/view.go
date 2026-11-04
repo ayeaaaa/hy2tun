@@ -27,6 +27,10 @@ type ClientView struct {
 	Online   bool
 	LastSeen time.Time
 	Mappings []MappingView
+	// Transport is the actual wire transport last used by this client
+	// ("hy2" or "tcp"). It is diagnostic only: Online remains the authority for
+	// whether the client is currently connected.
+	Transport string
 
 	// CredentialGeneration is the credential pair the client reported.
 	// CredentialSynced reports whether it matches the server's current pair.

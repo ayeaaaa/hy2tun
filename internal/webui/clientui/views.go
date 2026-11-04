@@ -30,7 +30,10 @@ type SettingsView struct {
 	Name                  string                 `json:"name"`
 	Credentials           CredentialSettingsView `json:"credentials"`
 	Proxy                 ProxyView              `json:"proxy"`
-	ReadOnly              []ReadOnlySetting      `json:"read_only"`
+	// Transport is retained for Task 9's settings/metrics shape; it is not
+	// exposed by the existing JSON contract yet.
+	Transport view.TransportState `json:"-"`
+	ReadOnly  []ReadOnlySetting   `json:"read_only"`
 }
 
 // ProxyView is the per-server local proxy state shown by the client console.

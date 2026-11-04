@@ -91,7 +91,14 @@ func (c *Client) TransportState() view.TransportState {
 // configMu -> mu is the shared admission boundary. Mapping edits are purposely
 // excluded: a successful recovery registers the latest revision/targets.
 func sameTransportConfig(a, b *config.ClientConfig) bool {
-	return a.Mode.Effective() == b.Mode.Effective() && a.Server == b.Server &&
+	return a.Mode.Effective() == b.Mode.Effective() && sameTransportIdentity(a, b)
+}
+
+// sameTransportIdentity compares every transport identity field except the
+// effective mode. A mode-only update can retain an owner whose kind remains
+// allowed, while any credential/endpoint/TLS change still invalidates it.
+func sameTransportIdentity(a, b *config.ClientConfig) bool {
+	return a.Server == b.Server &&
 		a.Auth == b.Auth && a.Control.Token == b.Control.Token && a.Client.ID == b.Client.ID &&
 		a.Credentials.Generation == b.Credentials.Generation && a.TLS == b.TLS &&
 		a.Bandwidth == b.Bandwidth && a.Obfs == b.Obfs
@@ -342,6 +349,57 @@ func (c *Client) recoveryCurrent(a *transportAttempt, session transport.Session,
 	return c.attemptCurrentLocked(a) && c.cfg.Mode.Effective() == config.ModeAuto && c.session == session && c.controlConn == owner && c.connected
 }
 
+// probePolicyActive reports whether the persistent TCP policy loop should
+// probe. Mode changes wake the loop through modeChanged.
+func (c *Client) probePolicyActive() bool {
+	return c.snapshotConfig().Mode.Effective() == config.ModeAuto
+}
+
+// installProbeWork records the one outstanding probe/candidate. A mode update
+// that disables probing cancels this attempt without cancelling an allowed
+// active owner.
+func (c *Client) installProbeWork(a *transportAttempt) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.isClosed() {
+		return false
+	}
+	c.probeWork = a
+	return true
+}
+
+func (c *Client) clearProbeWork(a *transportAttempt) {
+	c.mu.Lock()
+	if c.probeWork == a {
+		c.probeWork = nil
+	}
+	c.mu.Unlock()
+}
+
+// recoveryOwnerLive reports whether the policy loop still belongs to the same
+// wire-accepted owner. It deliberately ignores the epoch: a mode-only change
+// advances the epoch but retains an allowed owner, and the loop refreshes its
+// epoch from transportSnapshot instead of exiting.
+func (c *Client) recoveryOwnerLive(session transport.Session, owner net.Conn) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.isClosed() && c.session == session && c.controlConn == owner && c.connected
+}
+
+// recoveryIdentityCurrent distinguishes a mode-only change from a credential,
+// endpoint or TLS change that must stop the old policy loop.
+func (c *Client) recoveryIdentityCurrent(cfg *config.ClientConfig) bool {
+	c.configMu.Lock()
+	defer c.configMu.Unlock()
+	return sameTransportIdentity(cfg, c.cfg)
+}
+
+func (c *Client) transportSnapshot() (uint64, time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.transportEpoch, c.activeSince
+}
+
 func (c *Client) probeAttempt(a *transportAttempt) error {
 	s, err := c.dialSession(a.setup, transport.HY2, a.cfg)
 	if err != nil {
@@ -392,29 +450,61 @@ func probeErrorCode(err error) string {
 	}
 }
 
-// recoveryLoop owns one isolated HY2 probe at a time. Only a separately dialed
-// and probed candidate can cross the disruptive formal-registration boundary.
+// recoveryLoop owns one isolated HY2 probe at a time. It persists for the TCP
+// owner's lifetime and probes only while the effective mode is auto; a mode
+// update that retains this owner stops any in-flight probe/candidate through
+// probeWork and wakes the loop without replacing the owner.
 func (c *Client) recoveryLoop(lifetime, ctx context.Context, session transport.Session, owner net.Conn) *transportAttempt {
-	c.mu.Lock()
-	epoch, heldAt := c.transportEpoch, c.activeSince
-	c.mu.Unlock()
 	successes := 0
 	for {
+		// A mode change advances the epoch while retaining an allowed owner;
+		// refresh here so subsequent attempts use the current identity.
+		epoch, heldAt := c.transportSnapshot()
+		if !c.probePolicyActive() {
+			successes = 0
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-c.modeChanged:
+				continue
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-c.modeChanged:
+			successes = 0
+			continue
 		case <-c.runtime.Clock.After(c.runtime.Jitter(c.runtime.Policy.ProbeInterval)):
 		}
+		if !c.probePolicyActive() {
+			continue
+		}
 		a := c.newAttempt(ctx, transport.HY2, "probe")
-		if a.epoch != epoch || !c.recoveryCurrent(a, session, owner) {
+		if a.epoch != epoch || !c.installProbeWork(a) {
 			c.discardAttempt(a)
-			return nil
+			if !c.recoveryOwnerLive(session, owner) || !c.recoveryIdentityCurrent(a.cfg) {
+				return nil
+			}
+			successes = 0
+			continue
+		}
+		if !c.probePolicyActive() {
+			c.clearProbeWork(a)
+			c.discardAttempt(a)
+			successes = 0
+			continue
 		}
 		err := c.probeAttempt(a)
 		valid := c.recordProbe(a, session, owner, err)
+		c.clearProbeWork(a)
 		c.discardAttempt(a) // Success and failure both close every isolated probe.
 		if !valid {
-			return nil
+			if !c.recoveryOwnerLive(session, owner) || !c.recoveryIdentityCurrent(a.cfg) {
+				return nil
+			}
+			successes = 0
+			continue
 		}
 		if err != nil {
 			successes = 0
@@ -426,16 +516,36 @@ func (c *Client) recoveryLoop(lifetime, ctx context.Context, session transport.S
 		}
 		candidate := c.newAttempt(lifetime, transport.HY2, "hy2_recovered")
 		stop := context.AfterFunc(ctx, candidate.cancel)
-		if candidate.epoch != epoch || !c.recoveryCurrent(candidate, session, owner) {
+		if candidate.epoch != epoch || !c.installProbeWork(candidate) {
 			stop()
 			c.discardAttempt(candidate)
-			return nil
+			if !c.recoveryOwnerLive(session, owner) || !c.recoveryIdentityCurrent(candidate.cfg) {
+				return nil
+			}
+			successes = 0
+			continue
+		}
+		if !c.probePolicyActive() {
+			stop()
+			c.clearProbeWork(candidate)
+			c.discardAttempt(candidate)
+			successes = 0
+			continue
 		}
 		err = c.probeAttempt(candidate)
 		valid = c.recordProbe(candidate, session, owner, err)
+		c.clearProbeWork(candidate)
 		if !stop() || !valid || err != nil {
 			c.discardAttempt(candidate)
-			if ctx.Err() != nil || !valid {
+			if ctx.Err() != nil || !c.recoveryOwnerLive(session, owner) || !c.recoveryIdentityCurrent(candidate.cfg) {
+				return nil
+			}
+			successes = 0
+			continue
+		}
+		if !c.recoveryCurrent(candidate, session, owner) {
+			c.discardAttempt(candidate)
+			if !c.recoveryOwnerLive(session, owner) || !c.recoveryIdentityCurrent(candidate.cfg) {
 				return nil
 			}
 			successes = 0
@@ -448,7 +558,7 @@ func (c *Client) recoveryLoop(lifetime, ctx context.Context, session transport.S
 // The old control reader and recovery worker are joined before a new formal
 // Hello. No control handlers, queues or connections are replayed on the new root.
 func (c *Client) serveEstablished(ctx context.Context, session transport.Session, owner net.Conn, inbox *controlInbox) (*transportAttempt, error) {
-	if session.Kind() != transport.TCP || c.snapshotConfig().Mode.Effective() != config.ModeAuto {
+	if session.Kind() != transport.TCP {
 		return nil, c.serveControlInbox(owner, inbox)
 	}
 	recoveryCtx, cancel := context.WithCancel(ctx)

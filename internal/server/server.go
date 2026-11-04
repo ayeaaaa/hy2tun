@@ -45,8 +45,12 @@ type Server struct {
 	listenAddr net.Addr
 
 	// Endpoint ownership and worker retirement are independent of shared state.
+	// modeMu serializes online mode transactions with whole-server Close.
+	modeMu       sync.Mutex
 	listenersMu  sync.Mutex
 	endpoints    map[transport.Kind]endpoint
+	serving      map[endpoint]struct{}
+	serveErr     chan error
 	tlsConfig    *tls.Config
 	baseBindAddr string // Resolved once, including an ephemeral :0 port.
 	done         chan struct{}
@@ -106,6 +110,8 @@ func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 		cfg:         cfg,
 		log:         log,
 		endpoints:   make(map[transport.Kind]endpoint),
+		serving:     make(map[endpoint]struct{}),
+		serveErr:    make(chan error, 16),
 		tlsConfig:   &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13},
 		done:        make(chan struct{}),
 		startedAt:   time.Now(),
@@ -189,6 +195,9 @@ func (s *Server) Start(ctx context.Context) error {
 		s.listenersMu.Unlock()
 		return fmt.Errorf("server is not initialized")
 	}
+	if s.serveErr == nil {
+		s.serveErr = make(chan error, 16)
+	}
 
 	if s.web != nil {
 		if err := s.web.Start(); err != nil {
@@ -197,19 +206,13 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 
-	serveErr := make(chan error, len(s.endpoints))
 	for _, ep := range s.endpoints {
-		s.log.Info("server listening", "transport", ep.Kind(), "listen", ep.Addr().String())
-		go func() {
-			err := ep.Serve(context.Background())
-			s.retireEndpoint(ep)
-			serveErr <- fmt.Errorf("serve %s: %w", ep.Kind(), err)
-		}()
+		s.startEndpointLocked(ep)
 	}
 	s.listenersMu.Unlock()
 
 	select {
-	case err := <-serveErr:
+	case err := <-s.serveErr:
 		if s.closed.Load() {
 			return nil
 		}
@@ -225,6 +228,10 @@ func (s *Server) Start(ctx context.Context) error {
 // returns the same error on every call.
 func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
+		// Serialize with UpdateMode: once Close wins, no candidate can be
+		// published or served afterwards.
+		s.modeMu.Lock()
+		defer s.modeMu.Unlock()
 		s.closed.Store(true)
 		if s.done != nil {
 			close(s.done)
@@ -232,6 +239,7 @@ func (s *Server) Close() error {
 		s.listenersMu.Lock()
 		endpoints := s.endpoints
 		s.endpoints = make(map[transport.Kind]endpoint)
+		s.serving = make(map[endpoint]struct{})
 		s.listenersMu.Unlock()
 		var errs []error
 		if s.web != nil {

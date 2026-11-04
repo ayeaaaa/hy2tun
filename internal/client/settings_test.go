@@ -38,6 +38,7 @@ func TestClientSettingsViewMasksSecretsAndReportsReadOnlyFields(t *testing.T) {
 	require.Equal(t, "ops", settings.WebUsername)
 	require.True(t, settings.WebPasswordConfigured)
 	require.Equal(t, "home", settings.Name)
+	require.Equal(t, config.ModeHY2, settings.Transport.Mode)
 	require.Equal(t, int64(4), settings.Credentials.Generation)
 	require.Equal(t, int64(0), settings.Credentials.ServerGeneration)
 	require.False(t, settings.Credentials.Synced)

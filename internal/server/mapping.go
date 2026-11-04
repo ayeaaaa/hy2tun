@@ -682,13 +682,14 @@ func (m *mappingManager) persistLocked(sess *clientSession, now time.Time) {
 		mappings = append(mappings, mapping)
 	}
 	m.store.Upsert(state.ClientState{
-		ID:       sess.id,
-		Name:     sess.name,
-		Version:  sess.version,
-		Revision: sess.revision,
-		Online:   true,
-		LastSeen: now,
-		Mappings: mappings,
+		ID:        sess.id,
+		Name:      sess.name,
+		Version:   sess.version,
+		Revision:  sess.revision,
+		Online:    true,
+		LastSeen:  now,
+		Mappings:  mappings,
+		Transport: string(sess.transport),
 	})
 }
 
@@ -763,12 +764,13 @@ func (m *mappingManager) clientViews() []view.ClientView {
 				continue
 			}
 			clientView := view.ClientView{
-				ID:       id,
-				Name:     client.Name,
-				Version:  client.Version,
-				Revision: client.Revision,
-				Online:   false,
-				LastSeen: client.LastSeen,
+				ID:        id,
+				Name:      client.Name,
+				Version:   client.Version,
+				Revision:  client.Revision,
+				Online:    false,
+				LastSeen:  client.LastSeen,
+				Transport: client.Transport,
 			}
 			for _, mapping := range client.Mappings {
 				status := mappingStatusOffline
@@ -801,6 +803,7 @@ func sessionView(sess *clientSession) view.ClientView {
 		CredentialGeneration: generation,
 		CredentialSynced:     synced,
 		CredentialCapable:    capable,
+		Transport:            string(sess.transport),
 	}
 	for _, id := range sess.order {
 		rt := sess.mappings[id]

@@ -9,6 +9,7 @@ import (
 	"hy2tun/internal/config"
 	"hy2tun/internal/control"
 	"hy2tun/internal/credentials"
+	"hy2tun/internal/transport"
 	"hy2tun/internal/view"
 )
 
@@ -180,12 +181,11 @@ func (c *Client) RotateLocalCredentials(generation int64, auth, controlToken str
 		return err
 	}
 	c.storeConfigLocked(next, c.udpTokenSnapshot(), c.mappingSnapshot())
-	c.configMu.Unlock()
-
 	c.mu.Lock()
 	c.credentialsGeneration = generation
 	c.credentialSynced = false
 	c.mu.Unlock()
+	c.configMu.Unlock()
 
 	c.log.Info("credentials applied locally", "generation", generation)
 	c.forceReconnect()
@@ -350,16 +350,37 @@ func (c *Client) currentCredentialGeneration() int64 {
 // storeConfigLocked installs a new configuration and its derived read models.
 // The caller must hold configMu.
 func (c *Client) storeConfigLocked(next *config.ClientConfig, tokens map[string]string, views []view.MappingView) {
-	transportChanged := !sameTransportConfig(c.cfg, next)
 	modeChanged := c.cfg.Mode.Effective() != next.Mode.Effective()
+	identityChanged := !sameTransportIdentity(c.cfg, next)
 	c.cfg = next
 
 	c.mu.Lock()
-	if transportChanged {
+	ownerAllowed := false
+	if c.connected && c.session != nil {
+		switch c.session.Kind() {
+		case transport.TCP:
+			ownerAllowed = next.Mode.AllowsTCP()
+		case transport.HY2:
+			ownerAllowed = next.Mode.AllowsHY2()
+		}
+	}
+	// A mode change always advances the transport epoch and invalidates
+	// unaccepted dial/probe/candidate work. An active owner whose kind the new
+	// mode allows is nevertheless retained; only its probe policy changes.
+	if identityChanged || modeChanged {
 		c.invalidateTransportLocked()
 	}
-	if modeChanged && c.sessionCancel != nil {
-		c.sessionCancel()
+	if modeChanged {
+		if !ownerAllowed && c.sessionCancel != nil {
+			c.sessionCancel()
+		}
+		if c.probeWork != nil {
+			c.probeWork.cancel()
+		}
+		select {
+		case c.modeChanged <- struct{}{}:
+		default:
+		}
 	}
 	c.mappingConfigs = mappingConfigMap(next.Mappings)
 	c.udpTokens = tokens

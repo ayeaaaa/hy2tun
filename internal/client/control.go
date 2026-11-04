@@ -195,9 +195,8 @@ func (c *Client) applyHelloAck(snapshot *config.ClientConfig, ack *control.Hello
 	tokens := mergeHelloTokens(snapshot.Mappings, next.Mappings, ack.Results)
 	views := helloViews(snapshot.Mappings, next.Mappings, ack.Results)
 	c.storeConfigLocked(next, tokens, views)
-	c.configMu.Unlock()
-
 	c.recordServerCredentials(ack)
+	c.configMu.Unlock()
 
 	// If the hello write-back changed the file, or a local edit happened while
 	// hello was in flight, announce the current config. A local edit that

@@ -43,6 +43,21 @@ var _ clientui.API = (*Supervisor)(nil)
 // workers, applies per-server proxy listeners, and creates the shared web
 // console. It does not connect to any server until Start.
 func NewSupervisor(cfg *config.ClientConfig, log *slog.Logger) (*Supervisor, error) {
+	return newSupervisor(cfg, log, func(workerCfg *config.ClientConfig, workerLog *slog.Logger) (*Client, error) {
+		return NewWorker(workerCfg, workerLog)
+	})
+}
+
+// NewSupervisorWithRuntime is the test/runtime-injection constructor. Each
+// worker is created independently with the supplied policy/clock/dial seams;
+// production callers use NewSupervisor for the defaults.
+func NewSupervisorWithRuntime(cfg *config.ClientConfig, log *slog.Logger, opts RuntimeOptions) (*Supervisor, error) {
+	return newSupervisor(cfg, log, func(workerCfg *config.ClientConfig, workerLog *slog.Logger) (*Client, error) {
+		return newClientWithRuntime(workerCfg, workerLog, true, opts)
+	})
+}
+
+func newSupervisor(cfg *config.ClientConfig, log *slog.Logger, newWorker func(*config.ClientConfig, *slog.Logger) (*Client, error)) (*Supervisor, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("client config is nil")
 	}
@@ -96,7 +111,7 @@ func NewSupervisor(cfg *config.ClientConfig, log *slog.Logger) (*Supervisor, err
 	for _, server := range servers {
 		workerCfg := server.ToClientConfig(cfg.Web, cfg.Log, cfg.ConfigPath)
 		workerCfg.Web.Listen = ""
-		worker, err := NewWorker(workerCfg, log)
+		worker, err := newWorker(workerCfg, log)
 		if err != nil {
 			sup.closeWorkers()
 			return nil, fmt.Errorf("create server %q: %w", server.Name, err)
@@ -319,6 +334,17 @@ func (s *Supervisor) UpdateName(name string) error {
 	return worker.UpdateName(name)
 }
 
+// UpdateMode applies a transport mode to the selected worker only. Multi-server
+// callers select a worker through Server(name); the shared web console,
+// mappings, credentials and other workers are untouched.
+func (s *Supervisor) UpdateMode(mode config.TransportMode) error {
+	worker := s.defaultWorker()
+	if worker == nil {
+		return fmt.Errorf("client is not initialized")
+	}
+	return worker.UpdateMode(mode)
+}
+
 func (s *Supervisor) RotateLocalCredentials(generation int64, auth, controlToken string) error {
 	worker := s.defaultWorker()
 	if worker == nil {
@@ -532,6 +558,7 @@ func (s *Supervisor) persistWorker(name string, workerCfg *config.ClientConfig) 
 		}
 	} else {
 		next.Server = workerCfg.Server
+		next.Mode = workerCfg.Mode
 		next.Auth = workerCfg.Auth
 		next.TLS = workerCfg.TLS
 		next.Obfs = workerCfg.Obfs
@@ -569,6 +596,7 @@ func sameProxyAddresses(a, b config.ProxyConfig) bool {
 func serverFromWorker(name string, workerCfg *config.ClientConfig) config.ClientServerConfig {
 	return config.ClientServerConfig{
 		Name:        name,
+		Mode:        workerCfg.Mode,
 		Server:      workerCfg.Server,
 		Auth:        workerCfg.Auth,
 		TLS:         workerCfg.TLS,

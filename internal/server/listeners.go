@@ -23,6 +23,10 @@ type endpoint interface {
 	Addr() net.Addr
 	Serve(context.Context) error
 	Close() error
+	// markRetired records an intentional mode retirement so the Serve worker
+	// does not report it as a fatal endpoint failure.
+	markRetired()
+	isRetired() bool
 }
 
 // prepareInitialEndpoints publishes the complete startup set, never a partial
@@ -178,10 +182,13 @@ type hy2Endpoint struct {
 	closeOnce  sync.Once
 	closeErr   error
 	closed     atomic.Bool
+	retired    atomic.Bool
 }
 
 func (e *hy2Endpoint) Kind() transport.Kind { return transport.HY2 }
 func (e *hy2Endpoint) Addr() net.Addr       { return e.packetConn.LocalAddr() }
+func (e *hy2Endpoint) markRetired()         { e.retired.Store(true) }
+func (e *hy2Endpoint) isRetired() bool      { return e.retired.Load() }
 func (e *hy2Endpoint) Serve(ctx context.Context) error {
 	stop := context.AfterFunc(ctx, func() { _ = e.Close() })
 	defer stop()
@@ -221,10 +228,13 @@ type tcpEndpoint struct {
 	workers        sync.WaitGroup
 	closeOnce      sync.Once
 	closeErr       error
+	retired        atomic.Bool
 }
 
 func (e *tcpEndpoint) Kind() transport.Kind { return transport.TCP }
 func (e *tcpEndpoint) Addr() net.Addr       { return e.listener.Addr() }
+func (e *tcpEndpoint) markRetired()         { e.retired.Store(true) }
+func (e *tcpEndpoint) isRetired() bool      { return e.retired.Load() }
 func (e *tcpEndpoint) Serve(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -317,11 +327,39 @@ func (e *tcpEndpoint) Close() error {
 	return e.closeErr
 }
 
+// startEndpointLocked launches one endpoint's Serve worker at most once. Both
+// Start and online mode activation use it, so an endpoint cannot be served
+// twice when a mode update races startup. The caller holds listenersMu.
+func (s *Server) startEndpointLocked(ep endpoint) {
+	if s.serving == nil {
+		s.serving = make(map[endpoint]struct{})
+	}
+	if _, ok := s.serving[ep]; ok {
+		return
+	}
+	s.serving[ep] = struct{}{}
+	s.log.Info("server listening", "transport", ep.Kind(), "listen", ep.Addr().String())
+	go func() {
+		err := ep.Serve(context.Background())
+		s.retireEndpoint(ep)
+		if ep.isRetired() {
+			// An intentional mode retirement is not a fatal server error.
+			return
+		}
+		select {
+		case s.serveErr <- fmt.Errorf("serve %s: %w", ep.Kind(), err):
+		default:
+			s.log.Warn("endpoint serve error after shutdown", "transport", ep.Kind(), "error", err)
+		}
+	}()
+}
+
 // retireEndpoint never closes shared state/Web or unregisters a replacement.
-// Task 8 must serialize replacement publication with this retirement boundary.
+// Task 8 serializes replacement publication with this retirement boundary.
 func (s *Server) retireEndpoint(ep endpoint) {
 	_ = ep.Close()
 	s.listenersMu.Lock()
+	delete(s.serving, ep)
 	if s.endpoints[ep.Kind()] != ep {
 		s.listenersMu.Unlock()
 		return

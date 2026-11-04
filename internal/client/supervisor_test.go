@@ -137,6 +137,24 @@ func TestSupervisorExposesServerSummaries(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestSupervisorWithRuntimeInjectsEachWorker(t *testing.T) {
+	cfg := multiClientConfigForTest()
+	cfg.ConfigPath = filepath.Join(t.TempDir(), "client.yaml")
+	clock := newPolicyClock()
+	policy := recoveryTestPolicy()
+	sup, err := NewSupervisorWithRuntime(cfg, nil, RuntimeOptions{Policy: policy, Clock: clock})
+	require.NoError(t, err)
+	defer sup.Close()
+
+	require.Len(t, sup.workers, 2)
+	for _, name := range []string{"us", "sg"} {
+		worker := sup.workers[name]
+		require.NotNil(t, worker)
+		require.Equal(t, policy, worker.runtime.Policy)
+		require.Equal(t, clock, worker.runtime.Clock)
+	}
+}
+
 func TestSupervisorDoesNotGuessServerWithoutDefault(t *testing.T) {
 	cfg := multiClientConfigForTest()
 	cfg.ConfigPath = filepath.Join(t.TempDir(), "client.yaml")

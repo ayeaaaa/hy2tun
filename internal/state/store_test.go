@@ -32,6 +32,27 @@ func TestStoreAtomicSaveAndReload(t *testing.T) {
 	require.Equal(t, int64(2), got.Revision)
 }
 
+func TestClientStateTransportRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	s, err := Open(path, time.Hour)
+	require.NoError(t, err)
+	s.Upsert(ClientState{ID: "c1", Name: "home", Online: false, Transport: "tcp"})
+	require.NoError(t, s.Save())
+	require.NoError(t, s.Close())
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Contains(t, string(data), `"transport": "tcp"`)
+
+	s2, err := Open(path, time.Hour)
+	require.NoError(t, err)
+	defer s2.Close()
+	got := s2.Snapshot().Clients["c1"]
+	require.NotNil(t, got)
+	require.False(t, got.Online)
+	require.Equal(t, "tcp", got.Transport)
+}
+
 func TestReservationExpires(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "state.json"), time.Hour)
 	require.NoError(t, err)

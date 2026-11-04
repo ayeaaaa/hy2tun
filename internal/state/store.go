@@ -43,6 +43,9 @@ type ClientState struct {
 	LastSeen      time.Time        `json:"last_seen"`
 	Mappings      []config.Mapping `json:"mappings"`
 	ReservedUntil time.Time        `json:"reserved_until"`
+	// Transport records the last actual wire transport for offline diagnostics.
+	// It never makes an offline client look active.
+	Transport string `json:"transport,omitempty"`
 }
 
 // State is the persisted root document.
