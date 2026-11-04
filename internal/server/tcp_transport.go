@@ -22,6 +22,7 @@ type sessionMeta struct {
 	CloseTransport    func() error
 	HandshakeDeadline time.Time
 	registered        func()
+	endpointClosed    *atomic.Bool
 }
 
 // The endpoint supplies TLS and lifetime context, not cached mode/credentials.
@@ -89,14 +90,48 @@ func tcpPrincipalValid(p transport.Principal, set *credentials.Set) bool {
 }
 
 type tcpRegistrationDeadlineKey struct{}
+type tcpAdmissionKey struct{}
 
 // serveTCPConn owns an already-accepted raw connection. Production binding and
 // endpoint workers belong to the startup layer; this entry is also usable by a
 // private listener. TLS, greeting, and HelloAck share the same ten-second budget.
 func (s *Server) serveTCPConn(ctx context.Context, conn net.Conn, tlsConfig *tls.Config) error {
 	deadline := time.Now().Add(controlHandshakeTimeout)
+	if acceptedDeadline, ok := ctx.Value(tcpRegistrationDeadlineKey{}).(time.Time); ok {
+		deadline = acceptedDeadline
+	}
 	hctx, cancel := context.WithDeadline(ctx, deadline)
-	peer, err := transport.AcceptTCP(hctx, conn, s.tcpServerOptions(tlsConfig))
+	defer cancel()
+	// Snapshot acquisition can wait for a settings writer. The raw socket's
+	// accepted deadline must expire independently of that wait, before TLS starts.
+	stop := context.AfterFunc(hctx, func() {
+		if conn != nil {
+			_ = conn.Close()
+		}
+	})
+	defer stop()
+	opts := s.tcpServerOptions(tlsConfig)
+	if admit, ok := ctx.Value(tcpAdmissionKey{}).(func() error); ok {
+		authenticate := opts.Authenticate
+		opts.Authenticate = func(ctx context.Context, addr net.Addr, greeting transport.Greeting) (transport.Principal, error) {
+			principal, err := authenticate(ctx, addr, greeting)
+			if err != nil {
+				return transport.Principal{}, err
+			}
+			if err := admit(); err != nil {
+				return transport.Principal{}, err
+			}
+			return principal, nil
+		}
+	}
+	peer, err := transport.AcceptTCP(hctx, conn, opts)
+	if !stop() && err == nil {
+		_ = peer.Close()
+		err = hctx.Err()
+		if err == nil {
+			err = net.ErrClosed
+		}
+	}
 	cancel()
 	if err != nil {
 		return err

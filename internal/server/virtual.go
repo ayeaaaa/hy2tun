@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	hyserver "github.com/apernet/hysteria/core/v2/server"
+	"hy2tun/internal/transport"
 )
 
 const (
@@ -79,7 +80,7 @@ func (o *outbound) virtualTCP(kind, token string) (net.Conn, error) {
 			return nil, fmt.Errorf("hy2tun control plane is not available")
 		}
 		clientEnd, serverEnd := net.Pipe()
-		go o.server.control.Serve(serverEnd)
+		go o.server.control.serveWithMeta(serverEnd, sessionMeta{Kind: transport.HY2, endpointClosed: o.endpointClosed})
 		return clientEnd, nil
 	case virtualKindData:
 		if o.server == nil || o.server.data == nil {

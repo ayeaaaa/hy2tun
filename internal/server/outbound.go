@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"net"
+	"sync/atomic"
 	"time"
 
 	hyserver "github.com/apernet/hysteria/core/v2/server"
@@ -15,7 +16,8 @@ var outboundDialer = net.Dialer{Timeout: 10 * time.Second}
 // giving standard Hysteria proxy behavior. Reserved hy2tun virtual addresses
 // are routed to the control, data, or UDP mapping plane.
 type outbound struct {
-	server *Server
+	server         *Server
+	endpointClosed *atomic.Bool
 }
 
 // TCP dials reqAddr as a normal TCP destination. Reserved hy2tun virtual

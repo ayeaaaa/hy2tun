@@ -90,11 +90,6 @@ func (h *controlHandler) serveWithMeta(conn net.Conn, meta sessionMeta) {
 		h.reject(conn, control.CodeBadMessage)
 		return
 	}
-	if !h.server.mappings.hasClient(hello.ClientID) &&
-		h.server.mappings.clientCount() >= maxControlClients {
-		h.reject(conn, control.CodeBadMessage)
-		return
-	}
 	if hello.Revision < 0 {
 		h.reject(conn, control.CodeBadMessage)
 		return
@@ -214,6 +209,12 @@ func (s *Server) registerControl(sess *clientSession, hello *control.Hello, meta
 		current := s.currentCredentials()
 		authenticated, ok := current.AcceptControlToken(hello.Token)
 		if !ok || s.closed.Load() || !time.Now().Before(deadline) {
+			return transport.ErrAuthentication
+		}
+		if meta.endpointClosed != nil && meta.endpointClosed.Load() {
+			return transport.ErrAuthentication
+		}
+		if meta.Kind == transport.HY2 && (s.cfg == nil || !s.cfg.Mode.AllowsHY2()) {
 			return transport.ErrAuthentication
 		}
 		if meta.Kind == transport.TCP {

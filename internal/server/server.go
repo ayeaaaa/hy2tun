@@ -9,11 +9,9 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,14 +19,13 @@ import (
 
 	hyserver "github.com/apernet/hysteria/core/v2/server"
 	"github.com/apernet/hysteria/extras/v2/auth"
-	"github.com/apernet/hysteria/extras/v2/obfs"
 	"golang.org/x/crypto/bcrypt"
 
 	"hy2tun/internal/config"
 	"hy2tun/internal/credentials"
-	"hy2tun/internal/firewall"
 	"hy2tun/internal/ports"
 	"hy2tun/internal/state"
+	"hy2tun/internal/transport"
 	"hy2tun/internal/version"
 	"hy2tun/internal/view"
 	"hy2tun/internal/webui/serverui"
@@ -46,6 +43,13 @@ type Server struct {
 	hyServer   hyserver.Server
 	packetConn net.PacketConn
 	listenAddr net.Addr
+
+	// Endpoint ownership and worker retirement are independent of shared state.
+	listenersMu  sync.Mutex
+	endpoints    map[transport.Kind]endpoint
+	tlsConfig    *tls.Config
+	baseBindAddr string // Resolved once, including an ephemeral :0 port.
+	done         chan struct{}
 
 	store      *state.Store
 	mappings   *mappingManager
@@ -78,8 +82,8 @@ type Server struct {
 	closeErr  error
 }
 
-// New validates cfg, loads the TLS key pair, binds the UDP socket, and creates
-// the Hysteria server. It does not start serving; call Start for that.
+// New validates cfg, loads TLS, initializes shared state and binds every required
+// endpoint. It does not accept application traffic; call Start for that.
 func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("server config is nil")
@@ -98,26 +102,12 @@ func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 		return nil, fmt.Errorf("load TLS key pair: %w", err)
 	}
 	credStore := credentials.NewStore(credentialSetFromConfig(cfg))
-	authenticator, err := newAuthenticator(&cfg.Auth, credStore)
-	if err != nil {
-		return nil, err
-	}
-
-	host, ranges, err := config.ParseListen(cfg.Listen)
-	if err != nil {
-		return nil, fmt.Errorf("parse listen: %w", err)
-	}
-	bindAddr := net.JoinHostPort(host, strconv.Itoa(ranges[0].Start))
-	packetConn, err := net.ListenPacket("udp", bindAddr)
-	if err != nil {
-		return nil, fmt.Errorf("listen UDP %s: %w", bindAddr, err)
-	}
-
 	s := &Server{
 		cfg:         cfg,
 		log:         log,
-		packetConn:  packetConn,
-		listenAddr:  packetConn.LocalAddr(),
+		endpoints:   make(map[transport.Kind]endpoint),
+		tlsConfig:   &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13},
+		done:        make(chan struct{}),
 		startedAt:   time.Now(),
 		data:        newDataStreams(),
 		probeSlots:  make(chan struct{}, 32),
@@ -126,113 +116,44 @@ func New(cfg *config.ServerConfig, log *slog.Logger) (*Server, error) {
 	}
 	s.trustProxy.Store(cfg.Web.TrustProxy)
 
-	var firewallCleanup io.Closer
-	needsRedirect := len(ranges) > 1 || (len(ranges) == 1 && ranges[0].Start != ranges[0].End)
-	if needsRedirect && !(len(ranges) == 1 && ranges[0].Start == 0) {
-		addr, ok := packetConn.LocalAddr().(*net.UDPAddr)
-		if !ok {
-			_ = packetConn.Close()
-			return nil, fmt.Errorf("unexpected UDP listen address %T", packetConn.LocalAddr())
-		}
-		firewallCleanup, err = firewall.SetupUDPPortRedirect(addr, ranges)
-		if err != nil {
-			_ = packetConn.Close()
-			return nil, fmt.Errorf("set up port range redirects: %w", err)
-		}
-	}
-	closeFirewall := func() {
-		if firewallCleanup != nil {
-			_ = firewallCleanup.Close()
-		}
-	}
-
 	policy, err := ports.NewPolicy(cfg.Ports.Allow, cfg.Ports.Deny, cfg.Ports.AutoRange)
 	if err != nil {
-		closeFirewall()
-		_ = packetConn.Close()
 		return nil, fmt.Errorf("create port policy: %w", err)
 	}
 	if err := s.initState(); err != nil {
-		closeFirewall()
-		_ = packetConn.Close()
 		return nil, err
 	}
+	// All later failures unwind shared resources as well as prepared endpoints.
+	initialized := false
+	defer func() {
+		if !initialized {
+			_ = s.Close()
+		}
+	}()
 	s.mappings = newMappingManager(policy, s.store, log, cfg.ListenHost, s.reservedPorts(), s.data)
 	s.mappings.serveTCP = s.serveTCP
 	s.control = newControlHandler(s, log)
-
-	conn := packetConn
-	if cfg.Obfs.Type != "" {
-		if cfg.Obfs.Type != "salamander" {
-			closeFirewall()
-			_ = packetConn.Close()
-			return nil, fmt.Errorf("unsupported obfs.type %q", cfg.Obfs.Type)
-		}
-		conn, err = obfs.WrapPacketConnSalamander(packetConn, []byte(cfg.Obfs.Salamander.Password))
-		if err != nil {
-			closeFirewall()
-			_ = packetConn.Close()
-			return nil, fmt.Errorf("configure salamander obfs: %w", err)
-		}
-	}
-
-	hyConfig := &hyserver.Config{
-		Cleanup: firewallCleanup,
-		TLSConfig: hyserver.TLSConfig{
-			Certificates: []tls.Certificate{cert},
-		},
-		QUICConfig: hyserver.QUICConfig{
-			InitialStreamReceiveWindow:     cfg.QUIC.InitialStreamReceiveWindow,
-			MaxStreamReceiveWindow:         cfg.QUIC.MaxStreamReceiveWindow,
-			InitialConnectionReceiveWindow: cfg.QUIC.InitialConnectionReceiveWindow,
-			MaxConnectionReceiveWindow:     cfg.QUIC.MaxConnectionReceiveWindow,
-			MaxIdleTimeout:                 time.Duration(cfg.QUIC.MaxIdleTimeout),
-			MaxIncomingStreams:             cfg.QUIC.MaxIncomingStreams,
-		},
-		BandwidthConfig: hyserver.BandwidthConfig{
-			MaxTx: uint64(cfg.Bandwidth.Up),
-			MaxRx: uint64(cfg.Bandwidth.Down),
-		},
-		IgnoreClientBandwidth: cfg.Bandwidth.IgnoreClient,
-		Conn:                  conn,
-		Outbound:              &outbound{server: s},
-		DisableUDP:            false,
-		Authenticator:         authenticator,
-		EventLogger:           newEventLogger(log),
-	}
-	hyServer, err := hyserver.NewServer(hyConfig)
+	bindAddr, err := cfg.TCPListenAddress()
 	if err != nil {
-		closeFirewall()
-		_ = packetConn.Close()
-		return nil, fmt.Errorf("create HY2 server: %w", err)
+		return nil, err
 	}
-	s.hyServer = hyServer
+	if err := s.prepareInitialEndpoints(cfg, bindAddr); err != nil {
+		return nil, err
+	}
 	if cfg.Web.Listen != "" {
 		sessionKey, err := loadWebSessionKey(cfg, log)
 		if err != nil {
-			closeFirewall()
-			_ = hyServer.Close()
-			_ = packetConn.Close()
-			if s.store != nil {
-				_ = s.store.Close()
-			}
 			return nil, err
 		}
 		web, err := serverui.New(s, cfg.Web, sessionKey, log)
 		if err != nil {
-			closeFirewall()
-			_ = hyServer.Close()
-			_ = packetConn.Close()
-			if s.store != nil {
-				_ = s.store.Close()
-			}
 			return nil, fmt.Errorf("create web console: %w", err)
 		}
 		s.web = web
 	}
 	go s.data.janitor()
-
-	log.Debug("HY2 server initialized", "listen", s.listenAddr.String())
+	initialized = true
+	log.Debug("server initialized", "listen", s.ListenAddresses())
 	return s, nil
 }
 
@@ -250,7 +171,7 @@ func newAuthenticator(authCfg *config.AuthConfig, credStore *credentials.Store) 
 	}
 }
 
-// Start serves HY2 traffic and blocks until the server fails or ctx is done.
+// Start serves every required endpoint and blocks until one fails or ctx is done.
 // Cancelling ctx closes the server and returns nil. Callers should call Close
 // if Start returns a serve error.
 func (s *Server) Start(ctx context.Context) error {
@@ -263,55 +184,64 @@ func (s *Server) Start(ctx context.Context) error {
 	if !s.started.CompareAndSwap(false, true) {
 		return fmt.Errorf("server already started")
 	}
-	if s.hyServer == nil {
+	s.listenersMu.Lock()
+	if len(s.endpoints) == 0 || s.closed.Load() {
+		s.listenersMu.Unlock()
 		return fmt.Errorf("server is not initialized")
 	}
 
 	if s.web != nil {
 		if err := s.web.Start(); err != nil {
+			s.listenersMu.Unlock()
 			return fmt.Errorf("start web console: %w", err)
 		}
 	}
 
-	s.log.Info("HY2 server listening", "listen", s.listenAddr.String())
-
-	serveErr := make(chan error, 1)
-	go func() {
-		serveErr <- s.hyServer.Serve()
-	}()
+	serveErr := make(chan error, len(s.endpoints))
+	for _, ep := range s.endpoints {
+		s.log.Info("server listening", "transport", ep.Kind(), "listen", ep.Addr().String())
+		go func() {
+			err := ep.Serve(context.Background())
+			s.retireEndpoint(ep)
+			serveErr <- fmt.Errorf("serve %s: %w", ep.Kind(), err)
+		}()
+	}
+	s.listenersMu.Unlock()
 
 	select {
 	case err := <-serveErr:
 		if s.closed.Load() {
 			return nil
 		}
-		return fmt.Errorf("serve HY2: %w", err)
+		return err
 	case <-ctx.Done():
 		return s.Close()
+	case <-s.done:
+		return nil
 	}
 }
 
-// Close stops the HY2 server and closes the UDP socket. It is idempotent and
+// Close stops all endpoints and shared resources. It is idempotent and
 // returns the same error on every call.
 func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
 		s.closed.Store(true)
+		if s.done != nil {
+			close(s.done)
+		}
+		s.listenersMu.Lock()
+		endpoints := s.endpoints
+		s.endpoints = make(map[transport.Kind]endpoint)
+		s.listenersMu.Unlock()
 		var errs []error
 		if s.web != nil {
 			if err := s.web.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("close web console: %w", err))
 			}
 		}
-		if s.hyServer != nil {
-			if err := s.hyServer.Close(); err != nil {
-				errs = append(errs, fmt.Errorf("close HY2 server: %w", err))
-			}
-		}
-		// The Hysteria server owns the packet connection and closes it too.
-		// Close it explicitly as well, ignoring the expected double close.
-		if s.packetConn != nil {
-			if err := s.packetConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-				errs = append(errs, fmt.Errorf("close UDP socket: %w", err))
+		for _, ep := range endpoints {
+			if err := ep.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close %s endpoint: %w", ep.Kind(), err))
 			}
 		}
 		if s.mappings != nil {
@@ -330,8 +260,17 @@ func (s *Server) Close() error {
 	return s.closeErr
 }
 
-// ListenAddr returns the bound UDP listen address.
+// ListenAddr preserves the legacy base address: HY2 when owned, otherwise TCP.
+// After shutdown it returns the original address for callers deriving ports.
 func (s *Server) ListenAddr() net.Addr {
+	s.listenersMu.Lock()
+	defer s.listenersMu.Unlock()
+	if ep := s.endpoints[transport.HY2]; ep != nil {
+		return ep.Addr()
+	}
+	if ep := s.endpoints[transport.TCP]; ep != nil {
+		return ep.Addr()
+	}
 	return s.listenAddr
 }
 

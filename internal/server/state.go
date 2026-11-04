@@ -48,8 +48,10 @@ func (s *Server) initState() error {
 // never claim even when the port policy would otherwise allow them.
 func (s *Server) reservedPorts() map[int]struct{} {
 	reserved := make(map[int]struct{})
-	if port := addrPort(s.listenAddr); port > 0 {
-		reserved[port] = struct{}{}
+	if s.listenAddr != nil {
+		if port := addrPort(s.listenAddr); port > 0 {
+			reserved[port] = struct{}{}
+		}
 	}
 	for _, portRange := range s.cfg.ListenRanges {
 		for port := portRange.Start; port <= portRange.End; port++ {

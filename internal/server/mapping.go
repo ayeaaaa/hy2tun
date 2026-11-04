@@ -17,6 +17,7 @@ import (
 	"hy2tun/internal/control"
 	"hy2tun/internal/ports"
 	"hy2tun/internal/state"
+	"hy2tun/internal/transport"
 	"hy2tun/internal/view"
 )
 
@@ -418,6 +419,35 @@ func (m *mappingManager) detach(sess *clientSession) {
 	m.mu.Unlock()
 
 	m.saveState()
+}
+
+// detachTransport removes only the selected transport's owners. Removal is
+// committed under the manager, but network closure/draining is outside it.
+func (m *mappingManager) detachTransport(kind transport.Kind) {
+	now := time.Now()
+	var retired []*clientSession
+	m.mu.Lock()
+	for id, sess := range m.sessions {
+		if sess.transport != kind {
+			continue
+		}
+		delete(m.sessions, id)
+		sess.online = false
+		sess.lastSeen = now
+		sess.markDone()
+		if m.store != nil {
+			m.store.SetOnline(id, false, now)
+		}
+		retired = append(retired, sess)
+	}
+	m.mu.Unlock()
+	for _, sess := range retired {
+		sess.abortStream()
+		m.closeMappingsLocked(sess)
+	}
+	if len(retired) > 0 {
+		m.saveState()
+	}
 }
 
 // deleteClient removes an offline client and its persisted mappings. Online
