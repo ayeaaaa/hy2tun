@@ -26,10 +26,9 @@ type transportGate struct {
 	udpConn     *net.UDPConn
 	addr        string
 
-	udpEnabled atomic.Bool
-	closed     chan struct{}
-	closeOnce  sync.Once
-	closeErr   error
+	closed    chan struct{}
+	closeOnce sync.Once
+	closeErr  error
 
 	wg sync.WaitGroup
 
@@ -37,6 +36,19 @@ type transportGate struct {
 	closing  bool
 	tcpConns map[net.Conn]struct{}
 	udpPeers map[string]*gateUDPPeer
+
+	// udpMu is the disable barrier. Forward/reply writes hold it for read while
+	// SetUDPEnabled holds it for write, so a disable that returns can no longer
+	// race a datagram or reply onto the wire. Lock order: udpMu -> mu.
+	udpMu      sync.RWMutex
+	udpEnabled bool
+
+	hookMu          sync.Mutex
+	testForwardHook func()
+	testReplyHook   func()
+
+	forwarded atomic.Int64
+	replied   atomic.Int64
 }
 
 type gateUDPPeer struct {
@@ -95,8 +107,8 @@ func newTransportGate(t testing.TB, backend string) *transportGate {
 			closed:      make(chan struct{}),
 			tcpConns:    make(map[net.Conn]struct{}),
 			udpPeers:    make(map[string]*gateUDPPeer),
+			udpEnabled:  true,
 		}
-		g.udpEnabled.Store(true)
 
 		g.wg.Add(2)
 		go g.acceptTCP()
@@ -128,10 +140,27 @@ func (g *transportGate) SetUDPEnabled(enabled bool) {
 	if g == nil {
 		return
 	}
-	g.udpEnabled.Store(enabled)
+	g.udpMu.Lock()
+	g.udpEnabled = enabled
 	if !enabled {
 		g.closeUDPPeers()
 	}
+	g.udpMu.Unlock()
+}
+
+// setTestHooks installs optional callbacks that run while the gate holds its
+// read barrier, immediately before an upstream forward or client reply. Tests
+// use them to hold a datagram in flight and prove disable is ordered after it.
+func (g *transportGate) setTestHooks(forward, reply func()) {
+	g.hookMu.Lock()
+	g.testForwardHook, g.testReplyHook = forward, reply
+	g.hookMu.Unlock()
+}
+
+func (g *transportGate) hooks() (forward, reply func()) {
+	g.hookMu.Lock()
+	defer g.hookMu.Unlock()
+	return g.testForwardHook, g.testReplyHook
 }
 
 // Close stops both forwarders, closes every client/upstream socket and waits
@@ -250,16 +279,24 @@ func (g *transportGate) forwardUDP() {
 		if err != nil {
 			return
 		}
-		if !g.udpEnabled.Load() {
+		g.udpMu.RLock()
+		if !g.udpEnabled {
+			g.udpMu.RUnlock()
 			continue
+		}
+		forwardHook, _ := g.hooks()
+		if forwardHook != nil {
+			forwardHook()
 		}
 		peer := g.peer(client)
-		if peer == nil {
-			continue
+		if peer != nil {
+			if _, err := peer.upstream.Write(buf[:n]); err != nil {
+				g.removePeer(peer)
+			} else {
+				g.forwarded.Add(1)
+			}
 		}
-		if _, err := peer.upstream.Write(buf[:n]); err != nil {
-			g.removePeer(peer)
-		}
+		g.udpMu.RUnlock()
 	}
 }
 
@@ -318,10 +355,21 @@ func (g *transportGate) replyUDP(peer *gateUDPPeer) {
 			g.removePeer(peer)
 			return
 		}
-		if !g.udpEnabled.Load() {
+		g.udpMu.RLock()
+		if !g.udpEnabled {
+			g.udpMu.RUnlock()
 			continue
 		}
-		if _, err := g.udpConn.WriteToUDP(buf[:n], peer.client); err != nil {
+		_, replyHook := g.hooks()
+		if replyHook != nil {
+			replyHook()
+		}
+		_, err = g.udpConn.WriteToUDP(buf[:n], peer.client)
+		if err == nil {
+			g.replied.Add(1)
+		}
+		g.udpMu.RUnlock()
+		if err != nil {
 			g.removePeer(peer)
 			return
 		}
@@ -408,6 +456,121 @@ func TestTransportGateForwardsTCPAndGatesUDP(t *testing.T) {
 	_ = pc.Close()
 }
 
+// TestTransportGateDisableIsOrderedWithTraffic proves SetUDPEnabled(false) is a
+// strict barrier: an admitted forward/reply completes before disable returns,
+// and no UDP packet crosses afterwards. TCP must remain untouched.
+func TestTransportGateDisableIsOrderedWithTraffic(t *testing.T) {
+	backend := startDualEcho(t)
+	gate := newTransportGate(t, backend)
+
+	send := func() {
+		t.Helper()
+		conn, err := net.Dial("udp", gate.Addr())
+		require.NoError(t, err)
+		defer conn.Close()
+		_, err = conn.Write([]byte("ordered"))
+		require.NoError(t, err)
+	}
+
+	// Forward direction: hold the gate after it admits a datagram but before it
+	// writes upstream, then disable concurrently.
+	forwardEntered := make(chan struct{}, 1)
+	forwardRelease := make(chan struct{})
+	var forwardOnce sync.Once
+	releaseForward := func() { forwardOnce.Do(func() { close(forwardRelease) }) }
+	t.Cleanup(releaseForward)
+	gate.setTestHooks(func() {
+		select {
+		case forwardEntered <- struct{}{}:
+		default:
+		}
+		<-forwardRelease
+	}, nil)
+
+	send()
+	requireGateHook(t, forwardEntered, "forward")
+	forwardDisable := startGateDisable(gate)
+	requireGateDisableBlocked(t, forwardDisable, "forward")
+	releaseForward()
+	requireGateDisableDone(t, forwardDisable, "forward")
+
+	forwarded := gate.forwarded.Load()
+	require.NotZero(t, forwarded, "the admitted forward must complete before disable returns")
+	send()
+	require.Never(t, func() bool { return gate.forwarded.Load() != forwarded },
+		200*time.Millisecond, 10*time.Millisecond, "no UDP forward may cross after disable returns")
+	require.NoError(t, tcpEcho(gate.Addr(), "tcp-survives-forward-disable"))
+
+	// Reply direction: enable again, hold an admitted reply, then disable.
+	gate.SetUDPEnabled(true)
+	gate.setTestHooks(nil, nil)
+	replyEntered := make(chan struct{}, 1)
+	replyRelease := make(chan struct{})
+	var replyOnce sync.Once
+	releaseReply := func() { replyOnce.Do(func() { close(replyRelease) }) }
+	t.Cleanup(releaseReply)
+	gate.setTestHooks(nil, func() {
+		select {
+		case replyEntered <- struct{}{}:
+		default:
+		}
+		<-replyRelease
+	})
+
+	send()
+	requireGateHook(t, replyEntered, "reply")
+	replyDisable := startGateDisable(gate)
+	requireGateDisableBlocked(t, replyDisable, "reply")
+	releaseReply()
+	requireGateDisableDone(t, replyDisable, "reply")
+
+	replied := gate.replied.Load()
+	require.NotZero(t, replied, "the admitted reply must complete before disable returns")
+	send()
+	require.Never(t, func() bool { return gate.replied.Load() != replied },
+		200*time.Millisecond, 10*time.Millisecond, "no UDP reply may cross after disable returns")
+	require.NoError(t, tcpEcho(gate.Addr(), "tcp-survives-reply-disable"))
+}
+
+func startGateDisable(gate *transportGate) <-chan struct{} {
+	done := make(chan struct{})
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		gate.SetUDPEnabled(false)
+		close(done)
+	}()
+	<-started
+	return done
+}
+
+func requireGateHook(t *testing.T, entered <-chan struct{}, direction string) {
+	t.Helper()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the gate never admitted the %s datagram", direction)
+	}
+}
+
+func requireGateDisableBlocked(t *testing.T, done <-chan struct{}, direction string) {
+	t.Helper()
+	select {
+	case <-done:
+		t.Fatalf("SetUDPEnabled(false) returned while a %s write was still in flight", direction)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func requireGateDisableDone(t *testing.T, done <-chan struct{}, direction string) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("SetUDPEnabled(false) did not return after the %s write completed", direction)
+	}
+}
+
 // startDualEcho starts loopback TCP and UDP echo servers on the same numeric
 // port. It returns that shared address.
 func startDualEcho(t testing.TB) string {
@@ -434,13 +597,15 @@ func startDualEcho(t testing.TB) string {
 	}
 
 	var (
-		wg    sync.WaitGroup
-		mu    sync.Mutex
-		conns = make(map[net.Conn]struct{})
+		wg         sync.WaitGroup
+		mu         sync.Mutex
+		conns      = make(map[net.Conn]struct{})
+		acceptDone = make(chan struct{})
 	)
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
+		defer close(acceptDone)
 		for {
 			conn, err := tcpListener.Accept()
 			if err != nil {
@@ -479,6 +644,9 @@ func startDualEcho(t testing.TB) string {
 	t.Cleanup(func() {
 		_ = tcpListener.Close()
 		_ = udpConn.Close()
+		// Join the accept loop before closing accepted connections: no handler
+		// can be added to wg after acceptDone closes, so wg.Wait cannot race Add.
+		<-acceptDone
 		mu.Lock()
 		for conn := range conns {
 			_ = conn.Close()

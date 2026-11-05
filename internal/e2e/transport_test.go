@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -285,18 +286,17 @@ func TestTransportModeNineCombinations(t *testing.T) {
 		client   config.TransportMode
 		wantOK   bool
 		wantKind string
-		forbid   string
 	}
 	cases := []testCase{
-		{config.ModeHY2, config.ModeHY2, true, "hy2", ""},
-		{config.ModeHY2, config.ModeAuto, true, "hy2", ""},
-		{config.ModeHY2, config.ModeTCP, false, "", "hy2"},
-		{config.ModeAuto, config.ModeHY2, true, "hy2", ""},
-		{config.ModeAuto, config.ModeAuto, true, "hy2", ""},
-		{config.ModeAuto, config.ModeTCP, true, "tcp", ""},
-		{config.ModeTCP, config.ModeHY2, false, "", "tcp"},
-		{config.ModeTCP, config.ModeAuto, true, "tcp", ""},
-		{config.ModeTCP, config.ModeTCP, true, "tcp", ""},
+		{config.ModeHY2, config.ModeHY2, true, "hy2"},
+		{config.ModeHY2, config.ModeAuto, true, "hy2"},
+		{config.ModeHY2, config.ModeTCP, false, ""},
+		{config.ModeAuto, config.ModeHY2, true, "hy2"},
+		{config.ModeAuto, config.ModeAuto, true, "hy2"},
+		{config.ModeAuto, config.ModeTCP, true, "tcp"},
+		{config.ModeTCP, config.ModeHY2, false, ""},
+		{config.ModeTCP, config.ModeAuto, true, "tcp"},
+		{config.ModeTCP, config.ModeTCP, true, "tcp"},
 	}
 
 	for _, tc := range cases {
@@ -305,16 +305,57 @@ func TestTransportModeNineCombinations(t *testing.T) {
 			es := startE2EServer(t, tc.server, nextE2EPortRange())
 			cfg := newE2EClientConfig(t, t.TempDir(), "matrix-"+name, es.srv.ListenAddr().String(),
 				es.certPath, tc.client, tcpEchoAddr, udpEchoAddr)
-			ec := startE2EClient(t, cfg, testFailoverOptions())
+			opts := testFailoverOptions()
+			var hy2Dials, tcpDials atomic.Int64
+			if !tc.wantOK {
+				// Record the transports the client actually attempts. The pure
+				// client must never fall back to the other transport.
+				opts.Dial = func(ctx context.Context, kind transport.Kind, cfg *config.ClientConfig) (transport.Session, error) {
+					switch kind {
+					case transport.HY2:
+						hy2Dials.Add(1)
+					case transport.TCP:
+						tcpDials.Add(1)
+					}
+					return realTestDial(ctx, kind, cfg)
+				}
+			}
+			ec := startE2EClient(t, cfg, opts)
 
 			if !tc.wantOK {
 				readyCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				err := ec.cl.WaitReady(readyCtx)
 				cancel()
 				require.Error(t, err, "mutually exclusive pure modes must not connect")
+
+				forbiddenDialed := func() bool {
+					if tc.client == config.ModeHY2 {
+						return tcpDials.Load() > 0
+					}
+					return hy2Dials.Load() > 0
+				}
+				// The client exposes no terminal transport-error field. Prove the
+				// failure is stable: after the bounded wait, keep observing for a
+				// settle window and require that it never connects, registers, or
+				// tries the forbidden transport.
+				require.Never(t, func() bool {
+					status := ec.cl.Status()
+					return status.Connected || status.Transport.ActiveTransport != "" ||
+						len(es.srv.Clients()) != 0 || forbiddenDialed()
+				}, 2*time.Second, 20*time.Millisecond,
+					"mutually exclusive pure modes must stay failed without a silent downgrade")
+
+				status := ec.cl.Status()
+				require.False(t, status.Connected, "a mutually exclusive pure mode must not become connected")
+				require.Empty(t, status.Transport.ActiveTransport, "a mutually exclusive pure mode must not publish an active transport")
+				require.Empty(t, ec.cl.TransportState().ActiveTransport)
+				require.Equal(t, tc.client, status.Transport.Mode, "the client must stay in its configured pure mode")
 				require.Empty(t, es.srv.Clients(), "mutually exclusive pure modes must not register")
-				require.NotEqual(t, tc.forbid, ec.cl.TransportState().ActiveTransport,
-					"a pure mode must never silently downgrade to the other transport")
+				if tc.client == config.ModeHY2 {
+					require.Zero(t, tcpDials.Load(), "a pure HY2 client must not attempt a TCP session")
+				} else {
+					require.Zero(t, hy2Dials.Load(), "a pure TCP client must not attempt an HY2 session")
+				}
 
 				saved, err := config.LoadClient(cfg.ConfigPath)
 				require.NoError(t, err)
@@ -608,11 +649,12 @@ func TestFallbackPushRotationAndProxy(t *testing.T) {
 			c.CredentialSynced && len(c.Mappings) == 2
 	}, 10*time.Second, 20*time.Millisecond, "the TCP client must re-register after rotation")
 
+	rotatedView := waitServerClient(t, es.srv, cfg.Client.ID, "tcp", 2, 10*time.Second)
 	require.Eventually(t, func() bool {
 		return tcpEcho(publicAddr(baseTCP), "tcp-after-tcp-rotation") == nil
 	}, 5*time.Second, 20*time.Millisecond, "the TCP mapping must recover after credential rotation")
 	require.Eventually(t, func() bool {
-		return udpEcho(publicAddr(mappingByID(t, serverView.Mappings, "udp").AssignedPort), "udp-after-tcp-rotation") == nil
+		return udpEcho(publicAddr(mappingByID(t, rotatedView.Mappings, "udp").AssignedPort), "udp-after-tcp-rotation") == nil
 	}, 5*time.Second, 20*time.Millisecond, "the UDP mapping must recover after credential rotation")
 	requireSOCKSEcho(t, cfg.Proxy.SOCKS5, tcpEchoAddr, "socks-after-rotation")
 	requireHTTPConnectEcho(t, cfg.Proxy.HTTP, tcpEchoAddr, "http-after-rotation")
@@ -645,11 +687,69 @@ func requireHTTPConnectEcho(t *testing.T, proxyAddr, target, message string) {
 	requireEchoConn(t, conn, message)
 }
 
+// requireTCPDatagramQueueBounded asserts the real TCP datagram adapter has a
+// fixed queue and rejects overflow instead of growing without bound when its
+// peer stops reading. The E2E flood below runs through the same adapter.
+func requireTCPDatagramQueueBounded(t *testing.T) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			accepted <- conn
+		}
+	}()
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
+	var peer net.Conn
+	select {
+	case peer = <-accepted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("real TCP datagram peer did not accept")
+	}
+	defer func() { _ = peer.Close() }()
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		require.NoError(t, tcp.SetWriteBuffer(1024))
+	}
+	if tcp, ok := peer.(*net.TCPConn); ok {
+		require.NoError(t, tcp.SetReadBuffer(1024))
+	}
+
+	datagrams := transport.NewDatagramConn(conn)
+	defer func() { _ = datagrams.Close() }()
+	sizer, ok := datagrams.(interface{ QueueCapacity() int })
+	require.True(t, ok, "the TCP datagram adapter must expose its real queue capacity")
+	require.Equal(t, 32, sizer.QueueCapacity(), "the TCP datagram queue must be bounded at 32 frames")
+
+	payload := bytes.Repeat([]byte{0x42}, 4096)
+	require.Eventually(t, func() bool {
+		for i := 0; i < 4096; i++ {
+			err := datagrams.Send(payload, "peer")
+			if errors.Is(err, transport.ErrQueueFull) {
+				return true
+			}
+			if err != nil {
+				return false
+			}
+		}
+		return false
+	}, 10*time.Second, 10*time.Millisecond, "the real TCP datagram queue must report ErrQueueFull instead of growing")
+}
+
 // TestFallbackBackpressureCloseBounded floods a UDP mapping whose local target
-// does not read while the TCP fallback carries the traffic. Control updates must
-// still complete, the mapping must stay bounded/usable, and Close must release
-// the public port promptly.
+// does not read while the TCP fallback carries the traffic. The real TCP queue
+// bound is asserted directly; control updates must still complete, and Close
+// must release both public ports promptly while the flood is still running.
 func TestFallbackBackpressureCloseBounded(t *testing.T) {
+	requireTCPDatagramQueueBounded(t)
+
 	tcpEchoAddr, _ := testutil.StartTCPEcho(t)
 
 	sink, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -684,7 +784,7 @@ func TestFallbackBackpressureCloseBounded(t *testing.T) {
 				return
 			}
 			defer conn.Close()
-			payload := bytes.Repeat([]byte{0x5a}, 1024)
+			payload := bytes.Repeat([]byte{0x5a}, 4096)
 			for {
 				select {
 				case <-stopFlood:
@@ -727,23 +827,36 @@ func TestFallbackBackpressureCloseBounded(t *testing.T) {
 		return false
 	}, 5*time.Second, 20*time.Millisecond, "the control-created mapping must register during the flood")
 
-	close(stopFlood)
-	floodWG.Wait()
-
-	// The queue is bounded by transport (32 frames); the E2E assertion is that
-	// overload drops packets but leaves the control plane and mapping alive.
+	// The queue bound itself is asserted directly on the real TCP datagram
+	// adapter above. Keep the flood running while Close is called so teardown
+	// is exercised under active load, not after the load has drained.
 	require.Len(t, es.srv.Clients(), 1)
 	require.Equal(t, "running", mappingByID(t, es.srv.Clients()[0].Mappings, "udp").Status)
 	require.NoError(t, tcpEcho(publicAddr(publicTCP), "tcp-after-flood"))
 
 	closeDone := make(chan error, 1)
+	closeStarted := time.Now()
 	go func() { closeDone <- ec.cl.Close() }()
 	select {
 	case err := <-closeDone:
 		require.NoError(t, err)
+		require.Less(t, time.Since(closeStarted), 3*time.Second,
+			"client Close must return promptly while the UDP flood is still running")
 	case <-time.After(5 * time.Second):
 		t.Fatal("client Close did not return during UDP backpressure")
 	}
+
+	close(stopFlood)
+	floodWG.Wait()
+
+	require.Eventually(t, func() bool {
+		pc, err := net.ListenPacket("udp", publicAddr(publicUDP))
+		if err != nil {
+			return false
+		}
+		_ = pc.Close()
+		return true
+	}, 5*time.Second, 20*time.Millisecond, "client Close must release the flooded public UDP mapping")
 
 	require.Eventually(t, func() bool {
 		conn, err := net.DialTimeout("tcp", publicAddr(publicTCP), 200*time.Millisecond)
@@ -857,10 +970,11 @@ func TestFallbackProbeUnsupportedKeepsTCPOwner(t *testing.T) {
 	require.Equal(t, config.ModeAuto, saved.Mode)
 }
 
-// TestFallbackFinalRegistrationFailureRestoresTCP fails the HY2 candidate's
-// final dial after three successful probes. The client must stay on TCP, then
-// recover to HY2 once the injected failure is removed.
-func TestFallbackFinalRegistrationFailureRestoresTCP(t *testing.T) {
+// TestFallbackCandidateDialFailureRestoresTCP fails the HY2 candidate dial after
+// three successful probes. The client must stay on TCP, then recover to HY2 once
+// the injected failure is removed. Formal Hello/OpenControl failure is covered by
+// the fake-clock unit test TestRecoveryFormalNetworkFailureRestoresTCP.
+func TestFallbackCandidateDialFailureRestoresTCP(t *testing.T) {
 	tcpEchoAddr, _ := testutil.StartTCPEcho(t)
 	udpEchoAddr, _ := testutil.StartUDPEcho(t)
 
@@ -925,8 +1039,8 @@ func TestFallbackFinalRegistrationFailureRestoresTCP(t *testing.T) {
 	recovered := waitClientTransport(t, ec.cl, "hy2", 10*time.Second)
 	require.Equal(t, "hy2_recovered", recovered.SwitchReason)
 	require.Equal(t, uint64(1), recovered.SwitchCount)
-	waitServerClient(t, es.srv, cfg.Client.ID, "hy2", 2, 10*time.Second)
-	require.NoError(t, tcpEcho(publicAddr(mappingByID(t, serverView.Mappings, "tcp").AssignedPort), "tcp-after-late-recovery"))
+	recoveredView := waitServerClient(t, es.srv, cfg.Client.ID, "hy2", 2, 10*time.Second)
+	require.NoError(t, tcpEcho(publicAddr(mappingByID(t, recoveredView.Mappings, "tcp").AssignedPort), "tcp-after-late-recovery"))
 }
 
 // realTestDial mirrors the production dial boundary for tests that inject a
@@ -1061,9 +1175,13 @@ func testNewClientToOldServer(t *testing.T, oldServerBin string) {
 
 	proc := startFixtureProcess(t, oldServerBin, "-c", serverCfg.ConfigPath)
 	defer proc.stop()
+	exitedDuringStartup := false
 	require.Eventually(t, func() bool {
 		if proc.exited() {
-			t.Fatalf("the v1.5.4 server exited during startup")
+			// Report the real startup failure immediately instead of waiting for
+			// the polling deadline. Never call t.Fatalf from this goroutine.
+			exitedDuringStartup = true
+			return true
 		}
 		pc, err := net.ListenPacket("udp", serverAddr)
 		if err == nil {
@@ -1072,6 +1190,9 @@ func testNewClientToOldServer(t *testing.T, oldServerBin string) {
 		}
 		return true
 	}, 10*time.Second, 20*time.Millisecond, "the v1.5.4 server must bind its UDP listener")
+	if exitedDuringStartup {
+		t.Fatalf("the v1.5.4 server exited during startup: %s", strings.TrimSpace(proc.output.String()))
+	}
 
 	clientCfg := newE2EClientConfig(t, t.TempDir(), "new-client-old-server", serverAddr, certPath,
 		config.ModeHY2, tcpEchoAddr, udpEchoAddr)
@@ -1131,14 +1252,112 @@ func (p *fixtureProcess) stop() {
 	})
 }
 
+// compatRequired reports whether the compatibility matrix is mandatory. An
+// unset, empty, "0", or "false" value is optional; anything else is required.
+func compatRequired() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("HY2TUN_REQUIRE_COMPAT"))) {
+	case "", "0", "false":
+		return false
+	default:
+		return true
+	}
+}
+
 // compatUnavailable skips locally when historical fixtures cannot be built,
 // but fails when CI explicitly requires the compatibility matrix.
 func compatUnavailable(t *testing.T, format string, args ...any) {
 	t.Helper()
-	if os.Getenv("HY2TUN_REQUIRE_COMPAT") != "" {
+	if compatRequired() {
 		t.Fatalf(format, args...)
 	}
 	t.Skipf(format, args...)
+}
+
+// envWith returns base with every key in overrides replaced, so a child process
+// never sees duplicate environment keys whose lookup order is platform-specific.
+func envWith(base []string, overrides ...string) []string {
+	blocked := make(map[string]struct{}, len(overrides))
+	for _, kv := range overrides {
+		key, _, _ := strings.Cut(kv, "=")
+		blocked[key] = struct{}{}
+	}
+	out := make([]string, 0, len(base)+len(overrides))
+	for _, kv := range base {
+		key, _, _ := strings.Cut(kv, "=")
+		if _, ok := blocked[key]; ok {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, overrides...)
+}
+
+func goMinor(version string) (int, bool) {
+	version = strings.TrimPrefix(version, "go1.")
+	if version == "" {
+		return 0, false
+	}
+	if i := strings.IndexFunc(version, func(r rune) bool { return r < '0' || r > '9' }); i >= 0 {
+		version = version[:i]
+	}
+	minor, err := strconv.Atoi(version)
+	return minor, err == nil
+}
+
+// fixtureGoToolchain resolves the Go command for the fixture build. It first
+// honors the ambient toolchain, then retries with GOTOOLCHAIN=auto (offline) so
+// a direct test-binary run with GOTOOLCHAIN=local can still find the selected
+// Go >= 1.26 toolchain. The fixture build itself is always GOTOOLCHAIN=local.
+func fixtureGoToolchain(t *testing.T) (goBin, goroot string) {
+	t.Helper()
+
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		compatUnavailable(t, "v1.5.4 compatibility requires a Go toolchain: %v", err)
+	}
+	for _, overrides := range [][]string{
+		nil,
+		{"GOTOOLCHAIN=auto", "GOPROXY=off"},
+	} {
+		cmd := exec.Command(goBin, "env", "GOVERSION", "GOROOT")
+		if len(overrides) > 0 {
+			cmd.Env = envWith(os.Environ(), overrides...)
+		}
+		out, err := cmd.Output()
+		if err != nil {
+			continue
+		}
+		fields := strings.Fields(string(out))
+		if len(fields) != 2 {
+			continue
+		}
+		minor, ok := goMinor(fields[0])
+		if !ok || minor < 26 {
+			continue
+		}
+		goroot = fields[1]
+		toolchainGo := filepath.Join(goroot, "bin", "go")
+		if info, err := os.Stat(toolchainGo); err == nil && !info.IsDir() {
+			return toolchainGo, goroot
+		}
+		return goBin, goroot
+	}
+	compatUnavailable(t, "v1.5.4 compatibility requires Go >= 1.26; run via `go test` (which selects the module toolchain) or set GOROOT/GOTOOLCHAIN to a matching toolchain")
+	return "", ""
+}
+
+// fixtureBuildEnv isolates the historical build from ambient GOROOT,
+// GOTOOLCHAIN, GOPROXY, GOFLAGS, CGO and workspace settings. Direct test-binary
+// runs therefore need a selected Go >= 1.26 toolchain (see fixtureGoToolchain).
+func fixtureBuildEnv(goroot string) []string {
+	return envWith(os.Environ(),
+		"GOROOT="+goroot,
+		"GOTOOLCHAIN=local",
+		"GOPROXY=off",
+		"GOFLAGS=-mod=mod",
+		"CGO_ENABLED=0",
+		"GOWORK=off",
+	)
 }
 
 // buildV154Fixtures extracts the local v1.5.4 tag into a temporary directory
@@ -1147,7 +1366,7 @@ func compatUnavailable(t *testing.T, format string, args ...any) {
 // silently omitted; CI sets HY2TUN_REQUIRE_COMPAT to turn that into a failure.
 func buildV154Fixtures(t *testing.T) (clientBin, serverBin string) {
 	t.Helper()
-	if testing.Short() {
+	if testing.Short() && !compatRequired() {
 		t.Skip("v1.5.4 compatibility fixtures require building historical binaries")
 	}
 
@@ -1161,6 +1380,7 @@ func buildV154Fixtures(t *testing.T) (clientBin, serverBin string) {
 	}
 
 	dir := t.TempDir()
+	goBin, goroot := fixtureGoToolchain(t)
 	archive := exec.Command("git", "-C", root, "archive", "--format=tar", "v1.5.4")
 	pipe, err := archive.StdoutPipe()
 	if err != nil {
@@ -1185,14 +1405,9 @@ func buildV154Fixtures(t *testing.T) (clientBin, serverBin string) {
 
 	build := func(name, pkg string) string {
 		out := filepath.Join(dir, name)
-		cmd := exec.Command("go", "build", "-trimpath", "-o", out, pkg)
+		cmd := exec.Command(goBin, "build", "-trimpath", "-o", out, pkg)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(),
-			"GOPROXY=off",
-			"GOFLAGS=-mod=mod",
-			"CGO_ENABLED=0",
-			"GOTOOLCHAIN=local",
-		)
+		cmd.Env = fixtureBuildEnv(goroot)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			compatUnavailable(t, "cannot build v1.5.4 %s offline: %v\n%s", name, err, tail(output, 2048))
 		}

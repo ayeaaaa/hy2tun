@@ -83,6 +83,13 @@ func NewDatagramConn(conn net.Conn) DatagramConn {
 	return d
 }
 
+// QueueCapacity reports the fixed bound of the datagram send queue. Callers
+// can discover it through an optional interface without widening the
+// DatagramConn contract.
+func (d *tcpDatagram) QueueCapacity() int {
+	return cap(d.queue)
+}
+
 func (d *tcpDatagram) Send(payload []byte, addr string) error {
 	if len(payload) > maxDatagramPayload || len(addr) > maxDatagramAddr {
 		return ErrProtocol
