@@ -44,20 +44,23 @@ type fakeClientAPI struct {
 	name     string
 	web      fakeWebConfig
 
-	addErr    error
-	updateErr error
-	deleteErr error
-	proxyErr  error
-	nameErr   error
-	webErr    error
-	rotateErr error
-	modeErr   error
+	addErr      error
+	updateErr   error
+	deleteErr   error
+	proxyErr    error
+	nameErr     error
+	webErr      error
+	rotateErr   error
+	modeErr     error
+	failoverErr error
 
-	added      []config.Mapping
-	updated    []config.Mapping
-	deleted    []string
-	modeCalls  int
-	modeValues []config.TransportMode
+	added          []config.Mapping
+	updated        []config.Mapping
+	deleted        []string
+	modeCalls      int
+	modeValues     []config.TransportMode
+	failoverCalls  int
+	failoverValues []config.FailoverConfig
 
 	lastLevel string
 	lastLimit int
@@ -241,6 +244,25 @@ func (f *fakeClientAPI) CredentialsSnapshot() *credentials.Set {
 	defer f.mu.Unlock()
 	snapshot := f.rotation
 	return &snapshot
+}
+
+func (f *fakeClientAPI) UpdateFailover(cfg config.FailoverConfig) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failoverErr != nil {
+		return f.failoverErr
+	}
+	f.failoverCalls++
+	f.failoverValues = append(f.failoverValues, cfg)
+	f.settings.Failover = FailoverView{
+		ConnectTimeout:    time.Duration(cfg.ConnectTimeout).String(),
+		HeartbeatInterval: time.Duration(cfg.HeartbeatInterval).String(),
+		HeartbeatTimeout:  time.Duration(cfg.HeartbeatTimeout).String(),
+		ProbeInterval:     time.Duration(cfg.ProbeInterval).String(),
+		MinTCPHold:        time.Duration(cfg.MinTCPHold).String(),
+		RecoverySuccesses: cfg.RecoverySuccesses,
+	}
+	return nil
 }
 
 func (f *fakeClientAPI) UpdateMode(mode config.TransportMode) error {

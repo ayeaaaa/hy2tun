@@ -404,6 +404,20 @@
         input.value = value || "";
       }
     }
+    const failover = settings.failover || {};
+    for (const [id, key] of [
+      ["failover-connect-timeout", "connect_timeout"],
+      ["failover-heartbeat-interval", "heartbeat_interval"],
+      ["failover-heartbeat-timeout", "heartbeat_timeout"],
+      ["failover-probe-interval", "probe_interval"],
+      ["failover-min-tcp-hold", "min_tcp_hold"],
+      ["failover-recovery-successes", "recovery_successes"],
+    ]) {
+      const input = document.getElementById(id);
+      if (input && document.activeElement !== input) {
+        input.value = failover[key] || "";
+      }
+    }
     applyTransportState(settings.transport);
   }
 
@@ -857,6 +871,45 @@
           passwordInput.value = "";
           showToast("传输模式已更新");
           await refreshStatus();
+          await refreshSettings();
+        } catch (error) {
+          showToast(error.message, "bad");
+        } finally {
+          if (button) {
+            button.disabled = false;
+          }
+        }
+      });
+    }
+
+    const failoverForm = $("#settings-failover-form");
+    if (failoverForm) {
+      failoverForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const passwordInput = $("#failover-current-password");
+        if (!passwordInput || !passwordInput.value) {
+          showToast("请输入当前 Web 密码", "bad");
+          if (passwordInput) {
+            passwordInput.focus();
+          }
+          return;
+        }
+        const button = $("button[type='submit']", failoverForm);
+        if (button) {
+          button.disabled = true;
+        }
+        try {
+          await settingsRequest(serverURL("/api/settings/failover"), "PUT", {
+            connect_timeout: $("#failover-connect-timeout").value.trim(),
+            heartbeat_interval: $("#failover-heartbeat-interval").value.trim(),
+            heartbeat_timeout: $("#failover-heartbeat-timeout").value.trim(),
+            probe_interval: $("#failover-probe-interval").value.trim(),
+            min_tcp_hold: $("#failover-min-tcp-hold").value.trim(),
+            recovery_successes: Number($("#failover-recovery-successes").value),
+            current_password: passwordInput.value,
+          });
+          passwordInput.value = "";
+          showToast("回退时序已更新");
           await refreshSettings();
         } catch (error) {
           showToast(error.message, "bad");

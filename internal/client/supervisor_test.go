@@ -152,7 +152,7 @@ func TestSupervisorWithRuntimeInjectsEachWorker(t *testing.T) {
 	for _, name := range []string{"us", "sg"} {
 		worker := sup.workers[name]
 		require.NotNil(t, worker)
-		require.Equal(t, policy, worker.runtime.Policy)
+		require.Equal(t, policy, worker.currentFailoverPolicy())
 		require.Equal(t, clock, worker.runtime.Clock)
 	}
 }

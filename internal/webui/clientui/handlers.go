@@ -327,6 +327,7 @@ func (s *Server) newHandler() http.Handler {
 
 	mux.Handle("GET /api/settings", s.auth(http.HandlerFunc(s.handleSettingsJSON)))
 	mux.Handle("PUT /api/settings/mode", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateMode))))
+	mux.Handle("PUT /api/settings/failover", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateFailover))))
 	mux.Handle("PUT /api/settings/web", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateWebSettings))))
 	mux.Handle("PUT /api/settings/proxy", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateProxy))))
 	mux.Handle("PUT /api/servers/{name}/proxy", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateProxy))))
@@ -407,14 +408,16 @@ func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
 		logs = []view.LogEntry{}
 	}
 	_, modeAvailable := api.(ModeAPI)
+	_, failoverAvailable := api.(FailoverAPI)
 	s.render(w, http.StatusOK, "index", indexPage{
-		pageBase:       s.base("端口映射"),
-		Status:         status,
-		Mappings:       mappings,
-		Logs:           logs,
-		Settings:       s.settingsFor(api),
-		ActiveMappings: countActiveMappings(mappings),
-		ModeAvailable:  modeAvailable,
+		pageBase:          s.base("端口映射"),
+		Status:            status,
+		Mappings:          mappings,
+		Logs:              logs,
+		Settings:          s.settingsFor(api),
+		ActiveMappings:    countActiveMappings(mappings),
+		ModeAvailable:     modeAvailable,
+		FailoverAvailable: failoverAvailable,
 	})
 }
 

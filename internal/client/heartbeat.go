@@ -33,7 +33,7 @@ func (c *Client) handlePong(owner net.Conn, ts int64) {
 		return
 	}
 	now := c.runtime.Clock.Now()
-	if !now.Before(h.lastResponse.Add(c.runtime.Policy.HeartbeatTimeout)) {
+	if !now.Before(h.lastResponse.Add(c.currentFailoverPolicy().HeartbeatTimeout)) {
 		// Response admission and timeout use the same cutoff under mu. Wake
 		// the timer owner without allowing delayed scheduling to revive it.
 		select {
@@ -60,7 +60,7 @@ func (c *Client) runHeartbeat(ctx context.Context, h *heartbeat, closeRoot func(
 		c.mu.Unlock()
 	}()
 	c.mu.Lock()
-	nextPing := h.lastResponse.Add(c.runtime.Policy.HeartbeatInterval)
+	nextPing := h.lastResponse.Add(c.currentFailoverPolicy().HeartbeatInterval)
 	c.mu.Unlock()
 	var writing <-chan error
 	defer func() {
@@ -77,7 +77,7 @@ func (c *Client) runHeartbeat(ctx context.Context, h *heartbeat, closeRoot func(
 			return
 		}
 		now := c.runtime.Clock.Now()
-		expires := h.lastResponse.Add(c.runtime.Policy.HeartbeatTimeout)
+		expires := h.lastResponse.Add(c.currentFailoverPolicy().HeartbeatTimeout)
 		if !now.Before(expires) {
 			c.mu.Unlock()
 			fail(context.DeadlineExceeded)
@@ -90,7 +90,7 @@ func (c *Client) runHeartbeat(ctx context.Context, h *heartbeat, closeRoot func(
 				writing = result
 				go func() { result <- c.writeHeartbeat(h) }()
 			}
-			nextPing = now.Add(c.runtime.Policy.HeartbeatInterval)
+			nextPing = now.Add(c.currentFailoverPolicy().HeartbeatInterval)
 			continue
 		}
 		wakeAt := nextPing
@@ -102,6 +102,10 @@ func (c *Client) runHeartbeat(ctx context.Context, h *heartbeat, closeRoot func(
 		case <-ctx.Done():
 			return
 		case <-h.wake:
+		case <-c.heartbeatPolicyChanged:
+			c.mu.Lock()
+			nextPing = h.lastResponse.Add(c.currentFailoverPolicy().HeartbeatInterval)
+			c.mu.Unlock()
 		case err := <-writing:
 			writing = nil
 			if err != nil {

@@ -179,6 +179,53 @@
   </div>
 
   <div class="settings-section">
+    <div class="panel-head panel-head-sub">
+      <h2>回退时序</h2>
+      <span class="badge {{if .FailoverAvailable}}badge-ok{{else}}badge-muted{{end}}">{{if .FailoverAvailable}}可在线调整{{else}}只读{{end}}</span>
+    </div>
+    {{if .FailoverAvailable}}
+    <form id="settings-failover-form" class="settings-form" autocomplete="off">
+      <div class="grid-2">
+        <div class="field">
+          <label class="field-label" for="failover-connect-timeout">建连超时</label>
+          <input class="input mono" id="failover-connect-timeout" value="{{.Settings.Failover.ConnectTimeout}}" placeholder="8s" required>
+        </div>
+        <div class="field">
+          <label class="field-label" for="failover-heartbeat-interval">心跳间隔</label>
+          <input class="input mono" id="failover-heartbeat-interval" value="{{.Settings.Failover.HeartbeatInterval}}" placeholder="5s" required>
+        </div>
+        <div class="field">
+          <label class="field-label" for="failover-heartbeat-timeout">判死超时</label>
+          <input class="input mono" id="failover-heartbeat-timeout" value="{{.Settings.Failover.HeartbeatTimeout}}" placeholder="20s" required>
+        </div>
+        <div class="field">
+          <label class="field-label" for="failover-probe-interval">探测间隔</label>
+          <input class="input mono" id="failover-probe-interval" value="{{.Settings.Failover.ProbeInterval}}" placeholder="15s" required>
+        </div>
+        <div class="field">
+          <label class="field-label" for="failover-min-tcp-hold">TCP 最短保持</label>
+          <input class="input mono" id="failover-min-tcp-hold" value="{{.Settings.Failover.MinTCPHold}}" placeholder="30s" required>
+        </div>
+        <div class="field">
+          <label class="field-label" for="failover-recovery-successes">连续成功次数</label>
+          <input class="input mono" id="failover-recovery-successes" type="number" min="1" max="10" step="1" value="{{.Settings.Failover.RecoverySuccesses}}" required>
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label" for="failover-current-password">当前密码</label>
+        <input class="input" id="failover-current-password" type="password" autocomplete="current-password" required>
+      </div>
+      <p class="field-hint">保存后立即用于后续判断，无需重启。时间越短切得越快，也越容易把短暂抖动当成故障；每次切换都会断开现有连接并可能丢失 UDP 包。</p>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">应用回退时序</button>
+      </div>
+    </form>
+    {{else}}
+    <div class="notice">当前 API 未提供在线回退时序调整；请修改配置文件并重启 hy2tun 后生效。</div>
+    {{end}}
+  </div>
+
+  <div class="settings-section">
     <div class="panel-head panel-head-sub"><h2>Web 管理员</h2></div>
     <form id="settings-web-form" class="settings-form" autocomplete="off">
       <div class="kv kv-inline">

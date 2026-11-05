@@ -1,8 +1,8 @@
-# hy2tun v1.6.2 功能介绍
+# hy2tun v1.6.3 功能介绍
 
 `hy2tun` 是一个基于 Hysteria 2 的反向端口转发工具：服务端在公网监听端口，客户端把内网服务映射出去，支持 TCP 和 UDP。适合远程 SSH、NAS、Web、DNS、游戏联机等场景。
 
-**v1.6.2** 在 v1.6.1 的基础上增加了按服务端调整回退时序的能力。核心能力仍然是：**HY2 优先，UDP 不通时自动切 TCP，网络恢复后自动回 HY2。**
+**v1.6.3** 在 v1.6.2 的基础上把回退时序设置接入了客户端 Web 控制台，可以按服务端调整并立即生效。核心能力仍然是：**HY2 优先，UDP 不通时自动切 TCP，网络恢复后自动回 HY2。**
 
 ## 核心功能
 
@@ -58,7 +58,7 @@ failover:
   recovery_successes: 3
 ```
 
-这是高级 YAML 配置，LuCI 基础表单和客户端 Web 控制台不编辑它；改完重启客户端生效。
+客户端 Web 控制台的“设置 → 回退时序”可以直接调整并立即生效；LuCI 基础表单仍不编辑它，也可以改 YAML 后重启客户端。
 
 ## 边界说明
 
@@ -71,6 +71,6 @@ failover:
 
 ## 下载
 
-- Release：<https://github.com/ayeaaaa/hy2tun/releases/tag/v1.6.2>
+- Release：<https://github.com/ayeaaaa/hy2tun/releases/tag/v1.6.3>
 - 项目：<https://github.com/ayeaaaa/hy2tun>
 - 中文文档：<https://github.com/ayeaaaa/hy2tun/blob/main/README.zh-CN.md>

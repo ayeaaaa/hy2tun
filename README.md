@@ -31,7 +31,7 @@ do not need a database, Node.js, a CDN, or any runtime dependency.
   [Transport modes and TCP fallback](#transport-modes-and-tcp-fallback).
 - Per-server failover tuning for `hy2+tcp`: connect, heartbeat, dead-session,
   probe, TCP-hold, and recovery-success thresholds can be set independently
-  for each server.
+  for each server, including hot editing from the client Web console.
 - FRP-style reverse TCP mappings: a server public port forwards to a TCP
   service reachable from the client.
 - Reverse UDP mappings using native HY2 datagrams when HY2 is active, not a
@@ -212,8 +212,10 @@ disabled outside `hy2+tcp`.
 
 `failover` is optional. Set it on a single-server config, or on each
 `servers[]` entry of a multi-server client. Omitted fields keep the
-conservative defaults. Changes are loaded at client startup; restart the
-client after editing the file.
+conservative defaults. The client Web console's **Failover timing** section
+edits the selected server's values and hot-applies them without a restart;
+editing YAML directly still requires a client restart. LuCI's basic form does
+not expose these fields.
 
 | Field | Default | Middle profile |
 | --- | --- | --- |

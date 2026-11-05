@@ -4,6 +4,23 @@
 
 All notable changes to this project are documented here.
 
+## v1.6.3 - 2026-11-05
+
+### Added
+
+- The client Web console now has a per-server **Failover timing** form for
+  `connect_timeout`, `heartbeat_interval`, `heartbeat_timeout`,
+  `probe_interval`, `min_tcp_hold`, and `recovery_successes`. Saving requires
+  CSRF and the current Web password, writes the YAML atomically, and hot-applies
+  the new policy without restarting the client.
+- APIs that do not implement the optional failover mutation report `501` and
+  the form stays hidden.
+
+### Changed
+
+- Documentation and examples now describe the Web console path and the YAML
+  path. LuCI's basic form still keeps `failover` as an advanced field.
+
 ## v1.6.2 - 2026-11-05
 
 ### Added

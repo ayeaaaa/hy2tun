@@ -64,6 +64,7 @@ type Client struct {
 	dialLocal                func(context.Context, string, string) (net.Conn, error)
 	startedAt                time.Time
 	runtime                  RuntimeOptions
+	failoverPolicy           atomic.Pointer[FailoverPolicy]
 
 	mu            sync.Mutex
 	session       transport.Session
@@ -80,6 +81,8 @@ type Client struct {
 	setupSlots              map[setupOperation]chan struct{}
 	transportChanged        chan struct{}
 	modeChanged             chan struct{}
+	heartbeatPolicyChanged  chan struct{}
+	probePolicyChanged      chan struct{}
 	// handoffHook runs between a recovery candidate returning and the handoff
 	// recheck. Tests use it to interleave a mode update deterministically.
 	handoffHook    atomic.Value // func()
@@ -208,28 +211,32 @@ func newClientWithRuntime(cfg *config.ClientConfig, log *slog.Logger, skipProxyB
 	}
 
 	cl := &Client{
-		cfg:                   cfg,
-		log:                   log,
-		serverAddr:            serverAddr,
-		tlsConfig:             tlsConfig,
-		connFactory:           connFactory,
-		newHY2:                hyclient.NewClient,
-		startedAt:             time.Now(),
-		runtime:               opts,
-		transportChanged:      make(chan struct{}, 1),
-		modeChanged:           make(chan struct{}, 1),
-		configPath:            cfg.ConfigPath,
-		credentialsGeneration: credentialsGeneration,
-		mappings:              mappingViews(cfg.Mappings, nil),
-		mappingConfigs:        mappingConfigMap(cfg.Mappings),
-		udpTokens:             make(map[string]string),
-		udpMappings:           make(map[string]*udpMapping),
-		traffic:               make(map[string]*mappingTraffic),
-		dataConns:             make(map[net.Conn]net.Conn),
-		logs:                  logs,
-		ready:                 make(chan struct{}),
-		closed:                make(chan struct{}),
+		cfg:                    cfg,
+		log:                    log,
+		serverAddr:             serverAddr,
+		tlsConfig:              tlsConfig,
+		connFactory:            connFactory,
+		newHY2:                 hyclient.NewClient,
+		startedAt:              time.Now(),
+		runtime:                opts,
+		transportChanged:       make(chan struct{}, 1),
+		modeChanged:            make(chan struct{}, 1),
+		heartbeatPolicyChanged: make(chan struct{}, 1),
+		probePolicyChanged:     make(chan struct{}, 1),
+		configPath:             cfg.ConfigPath,
+		credentialsGeneration:  credentialsGeneration,
+		mappings:               mappingViews(cfg.Mappings, nil),
+		mappingConfigs:         mappingConfigMap(cfg.Mappings),
+		udpTokens:              make(map[string]string),
+		udpMappings:            make(map[string]*udpMapping),
+		traffic:                make(map[string]*mappingTraffic),
+		dataConns:              make(map[net.Conn]net.Conn),
+		logs:                   logs,
+		ready:                  make(chan struct{}),
+		closed:                 make(chan struct{}),
 	}
+	policy := opts.Policy
+	cl.failoverPolicy.Store(&policy)
 	if cfg.WebEnabled() {
 		sessionKey, err := loadClientWebSessionKey(cfg, log)
 		if err != nil {
@@ -637,12 +644,26 @@ func (c *Client) Settings() clientui.SettingsView {
 		configFile = "—"
 	}
 
+	failover := config.FailoverConfig{}
+	if cfg.Failover != nil {
+		failover = *cfg.Failover
+	}
+	failover = failover.Effective()
+
 	proxyState := c.ProxyState()
 	return clientui.SettingsView{
 		WebUsername:           cfg.Web.Username,
 		WebPasswordConfigured: cfg.Web.PasswordHash != "",
 		Name:                  cfg.Client.Name,
 		Transport:             transport,
+		Failover: clientui.FailoverView{
+			ConnectTimeout:    time.Duration(failover.ConnectTimeout).String(),
+			HeartbeatInterval: time.Duration(failover.HeartbeatInterval).String(),
+			HeartbeatTimeout:  time.Duration(failover.HeartbeatTimeout).String(),
+			ProbeInterval:     time.Duration(failover.ProbeInterval).String(),
+			MinTCPHold:        time.Duration(failover.MinTCPHold).String(),
+			RecoverySuccesses: failover.RecoverySuccesses,
+		},
 		Proxy: clientui.ProxyView{
 			Enabled: proxyState.Enabled,
 			SOCKS5:  proxyState.SOCKS5,

@@ -4,6 +4,22 @@
 
 本文件记录项目的重要变更。
 
+## v1.6.3 - 2026-11-05
+
+### 新增
+
+- 客户端 Web 控制台增加按服务端的“回退时序”表单，可调整
+  `connect_timeout`、`heartbeat_interval`、`heartbeat_timeout`、
+  `probe_interval`、`min_tcp_hold` 和 `recovery_successes`。保存需要
+  CSRF 和当前 Web 密码，原子写入 YAML，并立即热更新运行中的策略，无需
+  重启客户端。
+- 未实现该可选接口的 API 返回 `501`，页面不显示表单。
+
+### 变更
+
+- 文档和示例补充 Web 控制台与 YAML 两种设置方式；LuCI 基础表单仍把
+  `failover` 作为高级字段保留。
+
 ## v1.6.2 - 2026-11-05
 
 ### 新增

@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"net"
@@ -52,6 +53,55 @@ func policyFromConfig(cfg *config.ClientConfig) FailoverPolicy {
 		MinTCPHold:        time.Duration(f.MinTCPHold),
 		RecoverySuccesses: f.RecoverySuccesses,
 	}
+}
+
+func (c *Client) currentFailoverPolicy() FailoverPolicy {
+	if p := c.failoverPolicy.Load(); p != nil {
+		return *p
+	}
+	return DefaultFailoverPolicy()
+}
+
+func (c *Client) setFailoverPolicy(p FailoverPolicy) {
+	c.failoverPolicy.Store(&p)
+	select {
+	case c.heartbeatPolicyChanged <- struct{}{}:
+	default:
+	}
+	select {
+	case c.probePolicyChanged <- struct{}{}:
+	default:
+	}
+}
+
+// UpdateFailover validates, persists, and hot-applies one server's failover
+// timings. The running controller and heartbeat observe the new policy without
+// reconnecting; a failed write leaves both the file and the running policy
+// unchanged.
+func (c *Client) UpdateFailover(next config.FailoverConfig) error {
+	if err := next.Validate("failover"); err != nil {
+		return fmt.Errorf("update failover: %w", err)
+	}
+
+	c.configMu.Lock()
+	defer c.configMu.Unlock()
+	if c.isClosed() {
+		return fmt.Errorf("update failover: client is closed")
+	}
+	cfg := cloneClientConfig(c.cfg)
+	if cfg == nil {
+		return fmt.Errorf("update failover: client config is nil")
+	}
+	cfg.Failover = &next
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("update failover: %w", err)
+	}
+	if err := c.writeConfig(cfg); err != nil {
+		return fmt.Errorf("update failover: %w", err)
+	}
+	c.storeConfigLocked(cfg, c.udpTokenSnapshot(), c.mappingSnapshot())
+	c.setFailoverPolicy(policyFromConfig(cfg))
+	return nil
 }
 
 type RuntimeOptions struct {
@@ -208,7 +258,7 @@ func (p policyDeadline) Err() error {
 	return p.Context.Err()
 }
 func (c *Client) setupTimeout(parent context.Context) (context.Context, context.CancelFunc) {
-	d := c.runtime.Policy.ConnectTimeout
+	d := c.currentFailoverPolicy().ConnectTimeout
 	deadline := time.Now().Add(d)
 	if prior, ok := parent.Deadline(); ok && prior.Before(deadline) {
 		deadline = prior
@@ -501,7 +551,10 @@ func (c *Client) recoveryLoop(lifetime, ctx context.Context, session transport.S
 		case <-c.modeChanged:
 			successes = 0
 			continue
-		case <-c.runtime.Clock.After(c.runtime.Jitter(c.runtime.Policy.ProbeInterval)):
+		case <-c.probePolicyChanged:
+			successes = 0
+			continue
+		case <-c.runtime.Clock.After(c.runtime.Jitter(c.currentFailoverPolicy().ProbeInterval)):
 		}
 		if !c.probePolicyActive() {
 			continue
@@ -537,7 +590,8 @@ func (c *Client) recoveryLoop(lifetime, ctx context.Context, session transport.S
 			continue
 		}
 		successes++
-		if successes < c.runtime.Policy.RecoverySuccesses || c.runtime.Clock.Now().Sub(heldAt) < c.runtime.Policy.MinTCPHold {
+		policy := c.currentFailoverPolicy()
+		if successes < policy.RecoverySuccesses || c.runtime.Clock.Now().Sub(heldAt) < policy.MinTCPHold {
 			continue
 		}
 		candidate := c.newAttempt(lifetime, transport.HY2, "hy2_recovered")

@@ -31,7 +31,19 @@ type SettingsView struct {
 	Credentials           CredentialSettingsView `json:"credentials"`
 	Proxy                 ProxyView              `json:"proxy"`
 	Transport             view.TransportState    `json:"transport"`
+	Failover              FailoverView           `json:"failover"`
 	ReadOnly              []ReadOnlySetting      `json:"read_only"`
+}
+
+// FailoverView is the effective per-server fallback/recovery timing shown by
+// the client console. Durations use Go's standard string form.
+type FailoverView struct {
+	ConnectTimeout    string `json:"connect_timeout"`
+	HeartbeatInterval string `json:"heartbeat_interval"`
+	HeartbeatTimeout  string `json:"heartbeat_timeout"`
+	ProbeInterval     string `json:"probe_interval"`
+	MinTCPHold        string `json:"min_tcp_hold"`
+	RecoverySuccesses int    `json:"recovery_successes"`
 }
 
 // ProxyView is the per-server local proxy state shown by the client console.
@@ -84,12 +96,13 @@ type serversPage struct {
 
 type indexPage struct {
 	pageBase
-	Status         view.ClientStatus
-	Mappings       []view.MappingView
-	Logs           []view.LogEntry
-	Settings       SettingsView
-	ActiveMappings int
-	ModeAvailable  bool
+	Status            view.ClientStatus
+	Mappings          []view.MappingView
+	Logs              []view.LogEntry
+	Settings          SettingsView
+	ActiveMappings    int
+	ModeAvailable     bool
+	FailoverAvailable bool
 }
 
 type loginPage struct {

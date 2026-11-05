@@ -31,7 +31,69 @@ func TestClientFailoverPolicyFromConfig(t *testing.T) {
 		ProbeInterval:     15 * time.Second,
 		MinTCPHold:        30 * time.Second,
 		RecoverySuccesses: 3,
-	}, cl.runtime.Policy)
+	}, cl.currentFailoverPolicy())
+}
+
+func TestClientUpdateFailoverHotApplies(t *testing.T) {
+	cfg := validTestClientConfig()
+	cl, err := NewWithRuntime(cfg, nil, RuntimeOptions{})
+	require.NoError(t, err)
+	defer cl.Close()
+
+	var saved *config.ClientConfig
+	cl.SetPersist(func(next *config.ClientConfig) error {
+		saved = next
+		return nil
+	})
+	next := config.FailoverConfig{
+		ConnectTimeout:    config.Duration(8 * time.Second),
+		HeartbeatInterval: config.Duration(5 * time.Second),
+		HeartbeatTimeout:  config.Duration(20 * time.Second),
+		ProbeInterval:     config.Duration(15 * time.Second),
+		MinTCPHold:        config.Duration(30 * time.Second),
+		RecoverySuccesses: 3,
+	}
+	require.NoError(t, cl.UpdateFailover(next))
+	require.NotNil(t, saved)
+	require.NotNil(t, saved.Failover)
+	require.Equal(t, next, *saved.Failover)
+	require.Equal(t, 8*time.Second, cl.currentFailoverPolicy().ConnectTimeout)
+	require.Equal(t, 20*time.Second, cl.currentFailoverPolicy().HeartbeatTimeout)
+	select {
+	case <-cl.heartbeatPolicyChanged:
+	default:
+		t.Fatal("a successful failover update must wake the running policy loops")
+	}
+
+	bad := next
+	bad.HeartbeatTimeout = config.Duration(5 * time.Second)
+	require.Error(t, cl.UpdateFailover(bad))
+	require.Equal(t, 20*time.Second, cl.currentFailoverPolicy().HeartbeatTimeout,
+		"a rejected update must not change the running policy")
+}
+
+func TestClientUpdateFailoverPersists(t *testing.T) {
+	path := t.TempDir() + "/client.yaml"
+	cfg := validTestClientConfig()
+	cfg.ConfigPath = path
+	require.NoError(t, config.SaveClient(path, cfg))
+	cl, err := NewWithRuntime(cfg, nil, RuntimeOptions{})
+	require.NoError(t, err)
+	defer cl.Close()
+
+	next := config.FailoverConfig{
+		ConnectTimeout:    config.Duration(8 * time.Second),
+		HeartbeatInterval: config.Duration(5 * time.Second),
+		HeartbeatTimeout:  config.Duration(20 * time.Second),
+		ProbeInterval:     config.Duration(15 * time.Second),
+		MinTCPHold:        config.Duration(30 * time.Second),
+		RecoverySuccesses: 3,
+	}
+	require.NoError(t, cl.UpdateFailover(next))
+	loaded, err := config.LoadClient(path)
+	require.NoError(t, err)
+	require.NotNil(t, loaded.Failover)
+	require.Equal(t, next, *loaded.Failover)
 }
 
 func TestSupervisorFailoverPerServer(t *testing.T) {
@@ -62,19 +124,19 @@ func TestSupervisorFailoverPerServer(t *testing.T) {
 	usAPI, ok := sup.Server("us")
 	require.True(t, ok)
 	us := usAPI.(*Client)
-	require.Equal(t, 8*time.Second, us.runtime.Policy.ConnectTimeout)
+	require.Equal(t, 8*time.Second, us.currentFailoverPolicy().ConnectTimeout)
 
 	sgAPI, ok := sup.Server("sg")
 	require.True(t, ok)
 	sg := sgAPI.(*Client)
-	require.Equal(t, 12*time.Second, sg.runtime.Policy.ConnectTimeout)
+	require.Equal(t, 12*time.Second, sg.currentFailoverPolicy().ConnectTimeout)
 }
 
 func TestClientFailoverPolicyDefaultsAndOverride(t *testing.T) {
 	cfg := validTestClientConfig()
 	cl, err := NewWithRuntime(cfg, nil, RuntimeOptions{})
 	require.NoError(t, err)
-	require.Equal(t, DefaultFailoverPolicy(), cl.runtime.Policy)
+	require.Equal(t, DefaultFailoverPolicy(), cl.currentFailoverPolicy())
 	cl.Close()
 
 	override := FailoverPolicy{
@@ -88,5 +150,5 @@ func TestClientFailoverPolicyDefaultsAndOverride(t *testing.T) {
 	cl, err = NewWithRuntime(cfg, nil, RuntimeOptions{Policy: override})
 	require.NoError(t, err)
 	defer cl.Close()
-	require.Equal(t, override, cl.runtime.Policy)
+	require.Equal(t, override, cl.currentFailoverPolicy())
 }
