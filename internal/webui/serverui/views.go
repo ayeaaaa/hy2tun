@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"hy2tun/internal/config"
 	"hy2tun/internal/version"
 	"hy2tun/internal/view"
 	"hy2tun/internal/webui/shared"
@@ -20,24 +21,25 @@ var assets embed.FS
 // ConfigSummary is the read-only server configuration shown on the settings
 // page. It deliberately contains no passwords, tokens, or key material.
 type ConfigSummary struct {
-	ConfigPath             string        `json:"config_path"`
-	Listen                 string        `json:"listen"`
-	ListenHost             string        `json:"listen_host"`
-	WebListen              string        `json:"web_listen"`
-	WebUsername            string        `json:"web_username"`
-	WebTLS                 bool          `json:"web_tls"`
-	TLS                    bool          `json:"tls"`
-	StateFile              string        `json:"state_file"`
-	PortsAllow             []string      `json:"ports_allow"`
-	PortsDeny              []string      `json:"ports_deny"`
-	PortsAutoRange         string        `json:"ports_auto_range"`
-	OfflineReserve         time.Duration `json:"-"`
-	OfflineReserveSeconds  int64         `json:"offline_reserve_seconds"`
-	TrustProxy             bool          `json:"trust_proxy"`
-	LogLevel               string        `json:"log_level"`
-	Version                string        `json:"version"`
-	ControlTokenConfigured bool          `json:"control_token_configured"`
-	WebPasswordConfigured  bool          `json:"web_password_configured"`
+	ConfigPath             string               `json:"config_path"`
+	Listen                 string               `json:"listen"`
+	ListenHost             string               `json:"listen_host"`
+	WebListen              string               `json:"web_listen"`
+	WebUsername            string               `json:"web_username"`
+	WebTLS                 bool                 `json:"web_tls"`
+	TLS                    bool                 `json:"tls"`
+	StateFile              string               `json:"state_file"`
+	PortsAllow             []string             `json:"ports_allow"`
+	PortsDeny              []string             `json:"ports_deny"`
+	PortsAutoRange         string               `json:"ports_auto_range"`
+	OfflineReserve         time.Duration        `json:"-"`
+	OfflineReserveSeconds  int64                `json:"offline_reserve_seconds"`
+	TrustProxy             bool                 `json:"trust_proxy"`
+	LogLevel               string               `json:"log_level"`
+	Mode                   config.TransportMode `json:"mode"`
+	Version                string               `json:"version"`
+	ControlTokenConfigured bool                 `json:"control_token_configured"`
+	WebPasswordConfigured  bool                 `json:"web_password_configured"`
 }
 
 type pageBase struct {
@@ -70,7 +72,8 @@ type mappingsPage struct {
 
 type settingsPage struct {
 	pageBase
-	Settings SettingsView
+	Settings      SettingsView
+	ModeAvailable bool
 }
 
 // MaskedSecret is the fixed placeholder shown instead of a stored secret.
@@ -84,6 +87,7 @@ type SettingsView struct {
 	WebPasswordConfigured bool                   `json:"web_password_configured"`
 	AuthType              string                 `json:"auth_type"`
 	TrustProxy            bool                   `json:"trust_proxy"`
+	Mode                  config.TransportMode   `json:"mode"`
 	Ports                 PortSettingsView       `json:"ports"`
 	Credentials           CredentialSettingsView `json:"credentials"`
 	Clients               []ClientCredentialView `json:"clients"`
@@ -358,6 +362,25 @@ func sumMappingBytes(mappings []view.MappingView, value func(view.MappingView) u
 		total += value(mapping)
 	}
 	return total
+}
+
+// settingsFor applies defense-in-depth masking to the secret-free settings
+// snapshot. The API is expected to mask already, but a custom embedded API must
+// not be able to leak plaintext credentials through the console.
+func (s *Server) settingsFor() SettingsView {
+	settings := s.api.Settings()
+	settings.Credentials.CurrentAuthMasked = maskSettingsSecret(settings.Credentials.CurrentAuthMasked)
+	settings.Credentials.CurrentControlTokenMasked = maskSettingsSecret(settings.Credentials.CurrentControlTokenMasked)
+	settings.Credentials.PreviousAuthMasked = maskSettingsSecret(settings.Credentials.PreviousAuthMasked)
+	settings.Credentials.PreviousControlTokenMasked = maskSettingsSecret(settings.Credentials.PreviousControlTokenMasked)
+	return settings
+}
+
+func maskSettingsSecret(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return MaskedSecret
 }
 
 func wantsHTML(r *http.Request) bool {

@@ -804,6 +804,18 @@
     }
   }
 
+  function applyTransportMode(settings) {
+    if (!settings) {
+      return;
+    }
+    const mode = settings.mode || "hy2";
+    setTextAll("[data-transport-mode]", mode);
+    const select = document.getElementById("transport-mode");
+    if (select && document.activeElement !== select) {
+      select.value = mode;
+    }
+  }
+
   async function refreshSettings() {
     try {
       const response = await fetch("/api/settings", {
@@ -844,6 +856,7 @@
       if (revokeButton) {
         revokeButton.disabled = !(Number(credentials.previous_generation) > 0);
       }
+      applyTransportMode(settings);
       return settings;
     } catch (error) {
       return null;
@@ -1003,6 +1016,47 @@
         showToast(error.message, "bad");
       }
     });
+
+    const modeForm = $("#settings-mode-form");
+    if (modeForm) {
+      modeForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const select = $("#transport-mode");
+        const passwordInput = $("#mode-current-password");
+        const mode = select ? select.value : "";
+        if (!mode) {
+          showToast("请选择传输模式", "bad");
+          return;
+        }
+        if (!passwordInput || !passwordInput.value) {
+          showToast("请输入当前 Web 密码", "bad");
+          if (passwordInput) {
+            passwordInput.focus();
+          }
+          return;
+        }
+        const button = $("button[type='submit']", modeForm);
+        if (button) {
+          button.disabled = true;
+        }
+        try {
+          const settings = await settingsRequest("/api/settings/mode", "PUT", {
+            mode,
+            current_password: passwordInput.value,
+          });
+          applyTransportMode(settings);
+          passwordInput.value = "";
+          showToast("传输模式已更新");
+          await refreshSettings();
+        } catch (error) {
+          showToast(error.message, "bad");
+        } finally {
+          if (button) {
+            button.disabled = false;
+          }
+        }
+      });
+    }
 
     const proxyForm = $("#settings-proxy-form");
     proxyForm.addEventListener("submit", async (event) => {

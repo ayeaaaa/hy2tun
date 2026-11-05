@@ -326,6 +326,7 @@ func (s *Server) newHandler() http.Handler {
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 
 	mux.Handle("GET /api/settings", s.auth(http.HandlerFunc(s.handleSettingsJSON)))
+	mux.Handle("PUT /api/settings/mode", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateMode))))
 	mux.Handle("PUT /api/settings/web", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateWebSettings))))
 	mux.Handle("PUT /api/settings/proxy", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateProxy))))
 	mux.Handle("PUT /api/servers/{name}/proxy", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateProxy))))
@@ -405,6 +406,7 @@ func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
 	if logs == nil {
 		logs = []view.LogEntry{}
 	}
+	_, modeAvailable := api.(ModeAPI)
 	s.render(w, http.StatusOK, "index", indexPage{
 		pageBase:       s.base("端口映射"),
 		Status:         status,
@@ -412,6 +414,7 @@ func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
 		Logs:           logs,
 		Settings:       s.settingsFor(api),
 		ActiveMappings: countActiveMappings(mappings),
+		ModeAvailable:  modeAvailable,
 	})
 }
 
@@ -594,6 +597,7 @@ hy2tun_client_server_credential_generation %d
 # TYPE hy2tun_client_credential_synced gauge
 hy2tun_client_credential_synced %d
 `, connected, len(mappings), status.TxBytes, status.RxBytes, status.Uptime.Seconds(), status.CredentialGeneration, status.ServerCredentialGeneration, synced)
+	s.writeTransportMetrics(w)
 }
 
 func (s *Server) handleSettingsJSON(w http.ResponseWriter, r *http.Request) {

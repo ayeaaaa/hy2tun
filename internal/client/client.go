@@ -595,15 +595,19 @@ func (c *Client) Logs(level string, limit int) []view.LogEntry {
 // HY2 password and control token are masked here; their plaintext is only
 // available through the authenticated reveal endpoint.
 func (c *Client) Settings() clientui.SettingsView {
+	// Keep the config, credential and transport snapshot coherent under the
+	// established configMu -> mu order. A mode update or reconnect must not
+	// produce a settings response that mixes the old mode with new state.
 	c.configMu.Lock()
 	cfg := cloneClientConfig(c.cfg)
 	configPath := c.configPath
-	c.configMu.Unlock()
-
 	c.mu.Lock()
 	serverGeneration := c.serverCredentialGeneration
 	synced := c.credentialSynced
+	transport := c.transportState
 	c.mu.Unlock()
+	c.configMu.Unlock()
+	transport.Mode = cfg.Mode.Effective()
 
 	generation := cfg.Credentials.Generation
 	if generation < 1 {
@@ -635,7 +639,7 @@ func (c *Client) Settings() clientui.SettingsView {
 		WebUsername:           cfg.Web.Username,
 		WebPasswordConfigured: cfg.Web.PasswordHash != "",
 		Name:                  cfg.Client.Name,
-		Transport:             c.TransportState(),
+		Transport:             transport,
 		Proxy: clientui.ProxyView{
 			Enabled: proxyState.Enabled,
 			SOCKS5:  proxyState.SOCKS5,

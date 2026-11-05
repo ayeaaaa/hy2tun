@@ -30,10 +30,8 @@ type SettingsView struct {
 	Name                  string                 `json:"name"`
 	Credentials           CredentialSettingsView `json:"credentials"`
 	Proxy                 ProxyView              `json:"proxy"`
-	// Transport is retained for Task 9's settings/metrics shape; it is not
-	// exposed by the existing JSON contract yet.
-	Transport view.TransportState `json:"-"`
-	ReadOnly  []ReadOnlySetting   `json:"read_only"`
+	Transport             view.TransportState    `json:"transport"`
+	ReadOnly              []ReadOnlySetting      `json:"read_only"`
 }
 
 // ProxyView is the per-server local proxy state shown by the client console.
@@ -44,13 +42,16 @@ type ProxyView struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// ServerSummary is one row in the client console server list.
+// ServerSummary is one row in the client console server list. TransportState is
+// embedded so the server list flattens the same mode/actual-kind diagnostics as
+// status and SSE.
 type ServerSummary struct {
 	Name         string `json:"name"`
 	Address      string `json:"address"`
 	Online       bool   `json:"online"`
 	Mappings     int    `json:"mappings"`
 	ProxyEnabled bool   `json:"proxy_enabled"`
+	view.TransportState
 }
 
 // CredentialSettingsView describes the client's local credential generation
@@ -88,6 +89,7 @@ type indexPage struct {
 	Logs           []view.LogEntry
 	Settings       SettingsView
 	ActiveMappings int
+	ModeAvailable  bool
 }
 
 type loginPage struct {
@@ -108,6 +110,7 @@ type statusResponse struct {
 	CredentialGeneration       int64  `json:"credential_generation"`
 	ServerCredentialGeneration int64  `json:"server_credential_generation"`
 	CredentialSynced           bool   `json:"credential_synced"`
+	view.TransportState
 }
 
 type mappingResponse struct {
@@ -225,6 +228,7 @@ func statusResponseFrom(status view.ClientStatus, mappings []view.MappingView) s
 		CredentialGeneration:       status.CredentialGeneration,
 		ServerCredentialGeneration: status.ServerCredentialGeneration,
 		CredentialSynced:           status.CredentialSynced,
+		TransportState:             status.Transport,
 	}
 }
 

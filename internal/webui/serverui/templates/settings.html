@@ -57,6 +57,41 @@
 
 <section class="panel settings-section">
   <div class="panel-head">
+    <h2>传输模式</h2>
+    <span class="badge {{if .ModeAvailable}}badge-ok{{else}}badge-muted{{end}}">{{if .ModeAvailable}}可在线切换{{else}}只读{{end}}</span>
+  </div>
+  {{if .ModeAvailable}}
+  <form id="settings-mode-form" class="settings-form" autocomplete="off">
+    <div class="grid-2">
+      <div class="field">
+        <label class="field-label" for="transport-mode">模式</label>
+        <select class="input select" id="transport-mode">
+          <option value="hy2" {{if or (eq .Settings.Mode "hy2") (eq .Settings.Mode "")}}selected{{end}}>HY2（QUIC）</option>
+          <option value="tcp" {{if eq .Settings.Mode "tcp"}}selected{{end}}>TCP（UDP over TCP）</option>
+          <option value="hy2+tcp" {{if eq .Settings.Mode "hy2+tcp"}}selected{{end}}>HY2 + TCP（自动回退）</option>
+        </select>
+        <span class="field-hint">服务端只在启用的传输上监听；客户端仍按自身模式选择实际传输。</span>
+      </div>
+      <div class="field">
+        <label class="field-label" for="mode-current-password">当前密码</label>
+        <input class="input" id="mode-current-password" type="password" autocomplete="current-password" required>
+      </div>
+    </div>
+    <div class="notice">切换会断开现有连接；TCP 模式将 UDP 映射封装为 UDP over TCP，可能丢失 UDP 数据包。不保证无缝切换或零丢包。</div>
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary">应用传输模式</button>
+    </div>
+  </form>
+  {{else}}
+  <div class="notice">当前 API 未提供在线传输模式切换；请修改配置文件并重启 hy2tund 后生效。</div>
+  {{end}}
+  <dl class="kv">
+    <div><dt>当前模式</dt><dd class="mono" data-transport-mode>{{if .Settings.Mode}}{{.Settings.Mode}}{{else}}hy2{{end}}</dd></div>
+  </dl>
+</section>
+
+<section class="panel settings-section">
+  <div class="panel-head">
     <h2>HY2 凭据</h2>
     <span class="pill pill-muted">当前代际 <span data-settings-generation>{{.Settings.Credentials.Generation}}</span></span>
   </div>

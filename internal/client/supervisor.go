@@ -372,11 +372,12 @@ func (s *Supervisor) Servers() []clientui.ServerSummary {
 		status := worker.Status()
 		proxy := worker.ProxyState()
 		out = append(out, clientui.ServerSummary{
-			Name:         name,
-			Address:      status.Server,
-			Online:       status.Connected,
-			Mappings:     len(worker.Mappings()),
-			ProxyEnabled: proxy.Enabled,
+			Name:           name,
+			Address:        status.Server,
+			Online:         status.Connected,
+			Mappings:       len(worker.Mappings()),
+			ProxyEnabled:   proxy.Enabled,
+			TransportState: status.Transport,
 		})
 	}
 	return out

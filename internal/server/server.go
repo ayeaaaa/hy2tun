@@ -490,6 +490,7 @@ func (s *Server) Settings() serverui.SettingsView {
 		WebPasswordConfigured: cfg.Web.PasswordHash != "",
 		AuthType:              cfg.Auth.Type,
 		TrustProxy:            s.trustProxy.Load(),
+		Mode:                  cfg.Mode.Effective(),
 		Ports: serverui.PortSettingsView{
 			Allow:                 append([]string(nil), cfg.Ports.Allow...),
 			Deny:                  append([]string(nil), cfg.Ports.Deny...),
@@ -619,6 +620,7 @@ func (s *Server) ConfigSummary() serverui.ConfigSummary {
 		OfflineReserveSeconds:  int64(time.Duration(cfg.Ports.OfflineReserve) / time.Second),
 		TrustProxy:             s.trustProxy.Load(),
 		LogLevel:               cfg.Log.Level,
+		Mode:                   cfg.Mode.Effective(),
 		Version:                version.Version,
 		ControlTokenConfigured: cfg.Control.Token != "",
 		WebPasswordConfigured:  cfg.Web.PasswordHash != "",

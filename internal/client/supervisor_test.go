@@ -130,6 +130,8 @@ func TestSupervisorExposesServerSummaries(t *testing.T) {
 	summaries := sup.Servers()
 	require.Len(t, summaries, 2)
 	require.Equal(t, "us", summaries[0].Name)
+	require.Equal(t, config.ModeHY2, summaries[0].Mode)
+	require.Empty(t, summaries[0].ActiveTransport)
 	api, ok := sup.Server("sg")
 	require.True(t, ok)
 	require.NotNil(t, api)

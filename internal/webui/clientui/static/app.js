@@ -58,8 +58,8 @@
       return "—";
     }
     const date = new Date(value);
-    if (Number.isNaN(date.getTime())) {
-      return String(value);
+    if (Number.isNaN(date.getTime()) || date.getFullYear() <= 1) {
+      return "—";
     }
     try {
       return date.toLocaleString("zh-CN", { hour12: false });
@@ -245,6 +245,41 @@
     }
   }
 
+  function transportLabel(kind) {
+    switch (kind) {
+      case "tcp":
+        return "TCP（UDP over TCP）";
+      case "hy2":
+        return "HY2";
+      default:
+        return "—";
+    }
+  }
+
+  function applyTransportState(state) {
+    if (!state) {
+      return;
+    }
+    if (state.mode !== undefined && state.mode !== null) {
+      const mode = state.mode || "hy2";
+      setTextAll("[data-transport-mode]", mode);
+      const select = document.getElementById("transport-mode");
+      if (select && document.activeElement !== select) {
+        select.value = mode;
+      }
+    }
+    const active = $("[data-transport-active]");
+    if (active) {
+      active.dataset.transportActive = state.active_transport || "";
+      active.textContent = transportLabel(state.active_transport);
+    }
+    setTextAll("[data-transport-reason]", state.switch_reason || "—");
+    setTextAll("[data-transport-last-switch]", fmtTime(state.last_switch_at));
+    setTextAll("[data-transport-last-probe]", fmtTime(state.last_probe_at));
+    setTextAll("[data-transport-probe-error]", state.last_probe_error || "—");
+    setTextAll("[data-transport-switch-count]", Number(state.switch_count) || 0);
+  }
+
   function applyStatus(status) {
     if (!status) {
       return;
@@ -287,6 +322,7 @@
       }
     }
     applyCredentialStatus(status);
+    applyTransportState(status);
   }
 
   function setSyncBadge(synced) {
@@ -368,6 +404,7 @@
         input.value = value || "";
       }
     }
+    applyTransportState(settings.transport);
   }
 
   async function settingsRequest(path, method, body) {
@@ -413,6 +450,27 @@
       const settings = await response.json();
       applySettings(settings);
       return settings;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  async function refreshStatus() {
+    try {
+      const response = await fetch(serverURL("/api/status"), {
+        headers: { Accept: "application/json" },
+        credentials: "same-origin",
+      });
+      if (response.status === 401) {
+        window.location.href = "/login";
+        return null;
+      }
+      if (!response.ok) {
+        return null;
+      }
+      const status = await response.json();
+      applyStatus(status);
+      return status;
     } catch (error) {
       return null;
     }
@@ -767,6 +825,48 @@
         }
       }
     });
+
+    const modeForm = $("#settings-mode-form");
+    if (modeForm) {
+      modeForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const select = $("#transport-mode");
+        const passwordInput = $("#mode-current-password");
+        const mode = select ? select.value : "";
+        if (!mode) {
+          showToast("请选择传输模式", "bad");
+          return;
+        }
+        if (!passwordInput || !passwordInput.value) {
+          showToast("请输入当前 Web 密码", "bad");
+          if (passwordInput) {
+            passwordInput.focus();
+          }
+          return;
+        }
+        const button = $("button[type='submit']", modeForm);
+        if (button) {
+          button.disabled = true;
+        }
+        try {
+          const state = await settingsRequest(serverURL("/api/settings/mode"), "PUT", {
+            mode,
+            current_password: passwordInput.value,
+          });
+          applyTransportState(state);
+          passwordInput.value = "";
+          showToast("传输模式已更新");
+          await refreshStatus();
+          await refreshSettings();
+        } catch (error) {
+          showToast(error.message, "bad");
+        } finally {
+          if (button) {
+            button.disabled = false;
+          }
+        }
+      });
+    }
 
     const proxyForm = $("#settings-proxy-form");
     if (proxyForm) {

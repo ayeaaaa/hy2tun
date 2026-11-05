@@ -83,6 +83,11 @@ type fakeServerAPI struct {
 	setTrustProxyCalls int
 	setTrustProxyValue bool
 	setTrustProxyErr   error
+
+	mode       config.TransportMode
+	modeErr    error
+	modeCalls  int
+	modeValues []config.TransportMode
 }
 
 func (f *fakeServerAPI) Overview() view.Overview {
@@ -113,7 +118,11 @@ func (f *fakeServerAPI) Client(id string) (view.ClientView, bool) {
 func (f *fakeServerAPI) ConfigSummary() ConfigSummary {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.summary
+	summary := f.summary
+	if summary.Mode == "" {
+		summary.Mode = f.mode.Effective()
+	}
+	return summary
 }
 
 func (f *fakeServerAPI) PushMappings(id string, baseRevision int64, mappings []config.Mapping) (int64, error) {
@@ -162,6 +171,9 @@ func (f *fakeServerAPI) Settings() SettingsView {
 	defer f.mu.Unlock()
 
 	settings := f.settings
+	if settings.Mode == "" {
+		settings.Mode = f.mode.Effective()
+	}
 	if settings.WebUsername == "" {
 		settings.WebUsername = f.summary.WebUsername
 	}
@@ -244,6 +256,23 @@ func (f *fakeServerAPI) SetTrustProxy(trust bool) error {
 	f.setTrustProxyCalls++
 	f.setTrustProxyValue = trust
 	return f.setTrustProxyErr
+}
+
+func (f *fakeServerAPI) UpdateMode(mode config.TransportMode) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.modeCalls++
+	f.modeValues = append(f.modeValues, mode)
+	if f.modeErr != nil {
+		return f.modeErr
+	}
+	if err := mode.Validate(); err != nil {
+		return err
+	}
+	f.mode = mode.Effective()
+	f.settings.Mode = f.mode
+	f.summary.Mode = f.mode
+	return nil
 }
 
 // fakePushError mirrors server.PushError without importing the server package

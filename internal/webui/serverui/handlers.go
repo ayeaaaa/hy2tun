@@ -346,6 +346,7 @@ func (s *Server) newHandler() http.Handler {
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 
 	mux.Handle("GET /api/settings", s.auth(http.HandlerFunc(s.handleSettingsJSON)))
+	mux.Handle("PUT /api/settings/mode", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateMode))))
 	mux.Handle("PUT /api/settings/web", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateWebSettings))))
 	mux.Handle("PUT /api/settings/ports", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdatePorts))))
 	mux.Handle("PUT /api/settings/proxy", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleUpdateTrustProxy))))
@@ -511,9 +512,11 @@ hy2tun_server_uptime_seconds %.0f
 }
 
 func (s *Server) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
+	_, modeAvailable := s.api.(ModeAPI)
 	s.render(w, http.StatusOK, "settings", settingsPage{
-		pageBase: s.base("设置", "settings"),
-		Settings: s.api.Settings(),
+		pageBase:      s.base("设置", "settings"),
+		Settings:      s.settingsFor(),
+		ModeAvailable: modeAvailable,
 	})
 }
 
@@ -547,7 +550,7 @@ func (s *Server) handleConfigSummaryJSON(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleSettingsJSON(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.api.Settings())
+	writeJSON(w, http.StatusOK, s.settingsFor())
 }
 
 // passwordRequest accepts either "password" (the reveal API shape) or

@@ -22,6 +22,7 @@
     <div><dt>版本</dt><dd class="mono">{{if .Client.Version}}{{.Client.Version}}{{else}}—{{end}}</dd></div>
     <div><dt>配置版本</dt><dd class="mono">r{{.Client.Revision}}</dd></div>
     <div><dt>最后在线</dt><dd>{{time .Client.LastSeen}}</dd></div>
+    <div><dt>{{if .Client.Online}}实际传输{{else}}最后传输{{end}}</dt><dd class="mono" data-client-transport="{{.Client.Transport}}">{{if eq .Client.Transport "tcp"}}TCP（UDP over TCP）{{else if eq .Client.Transport "hy2"}}HY2{{else}}—{{end}}</dd></div>
     <div><dt>映射</dt><dd><span data-client-stat="active">{{.ActiveCount}}</span> 运行 / {{len .Client.Mappings}} 总计</dd></div>
   </dl>
 

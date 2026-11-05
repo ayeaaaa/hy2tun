@@ -27,11 +27,12 @@ func (s *Server) serverSummaries() []ServerSummary {
 	status := s.api.Status()
 	settings := s.api.Settings()
 	return []ServerSummary{{
-		Name:         "default",
-		Address:      status.Server,
-		Online:       status.Connected,
-		Mappings:     len(s.api.Mappings()),
-		ProxyEnabled: settings.Proxy.Enabled,
+		Name:           "default",
+		Address:        status.Server,
+		Online:         status.Connected,
+		Mappings:       len(s.api.Mappings()),
+		ProxyEnabled:   settings.Proxy.Enabled,
+		TransportState: status.Transport,
 	}}
 }
 

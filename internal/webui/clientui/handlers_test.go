@@ -51,10 +51,13 @@ type fakeClientAPI struct {
 	nameErr   error
 	webErr    error
 	rotateErr error
+	modeErr   error
 
-	added   []config.Mapping
-	updated []config.Mapping
-	deleted []string
+	added      []config.Mapping
+	updated    []config.Mapping
+	deleted    []string
+	modeCalls  int
+	modeValues []config.TransportMode
 
 	lastLevel string
 	lastLimit int
@@ -72,11 +75,12 @@ func (f *fakeMultiAPI) Servers() []ServerSummary {
 		api := f.servers[name]
 		status := api.Status()
 		out = append(out, ServerSummary{
-			Name:         name,
-			Address:      status.Server,
-			Online:       status.Connected,
-			Mappings:     len(api.Mappings()),
-			ProxyEnabled: api.settings.Proxy.Enabled,
+			Name:           name,
+			Address:        status.Server,
+			Online:         status.Connected,
+			Mappings:       len(api.Mappings()),
+			ProxyEnabled:   api.settings.Proxy.Enabled,
+			TransportState: status.Transport,
 		})
 	}
 	return out
@@ -237,6 +241,23 @@ func (f *fakeClientAPI) CredentialsSnapshot() *credentials.Set {
 	defer f.mu.Unlock()
 	snapshot := f.rotation
 	return &snapshot
+}
+
+func (f *fakeClientAPI) UpdateMode(mode config.TransportMode) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.modeCalls++
+	f.modeValues = append(f.modeValues, mode)
+	if f.modeErr != nil {
+		return f.modeErr
+	}
+	if err := mode.Validate(); err != nil {
+		return err
+	}
+	effective := mode.Effective()
+	f.status.Transport.Mode = effective
+	f.settings.Transport.Mode = effective
+	return nil
 }
 
 func testLogRank(level string) int {

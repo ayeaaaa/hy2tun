@@ -148,7 +148,7 @@ func (s *Server) handleUpdatePorts(w http.ResponseWriter, r *http.Request) {
 		s.writeSettingsMutationError(w, err, "invalid_ports", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, s.api.Settings())
+	writeJSON(w, http.StatusOK, s.settingsFor())
 }
 
 func (s *Server) handleUpdateTrustProxy(w http.ResponseWriter, r *http.Request) {
@@ -169,7 +169,7 @@ func (s *Server) handleUpdateTrustProxy(w http.ResponseWriter, r *http.Request) 
 	// Update the live login/settings-confirmation limiters only after the
 	// configuration write succeeded.
 	s.SetTrustProxy(request.TrustProxy)
-	writeJSON(w, http.StatusOK, s.api.Settings())
+	writeJSON(w, http.StatusOK, s.settingsFor())
 }
 
 type rotateCredentialsResponse struct {

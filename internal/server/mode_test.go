@@ -231,6 +231,8 @@ func TestServerDisablingHY2LeavesTCPAndWeb(t *testing.T) {
 	require.NotNil(t, oldHY2)
 	require.NoError(t, applyServerMode(s, config.ModeTCP))
 	require.Equal(t, config.ModeTCP, s.Mode())
+	require.Equal(t, config.ModeTCP, s.Settings().Mode)
+	require.Equal(t, config.ModeTCP, s.ConfigSummary().Mode)
 	select {
 	case <-oldHY2.workerDone():
 	case <-time.After(2 * time.Second):
