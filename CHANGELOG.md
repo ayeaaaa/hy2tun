@@ -75,8 +75,14 @@ All notable changes to this project are documented here.
   `scripts/openwrt/test-luci-controller.sh`.
 - Cross-builds for Linux amd64/arm64/arm/mips/mipsle and Windows amd64.
 - Local QEMU user-mode checks for Linux arm64/arm/mips/mipsle: `-version`,
-  `--check-config`, and a real TLS/TCP frame round-trip test. Real-device
-  OpenWrt acceptance remains external and is not claimed by unit tests alone.
+  `--check-config`, and a real TLS/TCP frame round-trip test.
+- OpenWrt 24.10.2 x86_64 real-device acceptance with the v1.6.0 package:
+  HY2 active, both-direction UDP DROP fallback in 9 seconds, recovery to HY2
+  after 99 seconds, TCP and UDP mappings over the TCP fallback, wrong-auth
+  rejection without fallback, TCP port-conflict rollback, LuCI page/mode and
+  start-stop checks, and rollback to v1.5.4 with no leftover mappings.
+  Windows hardware acceptance remains external; only the Windows amd64
+  cross-build is verified.
 
 ## v1.5.4 - 2026-10-31
 

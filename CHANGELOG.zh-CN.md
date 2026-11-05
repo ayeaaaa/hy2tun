@@ -63,8 +63,12 @@
   `scripts/openwrt/test-luci-controller.sh`。
 - Linux amd64/arm64/arm/mips/mipsle 和 Windows amd64 交叉构建。
 - Linux arm64/arm/mips/mipsle 的本地 QEMU user-mode 检查：`-version`、
-  `--check-config` 和真实 TLS/TCP 帧往返测试。OpenWrt 真机验收仍属外部
-  检查项，仅凭单元测试不声称已完成。
+  `--check-config` 和真实 TLS/TCP 帧往返测试。
+- OpenWrt 24.10.2 x86_64 使用 v1.6.0 包完成真机验收：HY2 正常；双向 UDP
+  DROP 后 9 秒回退到 TCP；99 秒后恢复 HY2；TCP 和 UDP 映射均可在 TCP 回退
+  上工作；错误认证被拒绝且不回退；TCP 端口冲突回滚；LuCI 页面/模式与启停
+  检查通过；回滚到 v1.5.4 后无遗留映射。Windows 真机验收仍属外部检查项，
+  当前只验证了 Windows amd64 交叉构建。
 
 ## v1.5.4 - 2026-10-31
 
