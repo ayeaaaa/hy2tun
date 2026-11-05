@@ -488,6 +488,15 @@ func (c *Client) forceReconnect() {
 	c.invalidateTransportLocked()
 	conn := c.controlConn
 	session := c.session
+	// Invalidate the owner synchronously. Closing the socket alone races with
+	// the control inbox: a Push already queued by the old reader could still be
+	// dispatched while controlConn/connected remain true, applying a stale
+	// revision after the forced reconnect. The Start loop reconnects from the
+	// cleared state.
+	c.controlConn = nil
+	c.session = nil
+	c.connected = false
+	c.transportState.ActiveTransport = ""
 	c.mu.Unlock()
 	closeLiveConnection(conn, session)
 }
