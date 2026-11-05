@@ -329,13 +329,6 @@ func (s *hy2Session) operationErr(ctx context.Context) error {
 	return nil
 }
 
-// open owns a resource until the caller accepts it. Closing the session aborts
-// upstream I/O; a factory returning after shutdown still has its result closed.
-func (s *hy2Session) open(ctx context.Context, operation func() (io.Closer, error)) (io.Closer, error) {
-	conn, _, err := s.openWithCompletion(ctx, operation)
-	return conn, err
-}
-
 func completedOpen() <-chan struct{} {
 	done := make(chan struct{})
 	close(done)

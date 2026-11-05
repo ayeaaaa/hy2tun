@@ -110,16 +110,6 @@ func (m *mappingManager) clientCount() int {
 	return len(m.sessions)
 }
 
-func (m *mappingManager) hasClient(id string) bool {
-	if m == nil {
-		return false
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	_, ok := m.sessions[id]
-	return ok
-}
-
 func (m *mappingManager) register(sess *clientSession, mappings []config.Mapping) []control.Result {
 	now := time.Now()
 

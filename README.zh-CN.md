@@ -1692,4 +1692,6 @@ go test ./internal/e2e -v     # 只运行验收测试
 
 ## 许可证
 
-MIT，见 [`LICENSE`](LICENSE)。安全报告方式见 [`SECURITY.md`](SECURITY.md)。
+MIT，见 [`LICENSE`](LICENSE)。第三方组件、署名和许可证文本见
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) 和 [`LICENSES/`](LICENSES/)。
+安全报告方式见 [`SECURITY.md`](SECURITY.md)。

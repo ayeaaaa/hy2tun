@@ -8,6 +8,7 @@ import (
 	"net"
 	"time"
 
+	"hy2tun/internal/config"
 	"hy2tun/internal/control"
 	"hy2tun/internal/transport"
 	"hy2tun/internal/version"
@@ -189,21 +190,35 @@ func (h *controlHandler) serveWithMeta(conn net.Conn, meta sessionMeta) {
 	h.loop(sess)
 }
 
+// acquireAdmission acquires the mapping manager lock and a settings read lock,
+// returning the configuration snapshot protected by that read lock. TryRLock is
+// attempted under the manager lock so a settings writer (mode or credential
+// swap) cannot deadlock behind a waiting Hello; if a writer is active, the
+// manager lock is released and a blocking read waits for that writer before the
+// retry. The caller must release settingsMu and then mappings.mu.
+func (s *Server) acquireAdmission() *config.ServerConfig {
+	m := s.mappings
+	for {
+		m.mu.Lock()
+		if s.settingsMu.TryRLock() {
+			return s.cfg
+		}
+		m.mu.Unlock()
+		// Wait for the active settings writer without holding the manager
+		// lock. Reading the configuration under the blocking read lock makes
+		// the barrier a real critical section; the retry re-reads it under the
+		// final lock.
+		_ = s.currentConfig()
+	}
+}
+
 // registerControl validates and commits admission atomically before an existing
 // owner can be replaced. Writers use settingsMu for mode/credential swaps. TryRLock
 // avoids the settings-writer -> manager lock order used by hot port updates, and
 // does not prevent revocation while this Hello waits for the manager.
 func (s *Server) registerControl(sess *clientSession, hello *control.Hello, meta sessionMeta, deadline time.Time, reported int64, capable bool) ([]control.Result, error) {
+	settings := s.acquireAdmission()
 	m := s.mappings
-	for {
-		m.mu.Lock()
-		if s.settingsMu.TryRLock() {
-			break
-		}
-		m.mu.Unlock()
-		s.settingsMu.RLock()
-		s.settingsMu.RUnlock()
-	}
 	var old *clientSession
 	commit := func() error {
 		current := s.currentCredentials()
@@ -214,11 +229,11 @@ func (s *Server) registerControl(sess *clientSession, hello *control.Hello, meta
 		if meta.endpointClosed != nil && meta.endpointClosed.Load() {
 			return transport.ErrAuthentication
 		}
-		if meta.Kind == transport.HY2 && (s.cfg == nil || !s.cfg.Mode.AllowsHY2()) {
+		if meta.Kind == transport.HY2 && (settings == nil || !settings.Mode.AllowsHY2()) {
 			return transport.ErrAuthentication
 		}
 		if meta.Kind == transport.TCP {
-			if meta.Principal == nil || meta.Peer == nil || meta.Peer.Principal() != *meta.Principal || hello.ClientID != meta.Principal.ClientID || sha256.Sum256([]byte(hello.Token)) != meta.Principal.TokenDigest || !tcpPrincipalValid(*meta.Principal, current) || s.cfg == nil || !s.cfg.Mode.AllowsTCP() {
+			if meta.Principal == nil || meta.Peer == nil || meta.Peer.Principal() != *meta.Principal || hello.ClientID != meta.Principal.ClientID || sha256.Sum256([]byte(hello.Token)) != meta.Principal.TokenDigest || !tcpPrincipalValid(*meta.Principal, current) || settings == nil || !settings.Mode.AllowsTCP() {
 				return transport.ErrAuthentication
 			}
 			authenticated = meta.Principal.Generation

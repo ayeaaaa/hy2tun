@@ -14,6 +14,7 @@ import (
 
 	"github.com/fatedier/yamux"
 	"github.com/stretchr/testify/require"
+	"hy2tun/internal/config"
 	"hy2tun/internal/control"
 	"hy2tun/internal/transport"
 )
@@ -27,6 +28,15 @@ type registrationCloseGate struct {
 func (c *registrationCloseGate) Close() error {
 	c.once.Do(func() { close(c.entered); <-c.release })
 	return c.Conn.Close()
+}
+
+// settingsWriteSnapshot performs a real settings write-lock operation and
+// returns the configuration observed under it. Admission tests use it to prove
+// unrelated settings writers are not blocked while an admission is stuck.
+func settingsWriteSnapshot(s *Server) *config.ServerConfig {
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
+	return s.cfg
 }
 
 // Real TLS/authenticated server peer with SYNs queued on the real mux backlog.
@@ -132,7 +142,12 @@ func TestTCPPeerClosedAdmissionDoesNotHoldManagerDuringQueuedShutdown(t *testing
 		}
 		managerDone, settingsDone := make(chan struct{}), make(chan struct{})
 		go func() { s.mappings.clientCount(); close(managerDone) }()
-		go func() { s.settingsMu.Lock(); s.settingsMu.Unlock(); close(settingsDone) }()
+		go func() {
+			if settingsWriteSnapshot(s) == nil {
+				t.Error("settings write probe observed nil config")
+			}
+			close(settingsDone)
+		}()
 		for _, operation := range []struct {
 			name string
 			done <-chan struct{}

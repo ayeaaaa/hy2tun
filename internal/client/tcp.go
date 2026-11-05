@@ -15,21 +15,12 @@ import (
 )
 
 const (
-	// dataStreamPrefix is the reserved virtual host prefix for reverse data
-	// streams.
-	dataStreamPrefix = "_hy2tun_data_"
 	// dataDialTimeout bounds how long a local target may take to accept a
 	// reverse connection.
 	dataDialTimeout = 10 * time.Second
 	// dataTokenLength is the hex length of a 128-bit data stream token.
 	dataTokenLength = 32
 )
-
-// dataStreamAddress returns the virtual address that carries the reverse data
-// stream for token.
-func dataStreamAddress(token string) string {
-	return dataStreamPrefix + token + ":0"
-}
 
 // validDataToken reports whether token is a 128-bit hex value. Malformed tokens
 // from a broken or hostile server are rejected before dialing anything.
@@ -175,15 +166,6 @@ func (c *Client) controlStream() net.Conn {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.controlConn
-}
-
-// forceControlResync closes the control stream so Start reconnects and sends a
-// fresh hello. It is used when a data-plane component can no longer trust its
-// current session.
-func (c *Client) forceControlResync() {
-	if conn := c.controlStream(); conn != nil {
-		_ = conn.Close()
-	}
 }
 
 func (c *Client) forceControlResyncFor(session transport.Session, owner net.Conn) {

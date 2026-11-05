@@ -34,11 +34,15 @@ trap 'rm -rf "$work"' EXIT INT TERM
 
 pkg="$work/data"
 control="$work/control"
-mkdir -p "$pkg/usr/bin" "$pkg/etc/init.d" "$pkg/etc/hy2tun" "$control"
+mkdir -p "$pkg/usr/bin" "$pkg/etc/init.d" "$pkg/etc/hy2tun" \
+	"$pkg/usr/share/doc/hy2tun" "$control"
 
 install -m 0755 "$binary" "$pkg/usr/bin/hy2tun"
 install -m 0755 "$root/scripts/openwrt/hy2tun.init" "$pkg/etc/init.d/hy2tun"
 install -m 0600 "$root/examples/client-basic.yaml" "$pkg/etc/hy2tun/client.yaml.example"
+install -m 0644 "$root/LICENSE" "$pkg/usr/share/doc/hy2tun/LICENSE"
+install -m 0644 "$root/THIRD_PARTY_NOTICES.md" "$pkg/usr/share/doc/hy2tun/THIRD_PARTY_NOTICES.md"
+cp -R "$root/LICENSES" "$pkg/usr/share/doc/hy2tun/"
 
 cat > "$control/control" <<CONTROL
 Package: hy2tun

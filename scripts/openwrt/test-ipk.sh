@@ -17,6 +17,9 @@ grep -q '^Architecture: all$' "$work/client/control"
 grep -q './usr/bin/hy2tun' "$work/client/files.txt"
 grep -q './etc/init.d/hy2tun' "$work/client/files.txt"
 grep -q './etc/hy2tun/client.yaml.example' "$work/client/files.txt"
+grep -q './usr/share/doc/hy2tun/LICENSE' "$work/client/files.txt"
+grep -q './usr/share/doc/hy2tun/THIRD_PARTY_NOTICES.md' "$work/client/files.txt"
+grep -q './usr/share/doc/hy2tun/LICENSES/MPL-2.0.txt' "$work/client/files.txt"
 
 # The package ships an example only. Post-install must never copy an active
 # configuration or start the service at boot; it may only fix permissions on

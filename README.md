@@ -1940,5 +1940,7 @@ Every GitHub Release includes both English and Chinese notes, generated from
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE). Security reporting is described in
+MIT. See [`LICENSE`](LICENSE). Third-party components, attribution, and license
+texts are listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) and
+[`LICENSES/`](LICENSES/). Security reporting is described in
 [`SECURITY.md`](SECURITY.md).
