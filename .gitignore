@@ -2,3 +2,4 @@
 /dist/
 *.test
 coverage.out
+RELEASE_NOTES.md

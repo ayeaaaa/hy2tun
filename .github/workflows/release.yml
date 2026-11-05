@@ -26,7 +26,7 @@ jobs:
           cache: true
 
       - name: Generate bilingual release notes
-        run: ./scripts/release-notes.sh "$GITHUB_REF_NAME" > RELEASE_NOTES.md
+        run: ./scripts/release-notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/RELEASE_NOTES.md"
 
       - name: Build release archives
         run: make release
@@ -34,7 +34,7 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v3
         with:
-          body_path: RELEASE_NOTES.md
+          body_path: ${{ runner.temp }}/RELEASE_NOTES.md
           files: |
             dist/*.tar.gz
             dist/*.zip

@@ -653,8 +653,9 @@ func TestFallbackPushRotationAndProxy(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return tcpEcho(publicAddr(baseTCP), "tcp-after-tcp-rotation") == nil
 	}, 5*time.Second, 20*time.Millisecond, "the TCP mapping must recover after credential rotation")
+	rotatedUDP := mappingByID(t, rotatedView.Mappings, "udp").AssignedPort
 	require.Eventually(t, func() bool {
-		return udpEcho(publicAddr(mappingByID(t, rotatedView.Mappings, "udp").AssignedPort), "udp-after-tcp-rotation") == nil
+		return udpEcho(publicAddr(rotatedUDP), "udp-after-tcp-rotation") == nil
 	}, 5*time.Second, 20*time.Millisecond, "the UDP mapping must recover after credential rotation")
 	requireSOCKSEcho(t, cfg.Proxy.SOCKS5, tcpEchoAddr, "socks-after-rotation")
 	requireHTTPConnectEcho(t, cfg.Proxy.HTTP, tcpEchoAddr, "http-after-rotation")
@@ -774,6 +775,12 @@ func TestFallbackBackpressureCloseBounded(t *testing.T) {
 
 	stopFlood := make(chan struct{})
 	var floodWG sync.WaitGroup
+	var stopFloodOnce sync.Once
+	stopFloodNow := func() { stopFloodOnce.Do(func() { close(stopFlood) }) }
+	t.Cleanup(func() {
+		stopFloodNow()
+		floodWG.Wait()
+	})
 	var sent atomic.Int64
 	for i := 0; i < 4; i++ {
 		floodWG.Add(1)
@@ -846,7 +853,7 @@ func TestFallbackBackpressureCloseBounded(t *testing.T) {
 		t.Fatal("client Close did not return during UDP backpressure")
 	}
 
-	close(stopFlood)
+	stopFloodNow()
 	floodWG.Wait()
 
 	require.Eventually(t, func() bool {
@@ -961,8 +968,9 @@ func TestFallbackProbeUnsupportedKeepsTCPOwner(t *testing.T) {
 	require.Len(t, es.srv.Clients(), 1)
 	require.Equal(t, "tcp", es.srv.Clients()[0].Transport)
 	require.NoError(t, tcpEcho(publicAddr(mappingByID(t, serverView.Mappings, "tcp").AssignedPort), "probe-unsupported-tcp"))
+	probeUnsupportedUDP := mappingByID(t, serverView.Mappings, "udp").AssignedPort
 	require.Eventually(t, func() bool {
-		return udpEcho(publicAddr(mappingByID(t, serverView.Mappings, "udp").AssignedPort), "probe-unsupported-udp") == nil
+		return udpEcho(publicAddr(probeUnsupportedUDP), "probe-unsupported-udp") == nil
 	}, 5*time.Second, 20*time.Millisecond)
 
 	saved, err := config.LoadClient(cfg.ConfigPath)
@@ -1027,8 +1035,9 @@ func TestFallbackCandidateDialFailureRestoresTCP(t *testing.T) {
 	require.Len(t, es.srv.Clients(), 1)
 	require.Equal(t, "tcp", es.srv.Clients()[0].Transport)
 	require.NoError(t, tcpEcho(publicAddr(mappingByID(t, serverView.Mappings, "tcp").AssignedPort), "tcp-after-candidate-failure"))
+	candidateFailureUDP := mappingByID(t, serverView.Mappings, "udp").AssignedPort
 	require.Eventually(t, func() bool {
-		return udpEcho(publicAddr(mappingByID(t, serverView.Mappings, "udp").AssignedPort), "udp-after-candidate-failure") == nil
+		return udpEcho(publicAddr(candidateFailureUDP), "udp-after-candidate-failure") == nil
 	}, 5*time.Second, 20*time.Millisecond)
 
 	saved, err := config.LoadClient(cfg.ConfigPath)
@@ -1138,8 +1147,9 @@ func testOldClientToNewServer(t *testing.T, oldClientBin string, serverMode conf
 
 	serverView := waitServerClient(t, es.srv, cfg.Client.ID, "hy2", 2, 20*time.Second)
 	require.NoError(t, tcpEcho(publicAddr(mappingByID(t, serverView.Mappings, "tcp").AssignedPort), "old-client-tcp"))
+	oldClientUDP := mappingByID(t, serverView.Mappings, "udp").AssignedPort
 	require.Eventually(t, func() bool {
-		return udpEcho(publicAddr(mappingByID(t, serverView.Mappings, "udp").AssignedPort), "old-client-udp") == nil
+		return udpEcho(publicAddr(oldClientUDP), "old-client-udp") == nil
 	}, 5*time.Second, 20*time.Millisecond)
 	require.False(t, proc.exited(), "the v1.5.4 client must stay running")
 }
@@ -1202,8 +1212,9 @@ func testNewClientToOldServer(t *testing.T, oldServerBin string) {
 	views := waitClientMappings(t, ec.cl, 2, 10*time.Second)
 
 	require.NoError(t, tcpEcho(publicAddr(mappingByID(t, views, "tcp").AssignedPort), "new-client-old-server-tcp"))
+	newClientOldServerUDP := mappingByID(t, views, "udp").AssignedPort
 	require.Eventually(t, func() bool {
-		return udpEcho(publicAddr(mappingByID(t, views, "udp").AssignedPort), "new-client-old-server-udp") == nil
+		return udpEcho(publicAddr(newClientOldServerUDP), "new-client-old-server-udp") == nil
 	}, 5*time.Second, 20*time.Millisecond)
 	require.False(t, proc.exited(), "the v1.5.4 server must stay running")
 }

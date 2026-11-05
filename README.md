@@ -46,7 +46,8 @@ do not need a database, Node.js, a CDN, or any runtime dependency.
   automatic Linux server-side nftables/iptables redirect when `listen` is a
   range; a manual redirect remains supported for single-port listeners.
 - Server and client web consoles with login, CSRF protection, live status,
-  mapping management, and logs.
+  and mapping management. The client console includes a recent-log view;
+  server logs go to the configured log output (systemd journal or log file).
 - Hot configuration editing from both consoles: web administrator, HY2
   credentials, server port policy, server trust-proxy, client name, and
   transport mode are validated, written atomically, and applied without

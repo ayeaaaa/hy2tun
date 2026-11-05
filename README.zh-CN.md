@@ -38,8 +38,9 @@ Node.js、CDN 或任何运行时依赖。
   凭据、传输模式、重连循环、端口跳跃和可选的本地 SOCKS5/HTTP 代理。
 - 客户端可选 HY2 UDP 端口跳跃，支持端口集合；当服务端 `listen` 配置为范围时，
   Linux 服务端会自动配置 nftables/iptables 重定向；单端口监听仍支持手动重定向。
-- 服务端和客户端都有 Web 控制台，支持登录、CSRF 防护、实时状态、映射管理
-  和日志。
+- 服务端和客户端都有 Web 控制台，支持登录、CSRF 防护、实时状态和映射管理。
+  客户端控制台内置最近日志视图；服务端日志写入配置的日志输出（systemd
+  journal 或日志文件）。
 - 两个控制台都支持热配置编辑：Web 管理员、HY2 凭据、服务端端口策略、
   服务端 trust-proxy、客户端名称和传输模式会经过校验、原子写入，并在不重启
   进程的情况下生效。
@@ -49,6 +50,9 @@ Node.js、CDN 或任何运行时依赖。
   掩码显示，响应带 `no-store`。
 - 客户端可选本地 SOCKS5 和 HTTP CONNECT 代理，复用同一条 HY2 连接。
 - 同一套源码可构建 Linux、OpenWrt 和 Windows 客户端。
+
+> 面向论坛/发布的功能简介见
+> [docs/feature-overview.zh-CN.md](docs/feature-overview.zh-CN.md)。
 
 ## 适用场景
 
