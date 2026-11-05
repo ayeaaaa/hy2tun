@@ -508,7 +508,7 @@ func (s *Server) Settings() serverui.SettingsView {
 			Rotatable:                  cfg.Auth.Type == "password",
 		},
 		ReadOnly: []serverui.ReadOnlySetting{
-			{Label: "HY2 监听", Value: s.listenAddr.String()},
+			{Label: "监听地址", Value: s.listenAddr.String()},
 			{Label: "绑定地址", Value: valueOr(cfg.ListenHost, "全部地址")},
 			{Label: "HY2 TLS", Value: boolLabel(cfg.TLS.Cert != "", "已启用", "未启用")},
 			{Label: "Obfs", Value: valueOr(cfg.Obfs.Type, "未启用")},

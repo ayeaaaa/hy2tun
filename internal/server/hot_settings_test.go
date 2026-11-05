@@ -185,8 +185,26 @@ func TestSettingsIncludesOfflineClientsAndMasksSecrets(t *testing.T) {
 	for _, field := range settings.ReadOnly {
 		readOnly = append(readOnly, field.Label)
 	}
-	require.Contains(t, readOnly, "HY2 监听")
+	require.Contains(t, readOnly, "监听地址")
 	require.Contains(t, readOnly, "配置文件")
+}
+
+// The primary listen address is the TCP listener in pure TCP mode. The
+// settings label must describe the address, not assume it is HY2.
+func TestSettingsListenLabelIsTransportNeutral(t *testing.T) {
+	srv, stop := startServer(t, listenerTestConfig(t, config.ModeTCP))
+	defer stop()
+
+	var found bool
+	for _, field := range srv.Settings().ReadOnly {
+		require.NotEqual(t, "HY2 监听", field.Label,
+			"pure TCP mode must not label the TCP listener as HY2")
+		if field.Label == "监听地址" {
+			found = true
+			require.Equal(t, srv.ListenAddr().String(), field.Value)
+		}
+	}
+	require.True(t, found, "settings must expose the primary listen address")
 }
 
 func TestUpdateWebConfigWriteFailureKeepsRuntime(t *testing.T) {

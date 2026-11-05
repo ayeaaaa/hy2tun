@@ -42,7 +42,7 @@
       <span class="muted small">实时</span>
     </div>
     <dl class="kv">
-      <div><dt>HY2 监听</dt><dd class="mono">{{.Overview.Listen}}</dd></div>
+      <div><dt>监听地址</dt><dd class="mono">{{.Overview.Listen}}</dd></div>
       <div><dt>Web 监听</dt><dd class="mono">{{if .Summary.WebListen}}{{.Summary.WebListen}}{{else}}未启用{{end}}</dd></div>
       <div><dt>运行时长</dt><dd data-stat="uptime">{{duration .Overview.Uptime}}</dd></div>
       <div><dt>版本</dt><dd class="mono">{{.Version}}</dd></div>

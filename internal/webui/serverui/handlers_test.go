@@ -1255,7 +1255,7 @@ func TestServerSettingsAPIReturnsMaskedValues(t *testing.T) {
 				{ClientID: "c1", Name: "home", Online: true, Generation: 2, Status: "synced"},
 				{ClientID: "c2", Name: "office", Online: false, Generation: 1, Status: "pending"},
 			},
-			ReadOnly: []ReadOnlySetting{{Label: "HY2 监听", Value: "0.0.0.0:443"}},
+			ReadOnly: []ReadOnlySetting{{Label: "监听地址", Value: "0.0.0.0:443"}},
 		},
 	}
 	_, ts := newTestWeb(t, api)
