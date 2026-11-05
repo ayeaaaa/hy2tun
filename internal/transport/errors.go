@@ -102,22 +102,23 @@ func FallbackAllowed(err error) bool {
 	return false
 }
 
-// networkPermissionDenied recognizes a local network I/O denial. It must not
-// treat an unrelated filesystem EACCES/EPERM as a fallback-eligible failure.
+// networkPermissionDenied recognizes a local UDP I/O denial. It must not
+// treat an unrelated filesystem EACCES/EPERM, a TCP denial, or a permission
+// error joined with an unrelated network error as a fallback-eligible failure.
 func networkPermissionDenied(err error) bool {
-	if !errors.Is(err, syscall.EPERM) && !errors.Is(err, syscall.EACCES) {
-		return false
-	}
 	var opErr *net.OpError
 	if !errors.As(err, &opErr) || opErr == nil {
 		return false
 	}
+	if opErr.Net != "udp" && opErr.Net != "udp4" && opErr.Net != "udp6" {
+		return false
+	}
 	switch opErr.Op {
 	case "read", "write", "readfrom", "writeto", "send", "recv", "sendmsg", "recvmsg":
-		return true
 	default:
 		return false
 	}
+	return errors.Is(opErr.Err, syscall.EPERM) || errors.Is(opErr.Err, syscall.EACCES)
 }
 
 // Inspect every wrapped/joined branch, not just errors.As's first match: an

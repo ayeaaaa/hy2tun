@@ -57,6 +57,15 @@ func TestFallbackAllowed(t *testing.T) {
 		{"local read permission denial", &net.OpError{Op: "read", Net: "udp", Err: os.NewSyscallError("recvmsg", syscall.EACCES)}, true},
 		{"file permission denial", &os.PathError{Op: "open", Path: "cert.pem", Err: syscall.EACCES}, false},
 		{"bare permission denial", syscall.EPERM, false},
+		{"tcp permission denial", &net.OpError{Op: "write", Net: "tcp", Err: os.NewSyscallError("sendmsg", syscall.EPERM)}, false},
+		{"joined file permission and generic network error", errors.Join(
+			&os.PathError{Op: "open", Path: "cert.pem", Err: syscall.EACCES},
+			&net.OpError{Op: "write", Net: "udp", Err: errors.New("other")},
+		), false},
+		{"joined network permission and file permission", errors.Join(
+			&net.OpError{Op: "write", Net: "udp", Err: syscall.EPERM},
+			&os.PathError{Op: "open", Path: "cert.pem", Err: syscall.EACCES},
+		), true},
 		{"network unreachable", &net.OpError{Op: "dial", Err: syscall.ENETUNREACH}, true},
 		{"host unreachable", syscall.EHOSTUNREACH, true},
 		{"connection reset", syscall.ECONNRESET, true},
