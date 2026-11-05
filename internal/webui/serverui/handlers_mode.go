@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"hy2tun/internal/config"
+	"hy2tun/internal/view"
 )
 
 // ModeAPI is the optional transport-mode mutation supported by a server. APIs
@@ -41,5 +42,16 @@ func (s *Server) handleUpdateMode(w http.ResponseWriter, r *http.Request) {
 		writeJSONErrorCode(w, http.StatusInternalServerError, "internal", "更新传输模式失败")
 		return
 	}
-	writeJSON(w, http.StatusOK, s.settingsFor())
+	// Read the mode back from the post-update server state rather than echoing
+	// the request. A single-listener mode serves exactly that wire kind; dual
+	// mode has no single active transport, so ActiveTransport stays empty.
+	mode := s.api.Settings().Mode.Effective()
+	state := view.TransportState{Mode: mode}
+	switch mode {
+	case config.ModeHY2:
+		state.ActiveTransport = "hy2"
+	case config.ModeTCP:
+		state.ActiveTransport = "tcp"
+	}
+	writeJSON(w, http.StatusOK, state)
 }

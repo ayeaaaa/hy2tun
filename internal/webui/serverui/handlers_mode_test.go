@@ -3,6 +3,7 @@ package serverui
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -55,10 +56,56 @@ func TestModeAPICSRFAndPassword(t *testing.T) {
 
 	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/mode", body, cookie, csrfHeaders(ts.URL))
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	settings := readJSON[SettingsView](t, resp)
-	require.Equal(t, config.ModeTCP, settings.Mode)
+	state := assertServerTransportState(t, readBody(t, resp))
+	require.Equal(t, config.ModeTCP, state.Mode)
+	require.Equal(t, "tcp", state.ActiveTransport)
 	require.Equal(t, 1, api.modeCalls)
 	require.Equal(t, []config.TransportMode{config.ModeTCP}, api.modeValues)
+}
+
+func TestModeAPISuccessReturnsTransportState(t *testing.T) {
+	cases := []struct {
+		mode   config.TransportMode
+		active string
+	}{
+		{config.ModeHY2, "hy2"},
+		{config.ModeTCP, "tcp"},
+		{config.ModeAuto, ""},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			api := &fakeServerAPI{settings: SettingsView{
+				Mode:        config.ModeHY2,
+				WebUsername: "admin",
+				Credentials: CredentialSettingsView{
+					Generation:                2,
+					CurrentAuthMasked:         "plain-auth-value",
+					CurrentControlTokenMasked: "plain-token-value",
+				},
+				Clients: []ClientCredentialView{{ClientID: "c1", Name: "home"}},
+			}}
+			_, ts := newTestWeb(t, api)
+			cookie := login(t, ts)
+
+			resp := doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/mode",
+				serverModeBody(string(tc.mode), "pw"), cookie, csrfHeaders(ts.URL))
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			body := readBody(t, resp)
+			state := assertServerTransportState(t, body)
+			require.Equal(t, tc.mode, state.Mode)
+			require.Equal(t, tc.active, state.ActiveTransport)
+			require.Zero(t, state.SwitchCount)
+
+			require.NotContains(t, body, "plain-auth-value")
+			require.NotContains(t, body, "plain-token-value")
+			for _, field := range []string{
+				`"credentials"`, `"web_username"`, `"clients"`, `"ports"`,
+				`"read_only"`, `"auth_type"`, `"trust_proxy"`,
+			} {
+				require.NotContains(t, body, field, "success body must not include settings field %s", field)
+			}
+		})
+	}
 }
 
 func TestModeAPIInvalidAndSaveFailure(t *testing.T) {
@@ -195,6 +242,23 @@ func TestModeAPIPageUnsupported(t *testing.T) {
 		serverModeBody("tcp", "pw"), cookie, csrfHeaders(ts.URL))
 	require.Equal(t, http.StatusNotImplemented, resp.StatusCode)
 	require.Contains(t, readBody(t, resp), "not_implemented")
+}
+
+func assertServerTransportState(t *testing.T, body string) view.TransportState {
+	t.Helper()
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(body), &fields))
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	require.ElementsMatch(t, []string{
+		"mode", "active_transport", "switch_reason", "last_switch_at",
+		"last_probe_at", "last_probe_error", "switch_count",
+	}, keys)
+	var state view.TransportState
+	require.NoError(t, json.Unmarshal([]byte(body), &state))
+	return state
 }
 
 func selectFragment(t *testing.T, body, id string) string {

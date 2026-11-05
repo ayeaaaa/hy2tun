@@ -282,7 +282,7 @@ func TestMultiMetricsShowsEachServerTransport(t *testing.T) {
 }
 
 func TestMultiMetricsEscapesTransportLabels(t *testing.T) {
-	name := "edge\"one\nline"
+	name := "edge\\one\"two\nline"
 	api := &fakeClientAPI{
 		status: view.ClientStatus{
 			Transport: view.TransportState{Mode: config.ModeTCP, ActiveTransport: "tcp", SwitchCount: 1},
@@ -298,7 +298,8 @@ func TestMultiMetricsEscapesTransportLabels(t *testing.T) {
 	resp := doClientRequest(t, ts.Client(), http.MethodGet, ts.URL+"/metrics", "", nil, nil)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	body := readClientBody(t, resp)
-	require.Contains(t, body, `server="edge\"one\nline"`)
+	require.Contains(t, body, `server="edge\\one\"two\nline"`)
+	require.Contains(t, body, `hy2tun_client_transport_switches_total{server="edge\\one\"two\nline"} 1`)
 }
 
 func TestModeAPIPageOptionsAndWarning(t *testing.T) {
@@ -328,7 +329,10 @@ func TestModeAPIPageOptionsAndWarning(t *testing.T) {
 	}
 	require.Contains(t, body, "切换会断开现有连接")
 	require.Contains(t, body, "可能丢失 UDP 数据包")
-	require.Contains(t, body, "TCP（UDP over TCP）")
+	// The mode <option> also contains "TCP（UDP over TCP）", so assert the
+	// actual transport element rather than the option label.
+	require.Contains(t, body, `data-transport-active="tcp"`)
+	require.Contains(t, body, `data-transport-active="tcp">TCP（UDP over TCP）</dd>`)
 
 	resp = doClientRequest(t, ts.Client(), http.MethodGet, ts.URL+"/servers", "", cookie, map[string]string{"Accept": "text/html"})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
