@@ -8,9 +8,10 @@
 `hy2tun` is a reverse port-forwarding tunnel built on the official
 [Hysteria 2](https://github.com/apernet/hysteria) core. A client inside a
 private network connects out to a public server and exposes selected TCP and
-UDP services on server-side public ports. The same server remains a normal
-HY2 proxy server, so existing Hysteria 2 clients keep working without any
-changes.
+UDP services on server-side public ports. In the default `hy2` mode (and in
+`hy2+tcp`), the same server remains a normal HY2 proxy server, so existing
+Hysteria 2 clients keep working without any changes. The optional `tcp` mode
+is a TLS 1.3-only fallback for networks that block UDP.
 
 - `hy2tund` — the public server: HY2 proxy endpoint, reverse-mapping public
   listeners, control endpoint, and management console.
@@ -25,26 +26,31 @@ do not need a database, Node.js, a CDN, or any runtime dependency.
 
 - Standard HY2 proxy server for TCP and UDP, compatible with the official
   Hysteria 2 client.
+- Optional TLS 1.3 TCP transport and automatic HY2-to-TCP fallback for networks
+  that block or throttle UDP; see
+  [Transport modes and TCP fallback](#transport-modes-and-tcp-fallback).
 - FRP-style reverse TCP mappings: a server public port forwards to a TCP
   service reachable from the client.
-- Reverse UDP mappings using native HY2 datagrams, not a reliable stream, so
-  real-time UDP is not head-of-line blocked.
+- Reverse UDP mappings using native HY2 datagrams when HY2 is active, not a
+  reliable stream, so real-time UDP is not head-of-line blocked. The TCP
+  fallback instead frames UDP over TCP and accepts its latency cost.
 - Client configuration is authoritative. The server console can push mapping
   changes to an online client; the client applies them, writes its YAML file
   atomically, and acknowledges the new revision.
 - Port whitelist with single ports, ranges, deny rules, automatic allocation,
   and offline port reservations.
 - One client process can connect to multiple independent servers. Each server
-  has its own identity, mappings, credentials, reconnect loop, port hopping,
-  and optional local SOCKS5/HTTP proxy.
+  has its own identity, mappings, credentials, transport mode, reconnect loop,
+  port hopping, and optional local SOCKS5/HTTP proxy.
 - Optional client-side Hysteria 2 UDP port hopping across a port set, with
   automatic Linux server-side nftables/iptables redirect when `listen` is a
   range; a manual redirect remains supported for single-port listeners.
 - Server and client web consoles with login, CSRF protection, live status,
   mapping management, and logs.
 - Hot configuration editing from both consoles: web administrator, HY2
-  credentials, server port policy, server trust-proxy, and client name are
-  validated, written atomically, and applied without restarting the process.
+  credentials, server port policy, server trust-proxy, client name, and
+  transport mode are validated, written atomically, and applied without
+  restarting the process.
 - Generation-based credential rotation with a retained previous pair,
   automatic push to capable online clients or manual sync from the client
   console, and explicit revoke.
@@ -73,6 +79,9 @@ Typical scenarios:
   mappings and optional proxies for each server.
 - Use client-side UDP port hopping when a provider rate-limits or blocks a
   single UDP port.
+- Use `hy2+tcp` when UDP is sometimes blocked or throttled: keep HY2 when it
+  works, fall back to TLS/TCP, and recover automatically after the path
+  improves.
 - Run on Linux, OpenWrt, or Windows with one static binary and an embedded web
   console.
 
@@ -123,6 +132,128 @@ UDP blocking/QoS, MTU limits, CPU cost, and QUIC retransmission still apply. On
 a clean, low-latency path a plain TCP tunnel may have less overhead; the
 advantage is largest when leg 2 has meaningful loss or high RTT.
 
+## Transport modes and TCP fallback
+
+`mode` selects which transports a server or client may use. It accepts three
+values; an omitted or empty value means `hy2`, so existing configurations keep
+their old behavior without requiring a file change.
+
+| Mode | Client behavior | Server listeners |
+| --- | --- | --- |
+| `hy2` (default) | HY2/QUIC over UDP only. | UDP HY2 only. |
+| `tcp` | TLS 1.3 over TCP only. Reverse TCP and UDP mappings use the TCP session. | TCP only. Standard HY2 clients cannot connect. |
+| `hy2+tcp` | Prefer HY2. After a recognized network failure, use TCP and probe HY2 in the background for recovery. | UDP HY2 and TCP on the same numeric port. |
+
+The modes are mutually exclusive per process: `tcp` does not start or use a UDP
+HY2 listener, and `hy2` does not start or use a TCP listener. `hy2+tcp` is the
+only mode that enables fallback and recovery. For fallback to work, the client
+and server must both have a TCP endpoint; for recovery, both must also keep HY2
+available. A client in `hy2+tcp` against a server in `tcp` mode can connect over
+TCP but cannot probe or fail back to HY2. A client in `tcp` against a server in
+`hy2+tcp` works over TCP.
+
+### Same port, separate sockets
+
+In `hy2+tcp`, the server binds UDP and TCP on the same numeric port, but they
+are **not the same socket**: the HY2 listener is a UDP socket and the TCP
+transport is a separate TCP listener. For example, with `listen: ":443"` the
+server has both UDP/443 and TCP/443. `ss -lntu` shows separate entries, and the
+firewall must allow both protocols. Opening only UDP/443 leaves the fallback
+unreachable; opening only TCP/443 makes HY2 and recovery unreachable.
+
+The TCP endpoint is derived from the **first port item** in the configured
+listen or server port set, preserving input order rather than sorting. With
+`listen: ":30002-30005,30000"` the UDP HY2 range starts at 30002 and TCP binds
+30002, not 30000. Likewise, a client `server` of
+`hy2tun.example.com:443,30000-30100,8443` uses 443 for TCP and may use the full
+set for HY2 UDP hopping.
+
+A pure `tcp` configuration requires a single numeric port. Comma-separated
+lists, ranges, and `transport.udp` hop intervals are rejected, including
+single-port spellings such as `443,443` or `443-443`. A pure `hy2`
+configuration may still use ranges and port hopping, but has no TCP fallback.
+
+### TLS and credentials
+
+The TCP transport reuses the server's existing `tls.cert` and `tls.key` and the
+client's existing `tls.ca`, `tls.sni`, `tls.insecure`, and `tls.pin_sha256`
+settings. It requires TLS 1.3 or newer on both ends. A certificate pin is still
+checked when `tls.insecure` is enabled, and a configured CA and pin must both
+match. There is no separate TCP certificate or weaker fallback TLS policy.
+HY2 authentication and the control token are reused for the TCP greeting; no
+second credential pair is required.
+
+### Fallback and recovery timing
+
+In `hy2+tcp`, each HY2 attempt has a 10-second connect/handshake budget. An
+established control session sends a heartbeat every 10 seconds and is treated
+as dead after 30 seconds without a valid response. Only recognized network
+failures trigger fallback: dial timeouts, connection refused/unreachable/reset,
+QUIC or transport loss, and heartbeat timeout. Authentication, TLS certificate,
+certificate-pin, protocol, configuration, queue-full, and cancellation errors
+are surfaced and never cause a silent downgrade to TCP.
+
+While TCP is active, the client probes HY2 every 30 seconds with ±20% jitter
+(roughly 24–36 seconds). Recovery requires three consecutive successful probes
+**and** at least 60 seconds on TCP. It then opens a separate HY2 candidate and
+performs a normal control handshake; only a successful candidate replaces the
+TCP session. A failed probe or candidate resets the success count. Probing is
+disabled outside `hy2+tcp`.
+
+### Switching boundary
+
+A switch that changes the active transport tears down the current session.
+Existing public TCP connections, local SOCKS5/HTTP proxy connections, and UDP
+mapping state are closed; queued UDP datagrams may be lost and are not
+replayed. There is no seamless migration, exactly-once delivery, or replay
+buffer. Public TCP users can see a reset, and UDP traffic can drop during the
+switch. A mode change that still allows the active transport (for example,
+`tcp` to `hy2+tcp` while TCP is active) retains that session; changing to a
+mode that disallows it closes the session and reconnects.
+
+On the server, retiring a transport closes that listener and detaches its
+client sessions. Other transports and the Web console stay up.
+
+### UDP over TCP cost
+
+In `tcp` and while `hy2+tcp` is using TCP, reverse UDP mappings are carried as
+length-framed datagrams over a reliable, ordered TCP stream. Lost TCP segments
+are retransmitted, so latency rises and one stalled stream can head-of-line
+block traffic sharing the same TCP connection. The TCP framing limit is a
+4096-byte payload; the native HY2 path has a separate 4096-byte message budget
+that includes the address header. Each mapping has a bounded 32-packet send
+queue; excess datagrams are dropped rather than buffered without limit. This
+mode is for networks where UDP is blocked, not for low-latency
+gaming, voice, or other traffic that depends on native datagram semantics.
+Native HY2 datagrams remain the preferred transport when UDP works.
+
+The TCP transport is a hy2tun-specific protocol. It is not wire-compatible
+with FRP, and hy2tun does not provide P2P, Hysteria Realms, or UDP hole
+punching.
+
+### Controls and diagnostics
+
+- **Server Web console → Settings → 传输模式** changes the server mode. It
+  requires the current Web administrator password, binds or retires listeners,
+  and persists the mode before serving it.
+- **Client Web console → Settings → 传输模式** changes the selected server's
+  mode. In a multi-server configuration each server has its own independent
+  mode; the shared Web console and other servers are untouched.
+- **LuCI → Services → hy2tun** has the same mode field for a single-server
+  configuration. Saving requires the service to be stopped; stop, save, then
+  start. A multi-server configuration stays read-only in LuCI.
+- **CLI:** `hy2tun config get` includes `mode`; `hy2tun config set` accepts an
+  optional `mode` field. Omitting it preserves the current mode.
+- **Actual transport diagnostics:** the client console shows the configured
+  mode, actual transport (`hy2` or `tcp`), switch reason, last switch, last
+  probe, probe error, and switch count. The server client-detail page shows the
+  last actual transport reported by that client. In server `hy2+tcp` mode
+  there is no single active transport; each client reports its own.
+- **Prometheus:** the client `/metrics` endpoint exports
+  `hy2tun_client_transport_active{server,transport}` and
+  `hy2tun_client_transport_switches_total{server}`. The server does not label
+  its mode as one active transport.
+
 ## What it does not do (v1)
 
 - No multi-user accounts, approval workflow, tenant isolation, quotas, or
@@ -130,6 +261,12 @@ advantage is largest when leg 2 has meaningful loss or high RTT.
   per server; password auth also retains the previous pair during rotation.
 - No P2P, Hysteria Realms, or UDP hole punching. The client always connects to
   the server.
+- No FRP wire-protocol compatibility. “FRP-style” only describes the reverse
+  mapping model; hy2tun cannot register with an FRP server or accept FRP
+  clients.
+- No seamless transport switching, exactly-once delivery, or packet replay.
+  Changing the active transport drops existing connections and may lose UDP
+  packets; see [Switching boundary](#switching-boundary).
 - No TUN mode, transparent proxy, domain-based routing, ACLs, load balancing,
   or CDN fronting.
 - The server console edits only the settings listed in
@@ -138,8 +275,9 @@ advantage is largest when leg 2 has meaningful loss or high RTT.
   the authentication mode/user table still require a file edit and restart.
 - The client console does not edit the server address, port-hopping transport,
   TLS, obfs, bandwidth, client ID, proxy authentication, or web listener/TLS;
-  those stay in `client.yaml`. It can rename the client, rotate the HY2 pair,
-  and enable/disable or change each server's proxy listener addresses.
+  those stay in `client.yaml`. It can change each server's transport mode,
+  rename the client, rotate the HY2 pair, and enable/disable or change each
+  server's proxy listener addresses.
 - Offline clients' mapping configuration is read-only in the server console;
   their detail page can delete the client and its persisted mappings and
   reservations. Their credentials can still be updated locally on the client
@@ -159,15 +297,21 @@ advantage is largest when leg 2 has meaningful loss or high RTT.
 ```text
 standard HY2 client ────── QUIC / HY2 ──────┐
                                             │
-hy2tun client ──────────── QUIC / HY2 ──────┤
-  │ control stream (register / sync / open)  │
-  │ TCP data streams                        ├── hy2tund (public Linux server)
-  │ native datagrams (UDP)                  │     ├── HY2 proxy egress (TCP/UDP)
+hy2tun client ──────── QUIC / HY2 (UDP) ────┤
+  │                  or TLS 1.3 / TCP ──────┤
+  │ control stream (register / sync / open) │
+  │ TCP data streams / framed UDP           ├── hy2tund (public Linux server)
+  │ native datagrams (UDP, HY2 mode)        │     ├── HY2 proxy egress (TCP/UDP)
   │                                         │     ├── public TCP listener per mapping
   ├── local web console (LAN)               │     ├── public UDP socket per mapping
   ├── local SOCKS5 / HTTP proxy (optional)  │     └── management web + API
   └── private-network TCP/UDP services      │
 ```
+
+The client selects HY2 or TCP from its effective mode. In `hy2+tcp`, a
+network-triggered fallback reconnects the same logical client over TLS 1.3/TCP
+and later probes HY2 for recovery. The server may own both listeners at once;
+they are separate UDP and TCP sockets.
 
 ### Reverse TCP path
 
@@ -182,6 +326,10 @@ hy2tun client ──────────── QUIC / HY2 ──────
    directions.
 6. Closing either side closes the other.
 
+In `tcp` mode the same control/data-stream protocol runs over TLS/TCP; the
+server accepts `StreamReverseTCP` directly on the authenticated TCP session
+instead of going through HY2's `Outbound.TCP`.
+
 ### Reverse UDP path
 
 1. The client opens one HY2 UDP session per mapping and sends a probe to
@@ -194,17 +342,22 @@ hy2tun client ──────────── QUIC / HY2 ──────
 5. A 20-second keepalive keeps the HY2 UDP session alive; idle peers are
    reaped after 60 seconds.
 
+In `tcp` mode, each UDP mapping opens a `StreamUDP` stream and carries
+length-framed datagrams over it instead of native HY2 datagrams.
+
 The virtual `_hy2tun_*` addresses are only used by the bundled client. A
-standard HY2 client never opens them, so the wire protocol stays compatible.
+standard HY2 client never opens them, so the HY2 wire protocol stays
+compatible.
 
 ## Requirements
 
 - Go 1.26.10 or newer to build (standard-library security fixes). The `go.mod` file pins the HY2 core at v2.13.0.
-- A public server with a TLS certificate (self-signed is supported when the
-  client is configured with the matching CA, optionally combined with a
-  certificate pin).
-- UDP reachability to the server's HY2 port. TCP reachability to every public
-  mapping port you use.
+- A public server with a TLS certificate usable for TLS 1.3 (self-signed is
+  supported when the client is configured with the matching CA, optionally
+  combined with a certificate pin).
+- UDP reachability to the server's HY2 port. For `mode: tcp` or
+  `mode: hy2+tcp`, TCP reachability to the same numeric port as well. TCP
+  reachability to every public mapping port you use.
 - Linux with systemd, OpenWrt with procd, or Windows with Task Scheduler for
   the provided deployment examples.
 
@@ -275,9 +428,9 @@ docker run --network host --restart unless-stopped \
   hy2tun-server
 ```
 
-Use host networking so the HY2 UDP port and public mapping ports work. For the
-client, use the same writable `config` directory with `client.yaml`; do not
-mount only the YAML file read-only.
+Use host networking so the HY2 UDP port, the optional TCP fallback port, and
+public mapping ports work. For the client, use the same writable `config`
+directory with `client.yaml`; do not mount only the YAML file read-only.
 
 See [`docker-compose.yml`](docker-compose.yml) for a two-service example. The
 image runs as `nonroot`; use ports above 1024 or grant
@@ -305,9 +458,9 @@ hy2tund --check-config -c /etc/hy2tun/server.yaml
 hy2tun --check-config -c /etc/hy2tun/client.yaml
 ```
 
-The check validates YAML, required fields, TLS certificate/key pairs, web TLS,
-bcrypt hashes, and log/state parent directories. It prints `configuration OK`
-on success.
+The check validates YAML, required fields, transport-mode constraints, TLS
+certificate/key pairs, web TLS, bcrypt hashes, and log/state parent
+directories. It prints `configuration OK` on success.
 
 ## Health and metrics
 
@@ -315,7 +468,9 @@ When the web console is enabled, both binaries expose:
 
 - `GET /healthz` — returns `200` and `ok` when the process is serving.
 - `GET /metrics` — Prometheus text metrics for aggregate traffic, mappings,
-  connection state, credential generation, and uptime.
+  connection state, credential generation, uptime, and client transport
+  diagnostics (`hy2tun_client_transport_active` and
+  `hy2tun_client_transport_switches_total`).
 
 `/healthz` is intentionally unauthenticated for local probes. `/metrics` is
 also unauthenticated when `web.metrics_token` is empty; set that field and send
@@ -355,6 +510,7 @@ Copy `examples/server.yaml` to `/etc/hy2tun/server.yaml` and edit it:
 
 ```yaml
 listen: ":443"
+# mode: "hy2"          # omit for HY2; "tcp" or "hy2+tcp" needs TCP/443 open
 
 auth:
   type: password
@@ -399,6 +555,7 @@ Copy `examples/client.yaml` to `/etc/hy2tun/client.yaml` and edit it:
 
 ```yaml
 server: "hy2tun.example.com:443"
+# mode: "hy2"          # omit for HY2; "tcp" or "hy2+tcp" uses TCP/443
 auth: "a-long-random-password"
 
 tls:
@@ -487,7 +644,7 @@ Download the two package files from the same Release:
 - `hy2tun_<version>_<arch>.ipk` — choose `mips`, `mipsle`, `arm`, `arm64`, or
   `amd64` to match `uname -m` on the router
 - `luci-app-hy2tun_<version>_all.ipk` — LuCI configuration page, service
-  controls, logs, and Web-console link; it depends on `hy2tun (>= 1.5.0)`
+  controls, logs, and Web-console link; it depends on `hy2tun (>= 1.6.0)`
 
 Install them on the router:
 
@@ -510,7 +667,8 @@ Configure the client for the first time in LuCI:
    not created. The form is prefilled with the defaults: client name
    `openwrt`, Web console listen `0.0.0.0:7501`, and username `admin`. The
    server address and secret fields start empty.
-2. Fill in the basic single-server form: server address as `host:port`, HY2
+2. Fill in the basic single-server form: server address as `host:port`,
+   transport mode (`hy2`, `tcp`, or `hy2+tcp`; the default is `hy2`), HY2
    authentication password (at least 8 bytes), control token (at least 16
    bytes), optional TLS SNI and “skip certificate verification”, port
    mappings, and the Web console listen address, username, and password.
@@ -531,7 +689,14 @@ password values; leave a secret field blank to keep the current value.
 
 Saving normalizes the documented defaults: `credentials.generation: 0` becomes
 `1`, an empty `web.username` becomes `admin` when `web.listen` is enabled, and
-an empty `log.level` becomes `info`.
+an empty `log.level` becomes `info`. A legacy file without `mode` is shown as
+`hy2`; saving the form writes the selected mode explicitly.
+
+Changing the mode through LuCI uses stop → save → start. The LuCI page does not
+show the actual wire transport; open the client Web console for `active
+transport`, switch reason, probe status, and switch count. If `tcp` or
+`hy2+tcp` is selected, allow TCP to the server's numeric port in addition to
+UDP; see [Same port, separate sockets](#same-port-separate-sockets).
 
 While the service is running, the form is read-only; stop it before editing.
 Every save sends the SHA-256 revision of the configuration file it loaded. If
@@ -544,11 +709,12 @@ may be lost.
 
 The basic form manages one server. The client Web console can edit the HY2
 authentication and control token (including rotated credentials), mappings,
-proxy listeners, and Web account/password. SSH is required for the TLS CA or
-certificate pin, obfs, bandwidth, transport (port hopping), Web TLS
-certificates, and `log.file`; adding or changing the `servers:` list also
-requires the file. Stop the service before editing `/etc/hy2tun/client.yaml`
-over SSH. A multi-server configuration hides the form and is read-only in LuCI.
+proxy listeners, Web account/password, and each server's transport mode. SSH is
+required for the TLS CA or certificate pin, obfs, bandwidth, transport (port
+hopping), Web TLS certificates, and `log.file`; adding or changing the
+`servers:` list also requires the file. Stop the service before editing
+`/etc/hy2tun/client.yaml` over SSH. A multi-server configuration hides the form
+and is read-only in LuCI.
 A configuration with unknown top-level fields disables saving. The server
 address is locked when a custom CA or certificate pin, obfs, bandwidth,
 transport, or rotated credentials are present; changing to a different server
@@ -581,6 +747,7 @@ log:
 
 servers:
   - name: "us"
+    # mode: "hy2+tcp"      # per-server; omit for HY2
     server: "us.example.com:24443"
     auth: "us-password"
     tls:
@@ -622,6 +789,9 @@ Rules:
 - `servers` entries are completely independent; mappings are not inherited or
   shared. Configure the same local service separately on each server when you
   want it exposed through both.
+- `servers[].mode` is independent per entry. Omitting it means `hy2`; a legacy
+  top-level `mode` applies only to the `default` server. Changing one server's
+  mode does not reconnect or reconfigure the others.
 - `servers[].name` must be unique. `servers[].client.id` is generated and
   persisted separately for each entry.
 - Top-level `web` and `log` are shared by the process. When `servers` is used,
@@ -649,7 +819,8 @@ Rules:
 
 | Field | Meaning |
 | --- | --- |
-| `listen` | HY2 UDP listen address, for example `:443`, or a range such as `:30000-40000`. For a range, the first port is bound and the remaining ports are redirected automatically on Linux; see [Port hopping](#port-hopping). |
+| `mode` | `hy2` (default when omitted), `tcp`, or `hy2+tcp`. `tcp` requires a single `listen` port; `hy2+tcp` binds UDP HY2 and TCP on the same first numeric port as separate sockets. See [Transport modes and TCP fallback](#transport-modes-and-tcp-fallback). |
+| `listen` | HY2 UDP listen address, for example `:443`, or a range such as `:30000-40000`. For a range, the first port is bound and the remaining ports are redirected automatically on Linux; see [Port hopping](#port-hopping). In `hy2+tcp`, TCP uses the first port item. |
 | `listen_host` | Optional address for public mapping listeners; empty binds all interfaces. |
 | `auth.type` | `password` or `userpass`. |
 | `auth.password` | HY2 password for `password` auth. |
@@ -683,8 +854,9 @@ Rules:
 
 | Field | Meaning |
 | --- | --- |
+| `mode` | `hy2` (default when omitted), `tcp`, or `hy2+tcp`. `tcp` requires a single numeric `server` port with no hopping; `hy2+tcp` uses the first port item for TCP and the full set for HY2 hopping. See [Transport modes and TCP fallback](#transport-modes-and-tcp-fallback). |
 | `server` | Legacy single-server `host:port`, or a port set such as `host:443,8443` or `host:30000-40000` for port hopping. Use `servers` for multiple independent servers. |
-| `servers` | Optional list of independent server entries; see [Multiple servers](#multiple-servers). Cannot be combined with legacy per-server fields. |
+| `servers` | Optional list of independent server entries; see [Multiple servers](#multiple-servers). Cannot be combined with legacy per-server fields. Each entry has its own optional `mode`. |
 | `auth` | HY2 password, or `user:password` for userpass auth. |
 | `tls.sni` | TLS server name. Empty uses the host part of `server`. |
 | `tls.insecure` | Skip certificate verification. Do not use on untrusted networks. |
@@ -692,8 +864,8 @@ Rules:
 | `tls.ca` | CA certificate bundle for a private/self-signed server certificate. |
 | `obfs.type` | Must match the server. Empty or `salamander`. |
 | `bandwidth.up`, `bandwidth.down` | Optional client-side HY2 limits. |
-| `transport.udp.hop_interval` | Fixed port-hop interval for a multi-port `server`. Default 30s; minimum 5s. |
-| `transport.udp.min_hop_interval`, `max_hop_interval` | Random hop interval; both required, minimum 5s, mutually exclusive with `hop_interval`. |
+| `transport.udp.hop_interval` | Fixed port-hop interval for a multi-port `server`. Default 30s; minimum 5s. Rejected in pure `tcp` mode. |
+| `transport.udp.min_hop_interval`, `max_hop_interval` | Random hop interval; both required, minimum 5s, mutually exclusive with `hop_interval`. Rejected in pure `tcp` mode. |
 | `control.token` | Must match `control.token` on the server. |
 | `credentials.generation` | Client credential generation. Missing or `0` means `1`; server push or manual sync writes it. The client ignores the `previous_*` fields; they are reserved. |
 | `client.id` | Stable client ID. Empty generates one on first start. |
@@ -732,7 +904,10 @@ current secrets, they live in `server.yaml` and its `.bak`, both mode `0600`.
 
 Changing a mapping's type, public port, or local target closes active public
 connections for that mapping. Changing only the note keeps connections open.
-Deleting a mapping closes its listener/socket and any active connections.
+Deleting a mapping closes its listener/socket and any active connections. UDP
+mappings use native HY2 datagrams in `hy2` mode and framed UDP over TCP while
+the TCP transport is active; the latter adds reliability, latency, and
+head-of-line cost.
 
 ### Port whitelist syntax
 
@@ -816,6 +991,7 @@ minute per client IP. All mutations require the CSRF header and same-origin
 | Setting | Online editing |
 | --- | --- |
 | `web.username`, `web.password_hash` | Yes. The password can only be reset, never shown. Saving revokes every web session. |
+| `mode` | Yes, with the current Web administrator password. Binds or retires listeners and can disconnect clients using the retired transport. |
 | `auth.password`, `control.token` | Yes, when `auth.type: password`. Rotation only; see below. |
 | `ports.allow`, `ports.deny`, `ports.auto_range`, `ports.offline_reserve` | Yes. Mappings already running are not closed when a new allow list no longer covers them. `offline_reserve` must be at least `1s`. |
 | `web.trust_proxy` | Yes. Applies immediately to login and settings-confirmation rate limiting. |
@@ -833,6 +1009,7 @@ minute per client IP. All mutations require the CSRF header and same-origin
 | Setting | Online editing |
 | --- | --- |
 | `web.username`, `web.password_hash` | Yes. Password reset only; saving revokes every web session. |
+| `mode` | Yes, per server, with the current Web administrator password. A mode that still allows the active transport keeps its session; otherwise the client reconnects. |
 | `client.name` | Yes. Written to `client.yaml`, revision bumped, and sent to the server immediately. |
 | `auth`, `control.token` | Yes, through manual credential sync only. The new generation must be greater than the local one; the client reconnects. |
 | `mappings` | Yes. Add, update, and delete; the server can also push a list. |
@@ -1042,7 +1219,9 @@ TLS.
 
 Port hopping affects only the client-to-server HY2 UDP connection. The server's
 public reverse-mapping ports (for example `2222/tcp` and `51820/udp`) do not
-hop and keep their configured ports.
+hop and keep their configured ports. In `hy2+tcp` mode, the TCP fallback uses
+the first port item in the same port set; in pure `tcp` mode, ranges and hop
+intervals are rejected.
 
 ### Client configuration
 
@@ -1077,7 +1256,9 @@ transport:
   `max_hop_interval`. The random form requires both fields and `min <= max`.
 - A single-port `server` with any interval is rejected. A port set that
   normalizes to one unique port (`443-443`, `443,443`) is treated as a single
-  port.
+  port for HY2, but pure `tcp` rejects the range/list spelling itself.
+- In `hy2+tcp`, the TCP endpoint is the first port item, preserving input
+  order; the remaining ports are used only for HY2 UDP hopping.
 - `transport` is file-only; it is not editable from the web console. Restart
   the client after changing `server` or `transport`.
 - Salamander obfs wraps every hop socket, so obfs configuration is unchanged.
@@ -1105,6 +1286,11 @@ to iptables/ip6tables. Force a backend with
 `HY2TUN_FIREWALL_BACKEND=nft` or `HY2TUN_FIREWALL_BACKEND=iptables`. The rules
 are removed when the server closes. The server needs root or
 `CAP_NET_ADMIN`; if the redirect cannot be installed, startup fails.
+
+In `hy2+tcp`, the TCP listener binds the first item in `listen` (for example,
+`30000` above) on the same numeric port. The range redirect applies only to
+UDP; allow TCP to the first port as well. Pure `tcp` mode does not accept a
+range and does not install a redirect.
 
 Point the client at the same range:
 
@@ -1281,7 +1467,9 @@ If hopping does not work, check in this order:
   `minHopInterval`, and `maxHopInterval`, so do not copy that block verbatim.
 - A standard Hysteria 2 server with a manual redirect works with a hy2tun
   client, and a standard Hysteria 2 client works against a hy2tun server with a
-  range listener or a manual redirect.
+  range listener or a manual redirect while the server mode allows HY2
+  (`hy2` or `hy2+tcp`). A server in pure `tcp` mode does not accept standard
+  HY2 clients.
 - Windows and OpenWrt clients can hop because they only make outbound UDP
   connections; automatic server redirect management requires Linux, while a
   manual redirect can be provided by any Linux NAT host.
@@ -1294,7 +1482,10 @@ If hopping does not work, check in this order:
 
 On the server, allow:
 
-- UDP to the `listen` port (usually 443) from the internet;
+- UDP to the `listen` port (usually 443) from the internet for HY2;
+- TCP to the same numeric `listen` port when the server mode is `tcp` or
+  `hy2+tcp` (for example TCP/443). The UDP and TCP listeners are separate
+  sockets, so opening one protocol does not open the other;
 - TCP to every explicit public mapping port (for example 2222);
 - UDP to every explicit public UDP mapping port (for example 51820);
 - TCP to the web console only from your management network, VPN, or reverse
@@ -1311,9 +1502,9 @@ manual redirect as described in [Port hopping](#port-hopping). The host INPUT
 chain only needs the first `listen` port, because the redirect happens in
 PREROUTING.
 
-On the client host, allow outbound UDP to the server's HY2 port. Windows may
-show a firewall prompt for the client web console; allow it on private
-networks only.
+On the client host, allow outbound UDP to the server's HY2 port and outbound
+TCP to the same port when `tcp` or `hy2+tcp` is used. Windows may show a
+firewall prompt for the client web console; allow it on private networks only.
 
 ### Exposing the server web console safely
 
@@ -1437,11 +1628,36 @@ recommended). The token is never printed by either process.
 - A reverse proxy in front of the console must preserve `Host`; otherwise
   mutations fail with `403 forbidden`.
 
+### TCP fallback and transport modes
+
+- Check the configured mode and the actual transport separately. A client in
+  `hy2+tcp` can show mode `hy2+tcp` while `active transport` is `tcp`; this is
+  expected during fallback. The server in `hy2+tcp` has no single active
+  transport; check each client's last actual transport on its detail page.
+- `mode tcp requires a single port without ranges or port hopping` means the
+  configuration used a range or comma-separated list in pure `tcp` mode. Use a
+  single port, or switch to `hy2+tcp` if HY2 hopping is still wanted.
+- If fallback never happens, confirm the server has TCP reachable on the same
+  numeric port and is not in pure `hy2` mode. Test TCP and UDP separately:
+  `nc -vz host 443` for TCP and `nc -vzu host 443` for UDP. A UDP "success"
+  only means the packet was sent.
+- If the client reports an authentication, certificate, certificate-pin, or
+  protocol error, it will **not** fall back to TCP. Those errors indicate a
+  configuration or security mismatch; fix the credentials or TLS settings
+  rather than expecting a downgrade.
+- Fallback waits for a recognized network failure or a 30-second heartbeat
+  timeout. Recovery is deliberately slow: three successful probes plus at
+  least 60 seconds on TCP. Do not expect an immediate return to HY2.
+- While TCP is active, UDP mappings become framed UDP over TCP. Latency,
+  head-of-line blocking, and datagram drops under queue pressure are expected;
+  switch back to HY2 when UDP works.
+
 ### Firewall or connectivity
 
 - The client log should show a completed control handshake. If it repeatedly
   logs `connect HY2`, UDP to the server port is blocked, the address is wrong,
-  or the server is not listening.
+  or the server is not listening. In `tcp` or `hy2+tcp` mode, also check TCP to
+  the same port.
 - Test UDP reachability from the client network:
 
   ```bash
@@ -1481,6 +1697,10 @@ with a smaller MTU can drop large datagrams before they arrive.
 
 - UDP is intentionally not retransmitted. A lost datagram is lost; use TCP
   mappings for protocols that need reliability.
+- In TCP transport mode, UDP mappings are framed over a reliable stream with
+  the same 4096-byte payload limit and a bounded per-mapping send queue. TCP
+  retransmission can add latency and head-of-line blocking; this is a fallback,
+  not a low-latency UDP replacement.
 
 ### Web console login
 
@@ -1650,6 +1870,13 @@ version, and date with the result.
     start it. Confirm the page shows the tail of that file. Introduce invalid
     YAML and confirm the page reports the error while stop and disable remain
     available when the service is running.
+12. With a disposable endpoint, set mode `hy2+tcp` in LuCI, save while stopped,
+    start, and confirm the server has both UDP and TCP reachable on the same
+    numeric port. Block UDP for the client (or stop the HY2 listener), confirm
+    the client console shows actual transport `tcp`, then restore UDP and
+    confirm recovery only after three successful probes and at least 60
+    seconds on TCP. Switch to `tcp` and confirm a range or port-hopping
+    configuration is rejected. Restore the original mode and configuration.
 
 ### Windows
 
@@ -1667,6 +1894,11 @@ version, and date with the result.
    unchanged except for expected assigned ports/revisions.
 6. Confirm passwords, control tokens, UDP tokens, and session keys do not
    appear in the console log file or Windows event output.
+7. With a disposable endpoint, set `mode: "hy2+tcp"` in `client.yaml`, stop and
+   start the scheduled task, and confirm the console reports actual transport
+   `hy2` or `tcp` and updates after a forced network change. Confirm outbound
+   TCP and UDP to the same server port are allowed. Restore the original mode
+   and configuration.
 
 ## Development
 
@@ -1693,8 +1925,10 @@ certificate, verifies reverse TCP and UDP, connects a standard HY2 core client,
 then logs in to the server console to push and delete a mapping, rotate both
 credentials with auto-push, confirm the client persists the new pair and
 reconnects, and revoke the previous pair. It also confirms that a new client
-using the revoked credentials is rejected. It uses only loopback addresses and
-ephemeral ports.
+using the revoked credentials is rejected. Transport-mode coverage includes
+same-port dual listeners, TCP fallback and recovery, framed UDP over TCP, and
+old-version compatibility. It uses only loopback addresses and ephemeral
+ports.
 
 The repository intentionally does not use a Node/CDN build. Web templates,
 CSS, and JavaScript are embedded with `go:embed`.

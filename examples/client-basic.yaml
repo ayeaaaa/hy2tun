@@ -11,7 +11,8 @@
 server: "us.example.com:24443"
 # Optional transport mode: "hy2" (default), "tcp", or "hy2+tcp".
 # TCP uses the first port of the server address; port hopping requires HY2.
-mode: "hy2+tcp"
+# Set "hy2+tcp" only when the server also has a TCP listener on that port.
+mode: "hy2"
 auth: "change-me"
 tls:
   sni: "us.example.com"

@@ -7,8 +7,10 @@
 
 `hy2tun` 是一个基于官方 [Hysteria 2](https://github.com/apernet/hysteria)
 核心实现的反向端口映射隧道。内网客户端主动连接到公网服务端，把选定的 TCP
-和 UDP 服务暴露在服务端的公网端口上。同一个服务端仍然是普通的 HY2 代理服务端，
-现有 Hysteria 2 客户端无需任何修改即可继续使用。
+和 UDP 服务暴露在服务端的公网端口上。默认的 `hy2` 模式（以及 `hy2+tcp`）
+下，同一个服务端仍然是普通的 HY2 代理服务端，现有 Hysteria 2 客户端无需
+任何修改即可继续使用。可选的 `tcp` 模式是面向 UDP 被封禁网络的 TLS 1.3
+回退传输。
 
 - `hy2tund` —— 公网服务端：HY2 代理入口、反向映射公网监听、控制端点和
   管理控制台。
@@ -24,21 +26,23 @@ Node.js、CDN 或任何运行时依赖。
 ## 功能
 
 - 标准 HY2 TCP/UDP 代理服务端，兼容官方 Hysteria 2 客户端。
+- 可选 TLS 1.3 TCP 传输，以及 UDP 被阻断/限速时从 HY2 自动回退到 TCP；
+  见 [传输模式与 TCP 回退](#传输模式与-tcp-回退)。
 - FRP 风格的反向 TCP 映射：服务端公网端口转发到客户端可达的 TCP 服务。
-- 使用 HY2 原生数据报的反向 UDP 映射，不经过可靠流，因此实时 UDP 不会被
-  队头阻塞。
+- HY2 活跃时使用 HY2 原生数据报的反向 UDP 映射，不经过可靠流，因此实时 UDP
+  不会被队头阻塞。TCP 回退则把 UDP 封装为 UDP over TCP，并接受其延迟代价。
 - 客户端配置是权威配置。服务端控制台可以向在线客户端推送映射变更；客户端
   应用变更、原子写入自己的 YAML 文件，并确认新的 revision。
 - 端口白名单支持单端口、范围、拒绝规则、自动分配和离线端口保留。
 - 一个客户端进程可以连接多个独立服务端。每个服务端有自己的身份、映射、
-  凭据、重连循环、端口跳跃和可选的本地 SOCKS5/HTTP 代理。
+  凭据、传输模式、重连循环、端口跳跃和可选的本地 SOCKS5/HTTP 代理。
 - 客户端可选 HY2 UDP 端口跳跃，支持端口集合；当服务端 `listen` 配置为范围时，
   Linux 服务端会自动配置 nftables/iptables 重定向；单端口监听仍支持手动重定向。
 - 服务端和客户端都有 Web 控制台，支持登录、CSRF 防护、实时状态、映射管理
   和日志。
 - 两个控制台都支持热配置编辑：Web 管理员、HY2 凭据、服务端端口策略、
-  服务端 trust-proxy 和客户端名称会经过校验、原子写入，并在不重启进程的
-  情况下生效。
+  服务端 trust-proxy、客户端名称和传输模式会经过校验、原子写入，并在不重启
+  进程的情况下生效。
 - 基于代际（generation）的凭据轮换，保留上一代凭据；支持自动推送到具备能力
   的在线客户端，或从客户端控制台手动同步，并支持显式撤销。
 - 经过认证的凭据显示：可以显示当前 HY2 凭据（服务端还可显示上一代）；默认
@@ -103,19 +107,124 @@ UDP 被封锁/QoS、MTU、CPU 开销和 QUIC 重传仍然存在。在网络质�
 的链路上，普通 TCP 隧道的开销可能更低；HY2 的优势主要在第 2 段存在明显丢包
 或高 RTT 时最明显。
 
+## 传输模式与 TCP 回退
+
+`mode` 决定服务端或客户端可以使用哪些传输。它接受三个值；省略或留空表示
+`hy2`，因此旧配置无需修改文件即可保持原有行为。
+
+| 模式 | 客户端行为 | 服务端监听 |
+| --- | --- | --- |
+| `hy2`（默认） | 仅使用 HY2/QUIC over UDP。 | 仅 UDP HY2。 |
+| `tcp` | 仅使用 TLS 1.3 over TCP。反向 TCP 和 UDP 映射都走 TCP 会话。 | 仅 TCP。标准 HY2 客户端无法连接。 |
+| `hy2+tcp` | 优先 HY2；识别到网络故障后使用 TCP，并在后台探测 HY2 以恢复。 | 在同一数字端口上同时提供 UDP HY2 和 TCP。 |
+
+每个进程内模式互斥：`tcp` 不启动也不使用 UDP HY2 监听，`hy2` 不启动也不
+使用 TCP 监听。只有 `hy2+tcp` 会启用回退和恢复。要回退，客户端和服务端都
+必须有 TCP 端点；要恢复，两端还必须保留 HY2。`hy2+tcp` 客户端连接 `tcp`
+服务端时可以走 TCP，但无法探测或回退到 HY2。`tcp` 客户端连接 `hy2+tcp`
+服务端时可以正常走 TCP。
+
+### 同端口，不同 socket
+
+在 `hy2+tcp` 下，服务端在同一数字端口上绑定 UDP 和 TCP，但它们**不是同一个
+socket**：HY2 监听是 UDP socket，TCP 传输是独立的 TCP listener。例如
+`listen: ":443"` 会同时拥有 UDP/443 和 TCP/443。`ss -lntu` 会显示两条独立
+记录，防火墙必须同时放行两种协议。只开放 UDP/443 会导致回退不可达；只开放
+TCP/443 会使 HY2 和恢复不可达。
+
+TCP 端点取配置的监听或服务端端口集合中的**第一个端口项**，保持输入顺序而
+不是排序后的结果。`listen: ":30002-30005,30000"` 的 UDP HY2 范围从 30002
+开始，TCP 也绑定 30002，而不是 30000。客户端的
+`server: "hy2tun.example.com:443,30000-30100,8443"` 同样用 443 建立 TCP，
+HY2 UDP 跳跃可以使用整个集合。
+
+纯 `tcp` 配置要求单一数字端口。逗号分隔列表、范围和 `transport.udp` 跳跃
+间隔都会被拒绝，包括 `443,443` 或 `443-443` 这种最终只有一个端口的写法。
+纯 `hy2` 配置仍可使用范围和端口跳跃，但没有 TCP 回退。
+
+### TLS 与凭据
+
+TCP 传输复用服务端现有的 `tls.cert` 和 `tls.key`，以及客户端现有的
+`tls.ca`、`tls.sni`、`tls.insecure` 和 `tls.pin_sha256`。两端都要求
+TLS 1.3 或更高版本。即使启用 `tls.insecure`，证书固定仍会校验；配置了 CA
+和 pin 时两者都必须匹配。不存在单独的 TCP 证书，也不会使用更弱的回退 TLS
+策略。HY2 认证密码和 control token 会被 TCP greeting 复用，不需要第二套
+凭据。
+
+### 回退与恢复时序
+
+在 `hy2+tcp` 下，每次 HY2 尝试有 10 秒的连接/握手预算。已建立的控制会话每
+10 秒发送一次心跳，30 秒内没有有效响应即视为会话死亡。只有可识别的网络
+故障会触发回退：连接超时、拒绝/不可达/重置、QUIC 或传输层丢失，以及心跳
+超时。认证、TLS 证书、证书 pin、协议、配置、队列已满和取消错误会直接上报，
+绝不会静默降级到 TCP。
+
+TCP 活跃期间，客户端每 30 秒探测一次 HY2，并带 ±20% 抖动（约 24–36 秒）。
+恢复需要连续三次成功探测**且**在 TCP 上至少保持 60 秒。之后会建立独立的
+HY2 候选会话并执行正常控制握手；只有候选成功才会替换 TCP 会话。探测或候选
+失败会重置成功计数。非 `hy2+tcp` 模式不执行探测。
+
+### 切换边界
+
+会改变当前活跃传输的切换会断开当前会话。已有的公网 TCP 连接、本地
+SOCKS5/HTTP 代理连接和 UDP 映射状态都会关闭；排队中的 UDP 数据报可能丢失，
+且不会重放。不提供无缝迁移、恰好一次投递或重放缓冲。公网 TCP 用户可能看到
+连接重置，UDP 流量也可能在切换期间丢包。仍然允许当前活跃传输的模式变更
+（例如 TCP 活跃时从 `tcp` 切到 `hy2+tcp`）会保留该会话；切换到不允许该传输
+的模式则会关闭会话并重连。
+
+在服务端，停用某个传输会关闭对应监听并分离其客户端会话；其他传输和 Web
+控制台不受影响。
+
+### UDP over TCP 的代价
+
+在 `tcp` 模式以及 `hy2+tcp` 正在使用 TCP 时，反向 UDP 映射会作为带长度帧的
+数据报承载在可靠、有序的 TCP 流上。丢失的 TCP 段会重传，因此延迟会升高，
+一条停滞的流还可能队头阻塞共享同一 TCP 连接的流量。TCP 帧上限为 4096 字节
+载荷；HY2 原生路径另有 4096 字节消息预算，其中包含地址头。每条映射有固定
+的 32 包发送队列；超出时会丢弃，而不是无限缓冲。该模式适合 UDP 被封禁的
+网络，不适合低延迟游戏、语音或其他依赖原生数据报语义的流量。UDP 可用时，
+HY2 原生数据报仍是首选。
+
+TCP 传输是 hy2tun 自有协议，不与 FRP 线协议兼容；hy2tun 也不提供 P2P、
+Hysteria Realms 或 UDP 打洞。
+
+### 控制与诊断
+
+- **服务端 Web 控制台 → 设置 → 传输模式**：修改服务端模式。需要当前 Web
+  管理员密码；先绑定或停用监听，再持久化模式，成功后才对外服务。
+- **客户端 Web 控制台 → 设置 → 传输模式**：修改当前服务端的模式。多服务端
+  配置中每个服务端模式独立，共享 Web 控制台和其他服务端不受影响。
+- **LuCI → 服务 → hy2tun**：单服务端配置有同样的模式字段。保存要求服务已
+  停止；按停止 → 保存 → 启动操作。多服务端配置在 LuCI 中保持只读。
+- **CLI：** `hy2tun config get` 输出包含 `mode`；`hy2tun config set` 接受
+  可选的 `mode` 字段，省略时保留当前模式。
+- **实际传输诊断：** 客户端控制台显示配置模式、实际传输（`hy2` 或 `tcp`）、
+  切换原因、最近切换、最近探测、探测错误和切换次数。服务端客户端详情页显示
+  该客户端上报的最后实际传输。服务端 `hy2+tcp` 模式没有单一活跃传输，由
+  每个客户端各自上报。
+- **Prometheus：** 客户端 `/metrics` 导出
+  `hy2tun_client_transport_active{server,transport}` 和
+  `hy2tun_client_transport_switches_total{server}`。服务端不会把自身模式
+  标记为单一活跃传输。
+
 ## 不包含的功能（v1）
 
 - 没有多用户账户、审批流程、租户隔离、配额或计费。每个服务端只有一套 HY2
   认证配置和一个控制令牌；密码认证在轮换期间会保留上一代凭据。
 - 没有 P2P、Hysteria Realms 或 UDP 打洞。客户端始终主动连接服务端。
+- 不与 FRP 线协议兼容。“FRP 风格”只描述反向映射模型；hy2tun 不能注册到
+  FRP 服务端，也不能接受 FRP 客户端。
+- 没有无缝传输切换、恰好一次投递或数据包重放。改变活跃传输会断开现有连接，
+  并可能丢失 UDP 数据包；见 [切换边界](#切换边界)。
 - 没有 TUN 模式、透明代理、基于域名的路由、ACL、负载均衡或 CDN 前置。
 - 服务端控制台只能编辑
   [热配置编辑](#热配置编辑) 中列出的设置；监听地址、TLS、obfs、带宽、QUIC、
   Web 监听/TLS、日志、状态文件和认证模式/用户表仍然需要修改文件并重启。
 - 客户端控制台不能编辑服务端地址、端口跳跃 transport、TLS、obfs、带宽、
   客户端 ID、代理认证或 Web 监听/TLS；这些仍然留在 `client.yaml`。客户端
-  控制台可以重命名客户端、通过手动同步轮换 HY2 凭据，并开启/关闭或修改每个
-  服务端的代理监听地址。
+  控制台可以修改每个服务端的传输模式、重命名客户端、通过手动同步轮换 HY2
+  凭据，并开启/关闭或修改每个服务端的代理监听地址。
 - 离线客户端的映射配置在服务端控制台中只读；详情页可以删除该客户端及其
   持久化映射和端口预约。仍可在客户端主机上本地更新其凭据。
 - 没有自动更新、托盘程序或原生 Windows 服务。Windows 使用任务计划程序。
@@ -131,15 +240,20 @@ UDP 被封锁/QoS、MTU、CPU 开销和 QUIC 重传仍然存在。在网络质�
 ```text
 标准 HY2 客户端 ──────── QUIC / HY2 ────────┐
                                             │
-hy2tun 客户端 ────────── QUIC / HY2 ────────┤
+hy2tun 客户端 ──────── QUIC / HY2（UDP）────┤
+  │                  或 TLS 1.3 / TCP ──────┤
   │ 控制流（注册 / 同步 / open）             │
-  │ TCP 数据流                              ├── hy2tund（公网 Linux 服务端）
-  │ 原生数据报（UDP）                       │     ├── HY2 代理出口（TCP/UDP）
+  │ TCP 数据流 / 带帧 UDP                   ├── hy2tund（公网 Linux 服务端）
+  │ 原生数据报（UDP，HY2 模式）              │     ├── HY2 代理出口（TCP/UDP）
   │                                         │     ├── 每条映射一个公网 TCP 监听
   ├── 本地 Web 控制台（局域网）              │     ├── 每条映射一个公网 UDP socket
   ├── 本地 SOCKS5 / HTTP 代理（可选）        │     └── 管理 Web + API
   └── 内网 TCP/UDP 服务                     │
 ```
+
+客户端根据实际模式选择 HY2 或 TCP。在 `hy2+tcp` 下，网络故障触发回退后，
+同一个逻辑客户端会通过 TLS 1.3/TCP 重连，并在之后探测 HY2 以恢复。服务端
+可以同时拥有两种监听；它们是独立的 UDP 和 TCP socket。
 
 ### 反向 TCP 路径
 
@@ -151,6 +265,9 @@ hy2tun 客户端 ────────── QUIC / HY2 ───────
    HY2 核心双向复制字节。
 6. 任意一端关闭都会关闭另一端。
 
+在 `tcp` 模式下，同一套控制/数据流协议运行在 TLS/TCP 上；服务端直接在
+已认证的 TCP 会话上处理 `StreamReverseTCP`，不经过 HY2 的 `Outbound.TCP`。
+
 ### 反向 UDP 路径
 
 1. 客户端为每条映射打开一个 HY2 UDP 会话，并向
@@ -161,15 +278,19 @@ hy2tun 客户端 ────────── QUIC / HY2 ───────
    HY2 UDP 会话回送响应。
 5. 20 秒 keepalive 保持 HY2 UDP 会话；空闲对端在 60 秒后回收。
 
+在 `tcp` 模式下，每条 UDP 映射会打开一条 `StreamUDP` 流，并在其上承载带
+长度帧的数据报，而不是 HY2 原生数据报。
+
 虚拟的 `_hy2tun_*` 地址只由配套客户端使用。标准 HY2 客户端不会打开这些
-地址，因此线协议保持兼容。
+地址，因此 HY2 线协议保持兼容。
 
 ## 环境要求
 
 - 构建需要 Go 1.26.10 或更高版本（包含标准库安全修复）。`go.mod` 锁定 HY2 核心为 v2.13.0。
-- 一台有 TLS 证书的公网服务端（支持自签名证书：客户端配置对应 CA，可选
-  叠加证书固定）。
-- 到服务端 HY2 端口的 UDP 可达性；以及到每个公网映射端口的 TCP 可达性。
+- 一台有可用于 TLS 1.3 的 TLS 证书的公网服务端（支持自签名证书：客户端配置
+  对应 CA，可选叠加证书固定）。
+- 到服务端 HY2 端口的 UDP 可达性；使用 `mode: tcp` 或 `mode: hy2+tcp` 时，
+  还需要到同一数字端口的 TCP 可达性；以及到每个公网映射端口的 TCP 可达性。
 - 部署示例面向 Linux + systemd、OpenWrt + procd，或 Windows + 任务计划
   程序。
 
@@ -236,8 +357,9 @@ docker run --network host --restart unless-stopped \
   hy2tun-server
 ```
 
-需要使用 host 网络，HY2 UDP 端口和公网映射端口才能正常工作。客户端使用同一
-个可写 `config` 目录中的 `client.yaml`；不要把单独的 YAML 文件以只读方式挂载。
+需要使用 host 网络，HY2 UDP 端口、可选的 TCP 回退端口和公网映射端口才能
+正常工作。客户端使用同一个可写 `config` 目录中的 `client.yaml`；不要把单独的
+YAML 文件以只读方式挂载。
 
 完整双服务示例见 [`docker-compose.yml`](docker-compose.yml)。镜像以
 `nonroot` 运行；如果需要绑定 1024 以下端口，请使用高权限端口或授予
@@ -264,8 +386,8 @@ hy2tund --check-config -c /etc/hy2tun/server.yaml
 hy2tun --check-config -c /etc/hy2tun/client.yaml
 ```
 
-会检查 YAML、必填字段、TLS 证书/私钥、Web TLS、bcrypt 哈希以及日志/状态目录。
-成功时输出 `configuration OK`。
+会检查 YAML、必填字段、传输模式约束、TLS 证书/私钥、Web TLS、bcrypt 哈希
+以及日志/状态目录。成功时输出 `configuration OK`。
 
 ## 健康检查与指标
 
@@ -273,7 +395,9 @@ hy2tun --check-config -c /etc/hy2tun/client.yaml
 
 - `GET /healthz` —— 进程正常时返回 `200` 和 `ok`。
 - `GET /metrics` —— Prometheus 文本指标，包含聚合流量、映射数、连接状态、
-  凭据代际和运行时间。
+  凭据代际、运行时间和客户端传输诊断
+  （`hy2tun_client_transport_active` 与
+  `hy2tun_client_transport_switches_total`）。
 
 `/healthz` 有意不要求登录，方便本机探活。`/metrics` 在
 `web.metrics_token` 为空时也不要求登录；如果监听地址超出回环/VPN 范围，请
@@ -310,6 +434,7 @@ chmod 600 /etc/hy2tun/key.pem
 
 ```yaml
 listen: ":443"
+# mode: "hy2"          # 省略即 HY2；"tcp" 或 "hy2+tcp" 需放行 TCP/443
 
 auth:
   type: password
@@ -353,6 +478,7 @@ sudo ./bin/hy2tund -c /etc/hy2tun/server.yaml   # release 包中为 ./hy2tund
 
 ```yaml
 server: "hy2tun.example.com:443"
+# mode: "hy2"          # 省略即 HY2；"tcp" 或 "hy2+tcp" 使用 TCP/443
 auth: "a-long-random-password"
 
 tls:
@@ -440,7 +566,7 @@ sudo journalctl -u hy2tund -f
 - `hy2tun_<version>_<arch>.ipk` —— `arch` 按路由器 `uname -m` 选择
   `mips`、`mipsle`、`arm`、`arm64` 或 `amd64`
 - `luci-app-hy2tun_<version>_all.ipk` —— LuCI 配置页、服务控制、日志和
-  Web 控制台入口；依赖 `hy2tun (>= 1.5.0)`
+  Web 控制台入口；依赖 `hy2tun (>= 1.6.0)`
 
 在路由器上安装：
 
@@ -460,9 +586,10 @@ opkg install ./luci-app-hy2tun_<version>_all.ipk
 1. 打开 **LuCI → 服务 → hy2tun**。缺少配置时页面显示“未创建”。表单会预填
    默认值：客户端名称 `openwrt`、Web 控制台监听 `0.0.0.0:7501`、用户名
    `admin`；服务端地址和密码类字段为空。
-2. 填写单服务端基础表单：服务端地址（`host:port`）、HY2 认证密码（至少
-   8 字节）、control token（至少 16 字节）、可选的 TLS SNI 和“跳过证书
-   校验”、端口映射，以及 Web 控制台监听地址、用户名和密码。
+2. 填写单服务端基础表单：服务端地址（`host:port`）、传输模式（`hy2`、
+   `tcp` 或 `hy2+tcp`，默认 `hy2`）、HY2 认证密码（至少 8 字节）、
+   control token（至少 16 字节）、可选的 TLS SNI 和“跳过证书校验”、端口
+   映射，以及 Web 控制台监听地址、用户名和密码。
 3. 选择“保存”或“保存并启动”。保存要求服务已停止；客户端会在启动前校验
    配置。
 4. 在同一页面启动、停止、重启、启用或停用服务。页面显示服务状态、最近
@@ -477,6 +604,12 @@ LuCI 表单不会显示已有的 HY2 认证、control token 或 Web 密码；密
 
 保存会规范化文档中的默认值：`credentials.generation: 0` 变为 `1`；启用
 `web.listen` 时空 `web.username` 变为 `admin`；空 `log.level` 变为 `info`。
+没有 `mode` 的旧配置显示为 `hy2`；保存表单会把所选模式显式写入。
+
+在 LuCI 中修改模式按“停止 → 保存 → 启动”操作。LuCI 页面不显示实际线传输；
+请打开客户端 Web 控制台查看 `实际传输`、切换原因、探测状态和切换次数。选择
+`tcp` 或 `hy2+tcp` 时，除 UDP 外还必须放行到服务端数字端口的 TCP；见
+[同端口，不同 socket](#同端口不同-socket)。
 
 服务运行期间表单只读，需先停止服务再编辑。每次保存都会提交加载配置时的
 SHA-256 revision。如果文件在此期间发生变化（另一个浏览器标签页、客户端
@@ -486,9 +619,10 @@ SHA-256 revision。如果文件在此期间发生变化（另一个浏览器标�
 字段，但 YAML 注释可能丢失。
 
 基础表单只管理一个服务端。客户端 Web 控制台可以修改 HY2 认证和 control
-token（包括轮换后的凭据）、映射、代理监听，以及 Web 账号和密码。TLS CA 或
-证书固定、obfs、带宽、transport（端口跳跃）、Web TLS 证书和 `log.file`
-需要通过 SSH 修改；增加或修改 `servers:` 列表也需要编辑文件。通过 SSH 编辑
+token（包括轮换后的凭据）、映射、代理监听、Web 账号和密码，以及每个服务端的
+传输模式。TLS CA 或证书固定、obfs、带宽、transport（端口跳跃）、Web TLS
+证书和 `log.file` 需要通过 SSH 修改；增加或修改 `servers:` 列表也需要编辑
+文件。通过 SSH 编辑
 `/etc/hy2tun/client.yaml` 前请先停止服务。多服务端配置在 LuCI 中隐藏表单且
 只读。包含未知顶层字段的配置会禁用保存。存在自定义 CA 或证书固定、obfs、
 带宽、transport 或已轮换凭据时，服务端地址会被锁定；更换服务端需要重新填写
@@ -517,6 +651,7 @@ log:
 
 servers:
   - name: "us"
+    # mode: "hy2+tcp"      # 每个服务端独立；省略即 HY2
     server: "us.example.com:24443"
     auth: "us-password"
     tls:
@@ -557,6 +692,8 @@ servers:
 
 - `servers` 中的每个条目完全独立，映射不会继承或共享。需要把同一个内网
   服务暴露到多个服务端时，在每个服务端下分别配置。
+- `servers[].mode` 每个条目独立。省略表示 `hy2`；旧的顶层 `mode` 只作用于
+  `default` 服务端。修改一个服务端的模式不会重连或重新配置其他服务端。
 - `servers[].name` 必须唯一；`servers[].client.id` 每个条目独立生成并持久化。
 - 顶层 `web` 和 `log` 由进程共享。使用 `servers` 时，旧的单服务端顶层字段
   必须为空。
@@ -579,7 +716,8 @@ servers:
 
 | 字段 | 含义 |
 | --- | --- |
-| `listen` | HY2 UDP 监听地址，例如 `:443`。端口跳跃时仍保持单端口；见 [端口跳跃](#端口跳跃)。 |
+| `mode` | `hy2`（省略时默认）、`tcp` 或 `hy2+tcp`。`tcp` 要求单一 `listen` 端口；`hy2+tcp` 在同一首个数字端口上以独立 socket 绑定 UDP HY2 和 TCP。见 [传输模式与 TCP 回退](#传输模式与-tcp-回退)。 |
+| `listen` | HY2 UDP 监听地址，例如 `:443`，或 `:30000-40000` 范围。范围监听时绑定首个端口，并在 Linux 上自动重定向其余端口；见 [端口跳跃](#端口跳跃)。`hy2+tcp` 下 TCP 使用第一个端口项。 |
 | `listen_host` | 公网映射监听的可选地址；留空绑定所有接口。 |
 | `auth.type` | `password` 或 `userpass`。 |
 | `auth.password` | `password` 认证使用的 HY2 密码。 |
@@ -613,8 +751,9 @@ servers:
 
 | 字段 | 含义 |
 | --- | --- |
+| `mode` | `hy2`（省略时默认）、`tcp` 或 `hy2+tcp`。`tcp` 要求单一数字 `server` 端口且不能端口跳跃；`hy2+tcp` 用第一个端口项建立 TCP，其余端口仍可用于 HY2 跳跃。见 [传输模式与 TCP 回退](#传输模式与-tcp-回退)。 |
 | `server` | 旧的单服务端 `host:port`；端口跳跃时可使用端口集合，例如 `host:443,8443` 或 `host:30000-40000`。多个独立服务端请使用 `servers`。 |
-| `servers` | 可选的多服务端列表，每项完全独立；见 [多服务端](#多服务端)。不能与旧的单服务端字段混用。 |
+| `servers` | 可选的多服务端列表，每项完全独立；见 [多服务端](#多服务端)。不能与旧的单服务端字段混用。每个条目有独立的可选 `mode`。 |
 | `auth` | HY2 密码；`userpass` 认证时为 `user:password`。 |
 | `tls.sni` | TLS 服务器名称。为空时使用 `server` 的主机部分。 |
 | `tls.insecure` | 跳过证书验证。不要在不可信网络使用。 |
@@ -622,8 +761,8 @@ servers:
 | `tls.ca` | 私有/自签名服务端证书的 CA 证书包。 |
 | `obfs.type` | 必须与服务端一致。空或 `salamander`。 |
 | `bandwidth.up`、`bandwidth.down` | 可选的客户端 HY2 限速。 |
-| `transport.udp.hop_interval` | 多端口 `server` 的固定跳跃间隔。默认 30s，最小 5s。 |
-| `transport.udp.min_hop_interval`、`max_hop_interval` | 随机跳跃间隔；两者必须同时配置，最小 5s，且与 `hop_interval` 互斥。 |
+| `transport.udp.hop_interval` | 多端口 `server` 的固定跳跃间隔。默认 30s，最小 5s。纯 `tcp` 模式拒绝。 |
+| `transport.udp.min_hop_interval`、`max_hop_interval` | 随机跳跃间隔；两者必须同时配置，最小 5s，且与 `hop_interval` 互斥。纯 `tcp` 模式拒绝。 |
 | `control.token` | 必须与服务端的 `control.token` 一致。 |
 | `credentials.generation` | 客户端凭据代际。缺失或 `0` 表示 `1`；服务端推送或手动同步会写入。客户端忽略 `previous_*` 字段；这些字段保留。 |
 | `client.id` | 稳定的客户端 ID。为空时首次启动生成。 |
@@ -660,7 +799,9 @@ servers:
 ```
 
 修改映射的类型、公网端口或本地目标会关闭该映射的活跃公网连接。只修改
-note 会保持连接。删除映射会关闭其监听/socket 以及所有活跃连接。
+note 会保持连接。删除映射会关闭其监听/socket 以及所有活跃连接。UDP 映射在
+`hy2` 模式下使用原生 HY2 数据报；TCP 传输活跃时则使用带帧 UDP over TCP，
+后者会增加可靠性、延迟和队头阻塞代价。
 
 ### 端口白名单语法
 
@@ -735,6 +876,7 @@ openssl x509 -in cert.pem -outform der | sha256sum
 | 设置 | 在线编辑 |
 | --- | --- |
 | `web.username`、`web.password_hash` | 可以。密码只能重置，不能显示。保存会撤销所有 Web 会话。 |
+| `mode` | 可以，需要当前 Web 管理员密码。会绑定或停用监听，并可能断开使用被停用传输的客户端。 |
 | `auth.password`、`control.token` | 在 `auth.type: password` 时可以。仅限轮换；见下文。 |
 | `ports.allow`、`ports.deny`、`ports.auto_range`、`ports.offline_reserve` | 可以。新的允许列表不再覆盖已经运行的映射时，不会关闭它们。`offline_reserve` 至少为 `1s`。 |
 | `web.trust_proxy` | 可以。立即应用于登录和设置确认限流。 |
@@ -752,6 +894,7 @@ openssl x509 -in cert.pem -outform der | sha256sum
 | 设置 | 在线编辑 |
 | --- | --- |
 | `web.username`、`web.password_hash` | 可以。只能重置密码；保存会撤销所有 Web 会话。 |
+| `mode` | 可以，按服务端修改，需要当前 Web 管理员密码。仍允许当前活跃传输的模式会保留会话；否则客户端重连。 |
 | `client.name` | 可以。写入 `client.yaml`，递增 revision，并立即发送到服务端。 |
 | `auth`、`control.token` | 可以，只能通过手动凭据同步。新代际必须大于本地代际；客户端会重连。 |
 | `mappings` | 可以。添加、更新、删除；服务端也可以推送列表。 |
@@ -921,7 +1064,9 @@ Hysteria 2 支持 UDP 端口跳跃：客户端把 HY2 连接发送到一组 UDP 
 阻断，不能隐藏服务端、突破对整个 UDP 的封锁，也不能替代 TLS。
 
 端口跳跃只影响客户端到服务端的 HY2 UDP 连接。服务端的公网反向映射端口
-（例如 `2222/tcp`、`51820/udp`）不会跳跃，仍使用配置中的固定端口。
+（例如 `2222/tcp`、`51820/udp`）不会跳跃，仍使用配置中的固定端口。在
+`hy2+tcp` 模式下，TCP 回退使用同一端口集合中的第一个端口项；纯 `tcp` 模式
+会拒绝范围和跳跃间隔。
 
 ### 客户端配置
 
@@ -955,7 +1100,10 @@ transport:
 - `hop_interval` 与 `min_hop_interval`/`max_hop_interval` 互斥；随机间隔
   必须同时配置后两者，且 `min <= max`。
 - 单端口 `server` 配置任何间隔字段都会被拒绝。规范化后只剩一个唯一端口的
-  集合（例如 `443-443`、`443,443`）按单端口处理。
+  集合（例如 `443-443`、`443,443`）在 HY2 下按单端口处理，但纯 `tcp` 会
+  拒绝这种范围/列表写法本身。
+- 在 `hy2+tcp` 下，TCP 端点取第一个端口项并保持输入顺序；其余端口只用于
+  HY2 UDP 跳跃。
 - `transport` 只能通过配置文件修改，Web 控制台不支持热编辑。修改 `server`
   或 `transport` 后重启客户端。
 - Salamander 混淆会包装每个跳跃 socket，obfs 配置无需改变。
@@ -982,6 +1130,10 @@ listen: ":30000-40000"
 可以用 `HY2TUN_FIREWALL_BACKEND=nft` 或
 `HY2TUN_FIREWALL_BACKEND=iptables` 强制指定后端。服务关闭时会删除规则。
 安装规则需要 root 或 `CAP_NET_ADMIN`；安装失败会导致启动失败。
+
+在 `hy2+tcp` 下，TCP 监听绑定 `listen` 的第一个端口项（例如上面的
+`30000`），使用同一数字端口。范围重定向只作用于 UDP；还必须放行到首个
+端口的 TCP。纯 `tcp` 模式不接受范围，也不会安装重定向。
 
 客户端指向同一个范围：
 
@@ -1142,7 +1294,9 @@ ip6tables -t nat -D PREROUTING -p udp --dport 30000:40000 \
   Hysteria 2 配置使用 `hopInterval`、`minHopInterval`、`maxHopInterval`，
   不要直接复制。
 - 标准 Hysteria 2 服务端 + 手动重定向可以与 hy2tun 客户端配合；标准
-  Hysteria 2 客户端也可以连接配置了范围监听或手动重定向的 hy2tun 服务端。
+  Hysteria 2 客户端也可以连接配置了范围监听或手动重定向的 hy2tun 服务端，
+  前提是服务端模式允许 HY2（`hy2` 或 `hy2+tcp`）。纯 `tcp` 服务端不接受
+  标准 HY2 客户端。
 - Windows 和 OpenWrt 客户端只发起出站 UDP，因此也可以跳跃；自动服务端
   重定向要求 Linux，手动重定向可以由任意 Linux NAT 主机提供。
 - 启用 Salamander obfs 时，每个跳跃 socket 都会被包装，两端必须使用相同
@@ -1154,7 +1308,10 @@ ip6tables -t nat -D PREROUTING -p udp --dport 30000:40000 \
 
 服务端需要允许：
 
-- 从互联网到 `listen` 端口（通常是 443）的 UDP；
+- 从互联网到 `listen` 端口（通常是 443）的 UDP，用于 HY2；
+- 服务端模式为 `tcp` 或 `hy2+tcp` 时，到同一数字 `listen` 端口（例如
+  TCP/443）的 TCP。UDP 和 TCP 监听是独立 socket，只放行一种协议不会打开
+  另一种；
 - 到每个显式公网映射端口（例如 2222）的 TCP；
 - 到每个显式公网 UDP 映射端口（例如 51820）的 UDP；
 - 仅从管理网络、VPN 或反向代理到 Web 控制台的 TCP。示例
@@ -1169,8 +1326,9 @@ ip6tables -t nat -D PREROUTING -p udp --dport 30000:40000 \
 防火墙的 INPUT 链只需要放行 `listen` 的首个端口，因为重定向在 PREROUTING
 阶段完成。
 
-客户端主机需要允许到服务端 HY2 端口的出站 UDP。Windows 可能会为客户端
-Web 控制台弹出防火墙提示；只在专用网络允许。
+客户端主机需要允许到服务端 HY2 端口的出站 UDP；使用 `tcp` 或 `hy2+tcp`
+时，还需要到同一端口的出站 TCP。Windows 可能会为客户端 Web 控制台弹出
+防火墙提示；只在专用网络允许。
 
 ### 安全暴露服务端 Web 控制台
 
@@ -1275,10 +1433,29 @@ CSRF 防护，但 TLS 保护传输中的密码和会话 cookie。
   SHA-256。续期证书后重新生成。
 - 控制台前面的反向代理必须保留 `Host`；否则修改会以 `403 forbidden` 失败。
 
+### TCP 回退与传输模式
+
+- 分别检查配置模式和实际传输。`hy2+tcp` 客户端的模式显示为 `hy2+tcp`，
+  而 `实际传输` 显示 `tcp`，这是回退期间的正常状态。服务端 `hy2+tcp` 没有
+  单一活跃传输；请在每个客户端的详情页查看最后实际传输。
+- `mode tcp requires a single port without ranges or port hopping` 表示纯
+  `tcp` 模式使用了范围或逗号分隔列表。改用单端口，或切换到 `hy2+tcp` 以
+  保留 HY2 端口跳跃。
+- 如果从不回退，确认服务端在同一数字端口上有可达的 TCP，且不是纯 `hy2`
+  模式。分别测试 TCP 和 UDP：`nc -vz host 443` 测 TCP，
+  `nc -vzu host 443` 测 UDP。UDP 的“成功”只表示包已发送。
+- 如果客户端报告认证、证书、证书 pin 或协议错误，它**不会**回退到 TCP。
+  这些错误表示配置或安全不匹配；应修复凭据或 TLS 设置，不要期待降级。
+- 回退会等待可识别的网络故障或 30 秒心跳超时。恢复刻意较慢：连续三次成功
+  探测，并在 TCP 上至少保持 60 秒。不要期待立即回到 HY2。
+- TCP 活跃时，UDP 映射变为带帧 UDP over TCP。延迟、队头阻塞和队列压力下的
+  数据报丢弃是预期代价；UDP 可用时应切回 HY2。
+
 ### 防火墙或连接问题
 
 - 客户端日志应显示控制握手完成。如果反复记录 `connect HY2`，说明到服务端
-  端口的 UDP 被阻断、地址错误，或服务端没有监听。
+  端口的 UDP 被阻断、地址错误，或服务端没有监听。`tcp` 或 `hy2+tcp` 模式
+  下还要检查到同一端口的 TCP。
 - 从客户端网络测试 UDP 可达性：
 
   ```bash
@@ -1313,6 +1490,9 @@ CSRF 防护，但 TLS 保护传输中的密码和会话 cookie。
   ```
 
 - UDP 有意不重传。丢失的数据报就是丢失；需要可靠性的协议请使用 TCP 映射。
+- TCP 传输模式下，UDP 映射会带帧承载在可靠流上，仍有 4096 字节载荷上限和
+  每条映射固定的发送队列。TCP 重传会增加延迟和队头阻塞；这是回退方案，
+  不是低延迟 UDP 的替代品。
 
 ### Web 控制台登录
 
@@ -1450,6 +1630,11 @@ Go 测试只在 Linux 上运行。OpenWrt 和 Windows 真机执行属于外部�
 11. 先停止服务，通过 SSH 在 `/etc/hy2tun/client.yaml` 中设置 `log.file`，
     再启动服务。确认页面显示该文件的末尾内容。写入无效 YAML，确认页面报告
     错误；服务运行中时停止和停用按钮仍可用。
+12. 使用一次性测试端点，在 LuCI 中把模式设为 `hy2+tcp`，停止时保存并启动，
+    确认服务端在同一数字端口上同时有可达的 UDP 和 TCP。为客户端阻断 UDP
+    （或停止 HY2 监听），确认客户端控制台显示实际传输 `tcp`；恢复 UDP 后，
+    确认只有连续三次成功探测且在 TCP 上保持至少 60 秒后才恢复。切换到
+    `tcp`，确认范围或端口跳跃配置被拒绝。最后恢复原模式和原配置。
 
 ### Windows
 
@@ -1465,6 +1650,10 @@ Go 测试只在 Linux 上运行。OpenWrt 和 Windows 真机执行属于外部�
    保持不变。
 6. 确认密码、控制令牌、UDP 令牌和会话密钥不会出现在控制台日志文件或
    Windows 事件输出中。
+7. 使用一次性测试端点，在 `client.yaml` 中设置 `mode: "hy2+tcp"`，停止并
+   启动计划任务，确认控制台显示实际传输为 `hy2` 或 `tcp`，并在强制网络变化
+   后更新。确认允许到同一服务端端口的出站 TCP 和 UDP。最后恢复原模式和原
+   配置。
 
 ## 开发
 
@@ -1489,7 +1678,8 @@ go test ./internal/e2e -v     # 只运行验收测试
 端到端测试会用自签名证书启动真实的服务端和客户端，验证反向 TCP 和 UDP，
 连接标准 HY2 核心客户端，然后登录服务端控制台推送和删除映射、自动推送轮换
 两套凭据、确认客户端持久化新凭据对并重连，以及撤销上一代凭据。它还会确认
-使用已撤销凭据的新客户端会被拒绝。测试只使用回环地址和临时端口。
+使用已撤销凭据的新客户端会被拒绝。传输模式覆盖同端口双监听、TCP 回退与
+恢复、带帧 UDP over TCP，以及旧版本兼容性。测试只使用回环地址和临时端口。
 
 仓库有意不使用 Node/CDN 构建。Web 模板、CSS 和 JavaScript 通过 `go:embed`
 嵌入。

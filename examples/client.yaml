@@ -24,6 +24,23 @@ server: "sg.example.com:443"
 # An interval with a single-port server is rejected. Fixed and random
 # intervals are mutually exclusive.
 
+# Transport mode. Omit this field to keep the legacy HY2-only behavior.
+#   hy2      HY2/QUIC over UDP only (default when omitted)
+#   tcp      TLS 1.3 over TCP only; `server` must be a single numeric port
+#   hy2+tcp  prefer HY2, fall back to TCP on recognized network failures,
+#            and probe HY2 for recovery
+#
+# In hy2+tcp, TCP uses the first port item in `server`; a range or hop set
+# still uses every port for HY2 UDP hopping. Pure tcp rejects ranges, port
+# lists (including "443,443"), and transport.udp hop intervals.
+#
+# While TCP is active, UDP mappings are carried as framed UDP over TCP. This
+# adds reliability and latency/head-of-line cost; UDP datagrams may also be
+# dropped under queue pressure. A switch that changes the active transport
+# drops existing TCP/proxy connections and may lose UDP packets; there is no
+# seamless or exactly-once migration.
+# mode: "hy2+tcp"
+
 # The HY2 password from the server's auth section. For userpass auth use
 # "user:password" instead.
 auth: "change-me-to-the-server-password"

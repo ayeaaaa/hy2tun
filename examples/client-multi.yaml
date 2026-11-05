@@ -1,11 +1,17 @@
 # hy2tun multi-server example configuration.
 #
 # Each server is independent: its own HY2 credentials, control token, TLS,
-# mappings, client identity, port hopping, and local proxy settings. There is
-# no shared mapping inheritance between entries.
+# transport mode, mappings, client identity, port hopping, and local proxy
+# settings. There is no shared mapping inheritance between entries.
 #
 # Copy to /etc/hy2tun/client.yaml and replace every placeholder. Keep the file
 # readable only by the account that runs hy2tun: chmod 600.
+#
+# `mode` is optional per server; omitting it means HY2. Set it to "tcp" or
+# "hy2+tcp" only for servers that have a matching TCP listener. Pure tcp
+# requires a single numeric server port and rejects port hopping. In
+# hy2+tcp, TCP uses the first port item and UDP mappings use framed UDP over
+# TCP while TCP is active.
 
 web:
   listen: "0.0.0.0:7501"
@@ -19,6 +25,7 @@ log:
 
 servers:
   - name: "us"
+    # mode: "hy2+tcp"       # optional; omit for HY2
     server: "us.example.com:24443"
     auth: "change-me-us-password"
     tls:
@@ -43,6 +50,7 @@ servers:
       http: "127.0.0.1:8080"
 
   - name: "sg"
+    # mode: "tcp"           # independent of the us entry; omit for HY2
     server: "sg.example.com:24443"
     auth: "change-me-sg-password"
     tls:

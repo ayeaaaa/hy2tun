@@ -15,6 +15,17 @@
 # wanted, keep a single port and use scripts/port-hopping/README.md.
 listen: ":443"
 
+# Transport mode. Omit this field to keep the legacy HY2-only behavior.
+#   hy2      UDP HY2 only (default when omitted)
+#   tcp      TCP only; `listen` must be a single numeric port
+#   hy2+tcp  UDP HY2 plus TCP on the same numeric port
+#
+# In hy2+tcp the two listeners use the same port number but are separate
+# sockets, so the firewall must allow both UDP and TCP on that port. The TCP
+# listener uses the first item in `listen` when a range is configured.
+# Pure tcp rejects ranges, comma-separated port lists, and port hopping.
+# mode: "hy2+tcp"
+
 # Optional address used for the public reverse-mapping listeners. An empty
 # value binds them on every interface.
 listen_host: ""

@@ -4,6 +4,77 @@
 
 All notable changes to this project are documented here.
 
+## v1.6.0 - 2026-11-05
+
+### Added
+
+- TLS 1.3 TCP transport for the hy2tun control stream, reverse TCP streams,
+  reverse UDP mappings, and forward proxy streams. It reuses the existing HY2
+  password/control token and the existing `tls.ca`, `tls.sni`, `tls.insecure`,
+  and `tls.pin_sha256` policy. TLS 1.3 is required, and a certificate pin is
+  still checked when insecure verification is enabled.
+- Three transport modes: `hy2` (the default), `tcp`, and `hy2+tcp`. The mode is
+  global on the server and independent per server entry on a multi-server
+  client. Pure modes are mutually exclusive: `hy2` starts no TCP listener or
+  fallback, while `tcp` starts no UDP HY2 listener and rejects ranges, port
+  lists, and UDP hop intervals.
+- Same-port dual listeners in `hy2+tcp`: the UDP HY2 listener and the TCP
+  listener use the same numeric port but are separate sockets. The TCP endpoint
+  is derived from the first port item, preserving input order when ranges or
+  port hopping are used. The firewall must allow both TCP and UDP on that port.
+- Automatic fallback and recovery in `hy2+tcp`: a 10-second connect/handshake
+  budget, a 10-second heartbeat, a 30-second dead-session timeout, probes every
+  30 seconds with ±20% jitter, and failback only after three consecutive
+  successful probes and at least 60 seconds on TCP.
+- UDP over TCP framing for UDP mappings while TCP is active, with a 4096-byte
+  payload limit and a bounded 32-packet per-mapping send queue. Reliable
+  ordering adds latency and head-of-line cost, and datagrams may be dropped
+  under queue pressure.
+- Server and client Web mode controls, per-server controls for multi-server
+  clients, a LuCI mode field, and `hy2tun config get|set` mode support.
+- Diagnostics for the configured mode, actual transport, switch reason and
+  count, last switch, last probe, probe error, server-side last actual
+  transport, and the client metrics `hy2tun_client_transport_active` and
+  `hy2tun_client_transport_switches_total`.
+
+### Changed
+
+- `luci-app-hy2tun` now depends on `hy2tun (>= 1.6.0)`.
+- Configurations without `mode` continue to default to `hy2`; loading or
+  upgrading does not require adding the field. The default `server.yaml`,
+  `client.yaml`, and `client-multi.yaml` examples still omit `mode`; the LuCI
+  package's basic example keeps an explicit mode field.
+- A mode switch that changes the active transport closes the current session:
+  existing TCP and proxy connections drop, UDP mapping state is closed, and
+  queued datagrams may be lost. There is no seamless migration, exactly-once
+  delivery, or replay.
+- Only recognized network failures trigger fallback. Authentication, TLS,
+  certificate-pin, protocol, configuration, queue-full, and cancellation errors
+  are surfaced and never cause a downgrade to TCP.
+
+### Compatibility
+
+- Existing `hy2` deployments and standard Hysteria 2 clients are unchanged.
+  `hy2+tcp` keeps HY2 available; a pure `tcp` server does not accept standard
+  Hysteria 2 clients.
+- An old client without mode support uses HY2 and cannot fall back. A new
+  `hy2+tcp` client against an old HY2-only server stays on HY2; if UDP is
+  blocked, fallback is unavailable until the server is upgraded and TCP is
+  opened.
+- The TCP transport is hy2tun-specific. It is not FRP wire-compatible, and this
+  release does not add P2P, Hysteria Realms, or UDP hole punching.
+
+### Verification
+
+- Local gates: `go test ./... -count=1`, `go test -race ./... -count=1`,
+  `go vet ./...`, `staticcheck ./...`, `make build`,
+  `scripts/openwrt/test-ipk.sh`, and
+  `scripts/openwrt/test-luci-controller.sh`.
+- Cross-builds for Linux amd64/arm64/arm/mips/mipsle and Windows amd64.
+- Local QEMU user-mode checks for Linux arm64/arm/mips/mipsle: `-version`,
+  `--check-config`, and a real TLS/TCP frame round-trip test. Real-device
+  OpenWrt acceptance remains external and is not claimed by unit tests alone.
+
 ## v1.5.4 - 2026-10-31
 
 ### Added

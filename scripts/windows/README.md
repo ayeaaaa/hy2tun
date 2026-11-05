@@ -3,6 +3,9 @@
 `hy2tun.exe` is a console application. There is no native Windows service in
 v1; use Task Scheduler to start it at boot and restart it if it exits.
 
+This guide applies to hy2tun 1.6.0 and later. The OpenWrt LuCI package requires
+`hy2tun (>= 1.6.0)`; LuCI itself is OpenWrt-only and does not apply to Windows.
+
 ## Install
 
 1. Download the Windows archive from the release page and extract it, for
@@ -32,6 +35,39 @@ v1; use Task Scheduler to start it at boot and restart it if it exits.
    The client prints the generated web password once if
    `web.password_hash` is empty. Stop it with `Ctrl+C` after confirming the
    log line that the control handshake completed.
+
+## Transport modes
+
+Set `mode` in `client.yaml`; omit it to keep the default HY2 behavior:
+
+- `hy2` — HY2/QUIC over UDP only.
+- `tcp` — TLS 1.3 over TCP only. `server` must be one numeric port; ranges and
+  `transport.udp` hopping are rejected. UDP mappings are framed over TCP, which
+  adds reliability, latency, and head-of-line cost.
+- `hy2+tcp` — prefer HY2, fall back to TCP on recognized network failures, and
+  probe HY2 for recovery.
+
+In `hy2+tcp`, TCP uses the first port item in `server`; a range or port set
+still uses every port for HY2 UDP hopping. The server must also be configured
+for TCP on the same numeric port, and the firewall must allow both outbound UDP
+and outbound TCP to that port. A switch that changes the active transport drops
+existing TCP/proxy connections and may lose UDP packets; there is no seamless
+or exactly-once migration. The client Web console shows the configured mode,
+actual transport, switch reason/count, and last probe; use it instead of
+inferring the active transport from the YAML file.
+
+Stop the task before editing `client.yaml`, then start it again:
+
+```powershell
+Stop-ScheduledTask  -TaskName "hy2tun"
+notepad "C:\ProgramData\hy2tun\client.yaml"
+Start-ScheduledTask -TaskName "hy2tun"
+```
+
+A multi-server configuration can set an independent `mode` for each
+`servers[]` entry. The LuCI read-only multi-server policy does not apply to
+Windows; use the client Web console for per-server diagnostics and mode
+changes.
 
 ## Start at boot with Task Scheduler
 
@@ -97,7 +133,9 @@ Get-ScheduledTaskInfo -TaskName "hy2tun"
 
 - Windows normally allows the outbound UDP connection to the server without a
   prompt. If outbound traffic is filtered, add an outbound rule for
-  `hy2tun.exe` and UDP to the server port.
+  `hy2tun.exe` and UDP to the server port. For `tcp` or `hy2+tcp`, also allow
+  outbound TCP to the same numeric port; the UDP and TCP transports are
+  separate connections and one rule does not open the other.
 - The first time the web console starts on `0.0.0.0:7501`, Windows Defender
   Firewall may show a prompt. Allow it on **Private networks only**. Do not
   allow it on public networks; the console uses HTTP unless `web.tls` is
@@ -107,6 +145,26 @@ Get-ScheduledTaskInfo -TaskName "hy2tun"
   Only the optional web console needs an inbound rule.
 - If the client is behind a home router, no router port forwarding is needed
   either: the client makes an outbound QUIC connection to the server.
+
+## Backup and rollback
+
+Before changing the mode or replacing the binary, copy
+`C:\ProgramData\hy2tun\client.yaml` and keep the previous `hy2tun.exe` and
+archive. To roll back:
+
+```powershell
+Stop-ScheduledTask -TaskName "hy2tun"
+Copy-Item "C:\ProgramData\hy2tun\client.yaml.bak" `
+  "C:\ProgramData\hy2tun\client.yaml" -Force
+Copy-Item "C:\Program Files\hy2tun\hy2tun.exe.bak" `
+  "C:\Program Files\hy2tun\hy2tun.exe" -Force
+Start-ScheduledTask -TaskName "hy2tun"
+```
+
+Restore the previous `mode` as part of the configuration rollback. If the
+server mode was changed, restore it separately; the Windows client cannot
+change the server's listeners. Keep the backup until the client reconnects and
+the mappings are verified.
 
 ## Logs and troubleshooting
 
@@ -120,4 +178,8 @@ If the task starts but the client exits immediately, check:
 - the full path in **Program/script** and the quoting of **Add arguments**;
 - that `C:\ProgramData\hy2tun\client.yaml` is readable by the account that
   runs the task (SYSTEM by default);
-- that the server address resolves and UDP is not blocked by the network.
+- that the server address resolves and UDP is not blocked by the network;
+- for `tcp` or `hy2+tcp`, that TCP to the same numeric server port is not
+  blocked and the server has a TCP listener;
+- that a pure `tcp` configuration uses one numeric port without ranges or
+  `transport.udp` hop intervals.

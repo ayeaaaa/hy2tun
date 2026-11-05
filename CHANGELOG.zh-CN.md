@@ -4,6 +4,66 @@
 
 本文件记录项目的重要变更。
 
+## v1.6.0 - 2026-11-05
+
+### 新增
+
+- 为 hy2tun 控制流、反向 TCP 流、反向 UDP 映射和正向代理流增加 TLS 1.3
+  TCP 传输。它复用现有的 HY2 密码/control token，以及现有的 `tls.ca`、
+  `tls.sni`、`tls.insecure` 和 `tls.pin_sha256` 策略。TCP 传输要求
+  TLS 1.3；即使启用不安全验证，证书 pin 仍会校验。
+- 三种传输模式：`hy2`（默认）、`tcp` 和 `hy2+tcp`。服务端模式是全局的；
+  多服务端客户端的每个服务端条目可独立设置模式。纯模式互斥：`hy2` 不启动
+  TCP 监听或回退，`tcp` 不启动 UDP HY2 监听，并拒绝范围、端口列表和 UDP
+  跳跃间隔。
+- `hy2+tcp` 的同端口双监听：UDP HY2 监听和 TCP 监听使用同一数字端口，但
+  是独立 socket。TCP 端点取第一个端口项，在使用范围或端口跳跃时保持输入
+  顺序。防火墙必须同时放行该端口的 TCP 和 UDP。
+- `hy2+tcp` 的自动回退与恢复：10 秒连接/握手预算、10 秒心跳、30 秒会话
+  死亡超时、每 30 秒探测一次并带 ±20% 抖动；只有在连续三次成功探测且在
+  TCP 上保持至少 60 秒后才回切。
+- TCP 活跃时，UDP 映射使用 UDP over TCP 帧，载荷上限 4096 字节，每条映射
+  有固定的 32 包发送队列。可靠有序会增加延迟和队头阻塞代价，队列压力下
+  数据报可能被丢弃。
+- 服务端和客户端 Web 模式控制、多服务端客户端的按服务端控制、LuCI 模式
+  字段，以及 `hy2tun config get|set` 的 `mode` 支持。
+- 诊断信息：配置模式、实际传输、切换原因和次数、最近切换、最近探测、探测
+  错误、服务端记录的最后实际传输，以及客户端指标
+  `hy2tun_client_transport_active` 和
+  `hy2tun_client_transport_switches_total`。
+
+### 变更
+
+- `luci-app-hy2tun` 现在依赖 `hy2tun (>= 1.6.0)`。
+- 没有 `mode` 的配置继续默认 `hy2`；加载或升级不要求添加该字段。默认的
+  `server.yaml`、`client.yaml` 和 `client-multi.yaml` 示例仍然省略 `mode`；
+  LuCI 包的基础示例保留显式 mode 字段。
+- 改变活跃传输的模式切换会关闭当前会话：现有 TCP 和代理连接断开，UDP 映射
+  状态关闭，排队的数据报可能丢失。不提供无缝迁移、恰好一次投递或重放。
+- 只有可识别的网络故障会触发回退。认证、TLS、证书 pin、协议、配置、队列
+  已满和取消错误会直接上报，绝不会降级到 TCP。
+
+### 兼容性
+
+- 现有 `hy2` 部署和标准 Hysteria 2 客户端不受影响。`hy2+tcp` 保留 HY2；
+  纯 `tcp` 服务端不接受标准 Hysteria 2 客户端。
+- 不支持模式的旧客户端继续使用 HY2，无法回退。新的 `hy2+tcp` 客户端连接
+  旧的纯 HY2 服务端时仍使用 HY2；如果 UDP 被阻断，需要先升级服务端并开放
+  TCP 才能回退。
+- TCP 传输是 hy2tun 自有协议，不与 FRP 线协议兼容；本版本没有增加 P2P、
+  Hysteria Realms 或 UDP 打洞。
+
+### 验证
+
+- 本地门槛：`go test ./... -count=1`、`go test -race ./... -count=1`、
+  `go vet ./...`、`staticcheck ./...`、`make build`、
+  `scripts/openwrt/test-ipk.sh` 和
+  `scripts/openwrt/test-luci-controller.sh`。
+- Linux amd64/arm64/arm/mips/mipsle 和 Windows amd64 交叉构建。
+- Linux arm64/arm/mips/mipsle 的本地 QEMU user-mode 检查：`-version`、
+  `--check-config` 和真实 TLS/TCP 帧往返测试。OpenWrt 真机验收仍属外部
+  检查项，仅凭单元测试不声称已完成。
+
 ## v1.5.4 - 2026-10-31
 
 ### 新增
