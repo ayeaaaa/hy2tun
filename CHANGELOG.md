@@ -30,6 +30,9 @@ All notable changes to this project are documented here.
   payload limit and a bounded 32-packet per-mapping send queue. Reliable
   ordering adds latency and head-of-line cost, and datagrams may be dropped
   under queue pressure.
+- Fallback eligibility includes a local firewall or sandbox rejecting UDP I/O
+  with `EPERM`/`EACCES`; filesystem permission errors and authentication, TLS,
+  certificate-pin, and protocol failures remain non-fallback.
 - Server and client Web mode controls, per-server controls for multi-server
   clients, a LuCI mode field, and `hy2tun config get|set` mode support.
 - Diagnostics for the configured mode, actual transport, switch reason and

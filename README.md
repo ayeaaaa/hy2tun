@@ -191,9 +191,11 @@ In `hy2+tcp`, each HY2 attempt has a 10-second connect/handshake budget. An
 established control session sends a heartbeat every 10 seconds and is treated
 as dead after 30 seconds without a valid response. Only recognized network
 failures trigger fallback: dial timeouts, connection refused/unreachable/reset,
-QUIC or transport loss, and heartbeat timeout. Authentication, TLS certificate,
+QUIC or transport loss, heartbeat timeout, and a local firewall or sandbox
+rejecting UDP I/O with `EPERM`/`EACCES`. Authentication, TLS certificate,
 certificate-pin, protocol, configuration, queue-full, and cancellation errors
-are surfaced and never cause a silent downgrade to TCP.
+are surfaced and never cause a silent downgrade to TCP. A filesystem permission
+error (for example an unreadable certificate) is not a network failure.
 
 While TCP is active, the client probes HY2 every 30 seconds with ±20% jitter
 (roughly 24–36 seconds). Recovery requires three consecutive successful probes

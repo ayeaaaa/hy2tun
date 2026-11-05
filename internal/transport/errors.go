@@ -79,6 +79,13 @@ func FallbackAllowed(err error) bool {
 	if sessionDenied {
 		return false
 	}
+	// A local firewall or sandbox can reject a UDP send/read with EPERM or
+	// EACCES. That is a network-path failure, not a credential/TLS/protocol
+	// failure. Scope the classification to net.OpError I/O so file permission
+	// errors (for example an unreadable certificate) cannot trigger fallback.
+	if networkPermissionDenied(err) {
+		return true
+	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) ||
 		sessionAllowed || hasError[*quic.StatelessResetError](err) {
 		return true
@@ -93,6 +100,24 @@ func FallbackAllowed(err error) bool {
 		}
 	}
 	return false
+}
+
+// networkPermissionDenied recognizes a local network I/O denial. It must not
+// treat an unrelated filesystem EACCES/EPERM as a fallback-eligible failure.
+func networkPermissionDenied(err error) bool {
+	if !errors.Is(err, syscall.EPERM) && !errors.Is(err, syscall.EACCES) {
+		return false
+	}
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) || opErr == nil {
+		return false
+	}
+	switch opErr.Op {
+	case "read", "write", "readfrom", "writeto", "send", "recv", "sendmsg", "recvmsg":
+		return true
+	default:
+		return false
+	}
 }
 
 // Inspect every wrapped/joined branch, not just errors.As's first match: an

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"syscall"
 	"testing"
 
@@ -52,6 +53,10 @@ func TestFallbackAllowed(t *testing.T) {
 		{"QUIC idle timeout", &quic.IdleTimeoutError{}, true},
 		{"QUIC reset", &quic.StatelessResetError{}, true},
 		{"refused", &net.OpError{Op: "dial", Net: "udp", Err: syscall.ECONNREFUSED}, true},
+		{"local send permission denial", &net.OpError{Op: "write", Net: "udp", Err: os.NewSyscallError("sendmsg", syscall.EPERM)}, true},
+		{"local read permission denial", &net.OpError{Op: "read", Net: "udp", Err: os.NewSyscallError("recvmsg", syscall.EACCES)}, true},
+		{"file permission denial", &os.PathError{Op: "open", Path: "cert.pem", Err: syscall.EACCES}, false},
+		{"bare permission denial", syscall.EPERM, false},
 		{"network unreachable", &net.OpError{Op: "dial", Err: syscall.ENETUNREACH}, true},
 		{"host unreachable", syscall.EHOSTUNREACH, true},
 		{"connection reset", syscall.ECONNRESET, true},
