@@ -88,7 +88,7 @@ type BasicConfig struct {
 func isKnownTopLevelKey(key string) bool {
 	switch key {
 	case "mode", "server", "servers", "auth", "tls", "obfs", "bandwidth", "transport",
-		"control", "client", "mappings", "web", "proxy", "log", "credentials":
+		"failover", "control", "client", "mappings", "web", "proxy", "log", "credentials":
 		return true
 	default:
 		return false
@@ -172,7 +172,7 @@ func isAdvancedConfig(cfg *ClientConfig) bool {
 	if cfg.Bandwidth != (BandwidthConfig{}) {
 		return true
 	}
-	if cfg.Transport != nil {
+	if cfg.Transport != nil || cfg.Failover != nil {
 		return true
 	}
 	if cfg.Proxy.Enabled || cfg.Proxy.SOCKS5 != "" || cfg.Proxy.SOCKS5Auth != "" ||
@@ -227,6 +227,7 @@ func cloneClientConfig(cfg *ClientConfig) *ClientConfig {
 	}
 	out := *cfg
 	out.Transport = cloneTransport(cfg.Transport)
+	out.Failover = cloneFailover(cfg.Failover)
 	out.Mappings = append([]Mapping(nil), cfg.Mappings...)
 	if cfg.Servers != nil {
 		out.Servers = make([]ClientServerConfig, len(cfg.Servers))
@@ -246,6 +247,7 @@ func basicConfigCopy(cfg *ClientConfig) *ClientConfig {
 	out.Obfs = ObfsConfig{}
 	out.Bandwidth = BandwidthConfig{}
 	out.Transport = nil
+	out.Failover = nil
 	out.Proxy = ProxyConfig{}
 	out.Web.TLS = WebTLSConfig{}
 	out.Web.TrustProxy = false

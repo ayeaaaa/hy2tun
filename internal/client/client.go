@@ -157,6 +157,9 @@ func newClient(cfg *config.ClientConfig, log *slog.Logger, skipProxyBind bool) (
 }
 
 func newClientWithRuntime(cfg *config.ClientConfig, log *slog.Logger, skipProxyBind bool, opts RuntimeOptions) (*Client, error) {
+	if cfg != nil && opts.Policy == (FailoverPolicy{}) {
+		opts.Policy = policyFromConfig(cfg)
+	}
 	opts = opts.defaults()
 	if cfg == nil {
 		return nil, fmt.Errorf("client config is nil")

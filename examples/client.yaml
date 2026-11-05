@@ -40,6 +40,17 @@ server: "sg.example.com:443"
 # drops existing TCP/proxy connections and may lose UDP packets; there is no
 # seamless or exactly-once migration.
 # mode: "hy2+tcp"
+#
+# Optional per-server failover tuning. Omit to use the conservative defaults:
+# connect 10s, heartbeat 10s, dead timeout 30s, probe 30s, TCP hold 60s,
+# 3 recovery successes. The commented values are the faster middle profile.
+# failover:
+#   connect_timeout: "8s"
+#   heartbeat_interval: "5s"
+#   heartbeat_timeout: "20s"
+#   probe_interval: "15s"
+#   min_tcp_hold: "30s"
+#   recovery_successes: 3
 
 # The HY2 password from the server's auth section. For userpass auth use
 # "user:password" instead.

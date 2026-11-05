@@ -25,7 +25,33 @@ type FailoverPolicy struct {
 }
 
 func DefaultFailoverPolicy() FailoverPolicy {
-	return FailoverPolicy{10 * time.Second, 10 * time.Second, 30 * time.Second, 30 * time.Second, 60 * time.Second, 3}
+	f := config.FailoverConfig{}.Effective()
+	return FailoverPolicy{
+		ConnectTimeout:    time.Duration(f.ConnectTimeout),
+		HeartbeatInterval: time.Duration(f.HeartbeatInterval),
+		HeartbeatTimeout:  time.Duration(f.HeartbeatTimeout),
+		ProbeInterval:     time.Duration(f.ProbeInterval),
+		MinTCPHold:        time.Duration(f.MinTCPHold),
+		RecoverySuccesses: f.RecoverySuccesses,
+	}
+}
+
+// policyFromConfig applies one server's optional failover settings. A nil
+// section keeps the conservative defaults; RuntimeOptions.Policy remains the
+// explicit test/runtime override.
+func policyFromConfig(cfg *config.ClientConfig) FailoverPolicy {
+	if cfg == nil || cfg.Failover == nil {
+		return DefaultFailoverPolicy()
+	}
+	f := cfg.Failover.Effective()
+	return FailoverPolicy{
+		ConnectTimeout:    time.Duration(f.ConnectTimeout),
+		HeartbeatInterval: time.Duration(f.HeartbeatInterval),
+		HeartbeatTimeout:  time.Duration(f.HeartbeatTimeout),
+		ProbeInterval:     time.Duration(f.ProbeInterval),
+		MinTCPHold:        time.Duration(f.MinTCPHold),
+		RecoverySuccesses: f.RecoverySuccesses,
+	}
 }
 
 type RuntimeOptions struct {

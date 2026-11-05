@@ -38,6 +38,7 @@ type ClientConfig struct {
 	Obfs      ObfsConfig             `yaml:"obfs" json:"obfs"`
 	Bandwidth BandwidthConfig        `yaml:"bandwidth" json:"bandwidth"`
 	Transport *ClientTransportConfig `yaml:"transport,omitempty" json:"transport,omitempty"`
+	Failover  *FailoverConfig        `yaml:"failover,omitempty" json:"failover,omitempty"`
 	Control   ControlConfig          `yaml:"control" json:"control"`
 	Client    ClientIdentity         `yaml:"client" json:"client"`
 	Mappings  []Mapping              `yaml:"mappings" json:"mappings"`
@@ -128,6 +129,11 @@ func (c *ClientConfig) Validate() error {
 func (c *ClientConfig) validateSingleServer() error {
 	if err := c.Mode.Validate(); err != nil {
 		return err
+	}
+	if c.Failover != nil {
+		if err := c.Failover.Validate("failover"); err != nil {
+			return err
+		}
 	}
 	_, _, hopping, err := parseClientServer(c.Server)
 	if err != nil {

@@ -29,6 +29,9 @@ do not need a database, Node.js, a CDN, or any runtime dependency.
 - Optional TLS 1.3 TCP transport and automatic HY2-to-TCP fallback for networks
   that block or throttle UDP; see
   [Transport modes and TCP fallback](#transport-modes-and-tcp-fallback).
+- Per-server failover tuning for `hy2+tcp`: connect, heartbeat, dead-session,
+  probe, TCP-hold, and recovery-success thresholds can be set independently
+  for each server.
 - FRP-style reverse TCP mappings: a server public port forwards to a TCP
   service reachable from the client.
 - Reverse UDP mappings using native HY2 datagrams when HY2 is active, not a
@@ -204,6 +207,38 @@ While TCP is active, the client probes HY2 every 30 seconds with ±20% jitter
 performs a normal control handshake; only a successful candidate replaces the
 TCP session. A failed probe or candidate resets the success count. Probing is
 disabled outside `hy2+tcp`.
+
+#### Per-server failover tuning
+
+`failover` is optional. Set it on a single-server config, or on each
+`servers[]` entry of a multi-server client. Omitted fields keep the
+conservative defaults. Changes are loaded at client startup; restart the
+client after editing the file.
+
+| Field | Default | Middle profile |
+| --- | --- | --- |
+| `connect_timeout` | `10s` | `8s` |
+| `heartbeat_interval` | `10s` | `5s` |
+| `heartbeat_timeout` | `30s` | `20s` |
+| `probe_interval` | `30s` | `15s` |
+| `min_tcp_hold` | `60s` | `30s` |
+| `recovery_successes` | `3` | `3` |
+
+```yaml
+failover:
+  connect_timeout: "8s"
+  heartbeat_interval: "5s"
+  heartbeat_timeout: "20s"
+  probe_interval: "15s"
+  min_tcp_hold: "30s"
+  recovery_successes: 3
+```
+
+Shorter timings switch faster but are more likely to treat a transient
+network stall as a failure and to flap between transports. A switch drops
+existing TCP/proxy connections and may lose UDP packets. Keep the defaults
+when the path is unstable; use the middle profile when faster fallback and
+recovery matter more than avoiding an occasional unnecessary switch.
 
 ### Switching boundary
 

@@ -26,6 +26,14 @@ log:
 servers:
   - name: "us"
     # mode: "hy2+tcp"       # optional; omit for HY2
+    # Per-server failover tuning is optional. This is the middle profile:
+    # failover:
+    #   connect_timeout: "8s"
+    #   heartbeat_interval: "5s"
+    #   heartbeat_timeout: "20s"
+    #   probe_interval: "15s"
+    #   min_tcp_hold: "30s"
+    #   recovery_successes: 3
     server: "us.example.com:24443"
     auth: "change-me-us-password"
     tls:
@@ -51,6 +59,7 @@ servers:
 
   - name: "sg"
     # mode: "tcp"           # independent of the us entry; omit for HY2
+    # This entry keeps the default failover timings; failover is per server.
     server: "sg.example.com:24443"
     auth: "change-me-sg-password"
     tls:

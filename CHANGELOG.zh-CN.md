@@ -4,6 +4,23 @@
 
 本文件记录项目的重要变更。
 
+## v1.6.2 - 2026-11-05
+
+### 新增
+
+- `hy2+tcp` 支持按服务端调整 `failover`：`connect_timeout`、
+  `heartbeat_interval`、`heartbeat_timeout`、`probe_interval`、
+  `min_tcp_hold` 和 `recovery_successes`。单服务端写在顶层；多服务端写在
+  每个 `servers[]` 条目里，互不影响。省略的字段使用保守默认值。
+- 文档增加更快的中间档：连接 `8s`、心跳 `5s`、判死 `20s`、探测 `15s`、
+  TCP 保持 `30s`、连续成功 3 次。
+
+### 变更
+
+- 基础配置编辑器把 `failover` 识别为已知高级字段并原样保留，不在基础表单
+  中展示。
+- 示例和 README 增加按服务端调整及中间档说明。
+
 ## v1.6.1 - 2026-11-05
 
 ### 修复

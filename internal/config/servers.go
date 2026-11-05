@@ -26,6 +26,7 @@ type ClientServerConfig struct {
 	Obfs        ObfsConfig             `yaml:"obfs" json:"obfs"`
 	Bandwidth   BandwidthConfig        `yaml:"bandwidth" json:"bandwidth"`
 	Transport   *ClientTransportConfig `yaml:"transport,omitempty" json:"transport,omitempty"`
+	Failover    *FailoverConfig        `yaml:"failover,omitempty" json:"failover,omitempty"`
 	Control     ControlConfig          `yaml:"control" json:"control"`
 	Client      ClientIdentity         `yaml:"client" json:"client"`
 	Credentials CredentialsConfig      `yaml:"credentials" json:"credentials"`
@@ -62,6 +63,7 @@ func (c *ClientConfig) ServerConfigs() []ClientServerConfig {
 		Obfs:        c.Obfs,
 		Bandwidth:   c.Bandwidth,
 		Transport:   cloneTransport(c.Transport),
+		Failover:    cloneFailover(c.Failover),
 		Control:     c.Control,
 		Client:      c.Client,
 		Credentials: c.Credentials,
@@ -72,6 +74,7 @@ func (c *ClientConfig) ServerConfigs() []ClientServerConfig {
 
 func (s ClientServerConfig) clone() ClientServerConfig {
 	s.Transport = cloneTransport(s.Transport)
+	s.Failover = cloneFailover(s.Failover)
 	s.Mappings = append([]Mapping(nil), s.Mappings...)
 	return s
 }
@@ -98,6 +101,7 @@ func (s ClientServerConfig) ToClientConfig(web WebConfig, log LogConfig, path st
 		Obfs:        s.Obfs,
 		Bandwidth:   s.Bandwidth,
 		Transport:   cloneTransport(s.Transport),
+		Failover:    cloneFailover(s.Failover),
 		Control:     s.Control,
 		Client:      s.Client,
 		Mappings:    append([]Mapping(nil), s.Mappings...),
@@ -140,7 +144,7 @@ func (c *ClientConfig) validateMultiServer() error {
 func (c *ClientConfig) legacyFieldsSet() bool {
 	return c.Mode != "" || c.Server != "" || c.Auth != "" || c.TLS != (ClientTLSConfig{}) ||
 		c.Obfs != (ObfsConfig{}) || c.Bandwidth != (BandwidthConfig{}) ||
-		c.Transport != nil || c.Control != (ControlConfig{}) ||
+		c.Transport != nil || c.Failover != nil || c.Control != (ControlConfig{}) ||
 		c.Client != (ClientIdentity{}) || len(c.Mappings) > 0 ||
 		c.Proxy != (ProxyConfig{}) || c.Credentials != (CredentialsConfig{})
 }
@@ -171,6 +175,11 @@ func (s ClientServerConfig) validate(index int) error {
 	}
 	if err := s.Mode.Validate(); err != nil {
 		return fmt.Errorf("%s.mode: %w", field, err)
+	}
+	if s.Failover != nil {
+		if err := s.Failover.Validate(field + ".failover"); err != nil {
+			return err
+		}
 	}
 	_, _, hopping, err := parseClientServer(s.Server)
 	if err != nil {

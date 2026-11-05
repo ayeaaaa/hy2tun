@@ -28,6 +28,8 @@ Node.js、CDN 或任何运行时依赖。
 - 标准 HY2 TCP/UDP 代理服务端，兼容官方 Hysteria 2 客户端。
 - 可选 TLS 1.3 TCP 传输，以及 UDP 被阻断/限速时从 HY2 自动回退到 TCP；
   见 [传输模式与 TCP 回退](#传输模式与-tcp-回退)。
+- `hy2+tcp` 支持按服务端调整回退时序：连接、心跳、判死、探测、TCP 保持和
+  恢复成功次数都可以每个服务端独立设置。
 - FRP 风格的反向 TCP 映射：服务端公网端口转发到客户端可达的 TCP 服务。
 - HY2 活跃时使用 HY2 原生数据报的反向 UDP 映射，不经过可靠流，因此实时 UDP
   不会被队头阻塞。TCP 回退则把 UDP 封装为 UDP over TCP，并接受其延迟代价。
@@ -169,6 +171,35 @@ TCP 活跃期间，客户端每 30 秒探测一次 HY2，并带 ±20% 抖动（�
 恢复需要连续三次成功探测**且**在 TCP 上至少保持 60 秒。之后会建立独立的
 HY2 候选会话并执行正常控制握手；只有候选成功才会替换 TCP 会话。探测或候选
 失败会重置成功计数。非 `hy2+tcp` 模式不执行探测。
+
+#### 按服务端调整回退时序
+
+`failover` 是可选项。单服务端配置写在顶层；多服务端配置写在每个
+`servers[]` 条目里。省略的字段使用保守默认值。修改后需要重启客户端才会
+生效。
+
+| 字段 | 默认值 | 中间档 |
+| --- | --- | --- |
+| `connect_timeout` | `10s` | `8s` |
+| `heartbeat_interval` | `10s` | `5s` |
+| `heartbeat_timeout` | `30s` | `20s` |
+| `probe_interval` | `30s` | `15s` |
+| `min_tcp_hold` | `60s` | `30s` |
+| `recovery_successes` | `3` | `3` |
+
+```yaml
+failover:
+  connect_timeout: "8s"
+  heartbeat_interval: "5s"
+  heartbeat_timeout: "20s"
+  probe_interval: "15s"
+  min_tcp_hold: "30s"
+  recovery_successes: 3
+```
+
+时间越短切得越快，但更容易把短暂网络抖动当成故障，也更容易在两种传输之间
+来回切。每次切换都会断开现有 TCP/代理连接，UDP 可能丢包。线路不稳定时建议
+保留默认值；更看重快速回退/恢复时可以用中间档。
 
 ### 切换边界
 

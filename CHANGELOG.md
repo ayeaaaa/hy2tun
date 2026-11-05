@@ -4,6 +4,24 @@
 
 All notable changes to this project are documented here.
 
+## v1.6.2 - 2026-11-05
+
+### Added
+
+- Per-server `failover` tuning for `hy2+tcp`: `connect_timeout`,
+  `heartbeat_interval`, `heartbeat_timeout`, `probe_interval`,
+  `min_tcp_hold`, and `recovery_successes`. Single-server clients set it at
+  the top level; multi-server clients set it independently under each
+  `servers[]` entry. Omitted fields keep the conservative defaults.
+- Documented the faster middle profile: `8s` connect, `5s` heartbeat, `20s`
+  dead timeout, `15s` probe, `30s` TCP hold, and 3 recovery successes.
+
+### Changed
+
+- The basic config editor recognizes `failover` as a known advanced key and
+  preserves it without exposing it in the basic form.
+- Examples and README document the per-server tuning and the middle profile.
+
 ## v1.6.1 - 2026-11-05
 
 ### Fixed
