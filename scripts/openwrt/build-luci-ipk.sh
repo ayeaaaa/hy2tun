@@ -38,7 +38,7 @@ Architecture: all
 Maintainer: hy2tun contributors
 Section: luci
 Priority: optional
-Depends: luci-base, luci-compat, hy2tun (>= 1.5.0)
+Depends: luci-base, luci-compat, hy2tun (>= 1.6.0)
 Installed-Size: $(du -sk "$pkg" | awk '{print $1}')
 Description: LuCI configuration page for the hy2tun client
  Adds a Services -> hy2tun page with service status, a basic

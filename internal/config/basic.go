@@ -5,7 +5,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -51,30 +53,33 @@ func (e *BasicError) Error() string {
 // booleans. Values are the raw YAML values, except credential_generation,
 // which is normalized from 0 to 1 for display.
 type BasicConfig struct {
-	Exists               bool      `json:"exists"`
-	Multi                bool      `json:"multi"`
-	Revision             string    `json:"revision"`
-	Valid                bool      `json:"valid"`
-	ValidationError      string    `json:"validation_error"`
-	AdvancedError        bool      `json:"advanced_error"`
-	UnknownFields        bool      `json:"unknown_fields"`
-	Server               string    `json:"server"`
-	ServerIdentity       string    `json:"server_identity"`
-	ServerLocked         bool      `json:"server_locked"`
-	CredentialGeneration int64     `json:"credential_generation"`
-	AuthSet              bool      `json:"auth_set"`
-	ControlTokenSet      bool      `json:"control_token_set"`
-	TLSSNI               string    `json:"tls_sni"`
-	TLSInsecure          bool      `json:"tls_insecure"`
-	ClientName           string    `json:"client_name"`
-	Mappings             []Mapping `json:"mappings"`
-	WebListen            string    `json:"web_listen"`
-	WebUsername          string    `json:"web_username"`
-	PasswordSet          bool      `json:"password_set"`
-	WebTLS               bool      `json:"web_tls"`
-	Advanced             bool      `json:"advanced"`
-	LogLevel             string    `json:"log_level"`
-	LogFile              string    `json:"log_file"`
+	Exists          bool   `json:"exists"`
+	Multi           bool   `json:"multi"`
+	Revision        string `json:"revision"`
+	Valid           bool   `json:"valid"`
+	ValidationError string `json:"validation_error"`
+	AdvancedError   bool   `json:"advanced_error"`
+	UnknownFields   bool   `json:"unknown_fields"`
+	// Mode is the effective transport mode for the single-server form. It is
+	// empty for multi-server configs, which have no single mode.
+	Mode                 TransportMode `json:"mode"`
+	Server               string        `json:"server"`
+	ServerIdentity       string        `json:"server_identity"`
+	ServerLocked         bool          `json:"server_locked"`
+	CredentialGeneration int64         `json:"credential_generation"`
+	AuthSet              bool          `json:"auth_set"`
+	ControlTokenSet      bool          `json:"control_token_set"`
+	TLSSNI               string        `json:"tls_sni"`
+	TLSInsecure          bool          `json:"tls_insecure"`
+	ClientName           string        `json:"client_name"`
+	Mappings             []Mapping     `json:"mappings"`
+	WebListen            string        `json:"web_listen"`
+	WebUsername          string        `json:"web_username"`
+	PasswordSet          bool          `json:"password_set"`
+	WebTLS               bool          `json:"web_tls"`
+	Advanced             bool          `json:"advanced"`
+	LogLevel             string        `json:"log_level"`
+	LogFile              string        `json:"log_file"`
 }
 
 // isKnownTopLevelKey reports whether key is understood by ClientConfig. Any
@@ -82,7 +87,7 @@ type BasicConfig struct {
 // edit such files.
 func isKnownTopLevelKey(key string) bool {
 	switch key {
-	case "server", "servers", "auth", "tls", "obfs", "bandwidth", "transport",
+	case "mode", "server", "servers", "auth", "tls", "obfs", "bandwidth", "transport",
 		"control", "client", "mappings", "web", "proxy", "log", "credentials":
 		return true
 	default:
@@ -197,6 +202,23 @@ func serverLocked(cfg *ClientConfig) bool {
 		cfg.Credentials.Generation > 1
 }
 
+// basicServerIdentity returns the identity used to decide whether a basic save
+// moves to a different server. In TCP mode only the first port is dialed, so
+// trimming or changing unused port ranges is not a server migration.
+func basicServerIdentity(value string, mode TransportMode) (string, error) {
+	if mode.Effective() != ModeTCP {
+		return ServerIdentity(value)
+	}
+	host, ranges, _, err := parseClientServer(value)
+	if err != nil {
+		return "", err
+	}
+	if len(ranges) == 0 {
+		return "", fmt.Errorf("server must include a port")
+	}
+	return ServerIdentity(net.JoinHostPort(host, strconv.Itoa(ranges[0].Start)))
+}
+
 // cloneClientConfig copies the slices and nested pointers that Validate
 // mutates, keeping the caller's raw values intact.
 func cloneClientConfig(cfg *ClientConfig) *ClientConfig {
@@ -283,6 +305,7 @@ func GetBasic(path string) (*BasicConfig, error) {
 				ClientName:           "openwrt",
 				WebListen:            DefaultClientWebListen,
 				WebUsername:          "admin",
+				Mode:                 ModeHY2,
 				CredentialGeneration: 1,
 				Mappings:             []Mapping{},
 			}, nil
@@ -316,6 +339,7 @@ func GetBasic(path string) (*BasicConfig, error) {
 	}
 
 	out.UnknownFields = hasUnknownTopLevelKeys(data)
+	out.Mode = cfg.Mode.Effective()
 	out.Server = cfg.Server
 	if identity, err := ServerIdentity(cfg.Server); err == nil {
 		out.ServerIdentity = identity
@@ -349,20 +373,22 @@ func webTLSConfigured(web WebConfig) bool {
 // BasicUpdate contains the editable basic configuration fields. Pointer fields
 // distinguish a missing JSON field from an explicitly empty value; a nil
 // pointer is rejected for required fields. Auth, ControlToken, and WebPassword
-// preserve the existing secret when nil or empty.
+// preserve the existing secret when nil or empty. A nil Mode preserves the
+// existing mode; a new configuration with a nil Mode omits the YAML field.
 type BasicUpdate struct {
-	ExpectedRevision   string     `json:"expected_revision"`
-	Server             *string    `json:"server"`
-	Auth               *string    `json:"auth"`
-	ControlToken       *string    `json:"control_token"`
-	TLSSNI             *string    `json:"tls_sni"`
-	TLSInsecure        *bool      `json:"tls_insecure"`
-	ClientName         *string    `json:"client_name"`
-	Mappings           *[]Mapping `json:"mappings"`
-	WebListen          *string    `json:"web_listen"`
-	WebUsername        *string    `json:"web_username"`
-	WebPassword        *string    `json:"web_password"`
-	WebPasswordConfirm *string    `json:"web_password_confirm"`
+	ExpectedRevision   string         `json:"expected_revision"`
+	Mode               *TransportMode `json:"mode"`
+	Server             *string        `json:"server"`
+	Auth               *string        `json:"auth"`
+	ControlToken       *string        `json:"control_token"`
+	TLSSNI             *string        `json:"tls_sni"`
+	TLSInsecure        *bool          `json:"tls_insecure"`
+	ClientName         *string        `json:"client_name"`
+	Mappings           *[]Mapping     `json:"mappings"`
+	WebListen          *string        `json:"web_listen"`
+	WebUsername        *string        `json:"web_username"`
+	WebPassword        *string        `json:"web_password"`
+	WebPasswordConfirm *string        `json:"web_password_confirm"`
 }
 
 // SetBasicOptions carries hooks that run while the configuration lock is held.
@@ -494,11 +520,15 @@ func applyBasicUpdate(cfg *ClientConfig, update *BasicUpdate, exists bool) error
 	oldToken := cfg.Control.Token
 
 	newServer := *update.Server
-	newIdentity, err := ServerIdentity(newServer)
+	newMode := cfg.Mode
+	if update.Mode != nil {
+		newMode = *update.Mode
+	}
+	newIdentity, err := basicServerIdentity(newServer, newMode)
 	if err != nil {
 		return basicValidation("server: %v", err)
 	}
-	oldIdentity, oldIdentityErr := ServerIdentity(oldServer)
+	oldIdentity, oldIdentityErr := basicServerIdentity(oldServer, newMode)
 	migrated := oldIdentityErr != nil || oldIdentity != newIdentity
 
 	if migrated && exists {
@@ -558,6 +588,9 @@ func applyBasicUpdate(cfg *ClientConfig, update *BasicUpdate, exists bool) error
 		}
 	}
 	cfg.Server = newServer
+	if update.Mode != nil {
+		cfg.Mode = *update.Mode
+	}
 
 	if update.TLSSNI != nil && !(migrated && exists && *update.TLSSNI == oldSNI) {
 		cfg.TLS.SNI = *update.TLSSNI

@@ -265,6 +265,58 @@ func TestRunConfigSetSuccess(t *testing.T) {
 	require.NotContains(t, out.String(), "secret-auth")
 }
 
+func TestRunConfigSetPreservesModeWhenAbsent(t *testing.T) {
+	old := serviceRunning
+	serviceRunning = func() (bool, error) { return false, nil }
+	t.Cleanup(func() { serviceRunning = old })
+
+	path := writeCLIConfigBody(t, "mode: \"hy2+tcp\"\n"+cliValidConfig)
+	var out, errOut bytes.Buffer
+	code := runConfig([]string{"get", "-c", path}, strings.NewReader(""), &out, &errOut)
+	require.Equal(t, 0, code)
+	require.Contains(t, out.String(), `"mode":"hy2+tcp"`)
+
+	// The pre-mode CLI payload has no mode field. It must preserve auto.
+	payload := cliSetPayload(cliRevision(t, path))
+	out.Reset()
+	errOut.Reset()
+	code = runConfig([]string{"set", "-c", path}, strings.NewReader(payload), &out, &errOut)
+	require.Equal(t, 0, code, errOut.String())
+
+	saved, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Contains(t, string(saved), "mode: hy2+tcp")
+}
+
+func TestRunConfigSetModeRoundTripAndRejectsInvalid(t *testing.T) {
+	old := serviceRunning
+	serviceRunning = func() (bool, error) { return false, nil }
+	t.Cleanup(func() { serviceRunning = old })
+
+	path := writeCLIConfig(t)
+	payload := fmt.Sprintf(`{"expected_revision":%q,"server":"host:443","client_name":"router","mappings":[],"web_listen":"","web_username":"","mode":"tcp"}`, cliRevision(t, path))
+	var out, errOut bytes.Buffer
+	code := runConfig([]string{"set", "-c", path}, strings.NewReader(payload), &out, &errOut)
+	require.Equal(t, 0, code, errOut.String())
+
+	var getOut, getErr bytes.Buffer
+	code = runConfig([]string{"get", "-c", path}, strings.NewReader(""), &getOut, &getErr)
+	require.Equal(t, 0, code, getErr.String())
+	require.Contains(t, getOut.String(), `"mode":"tcp"`)
+
+	before, err := os.ReadFile(path)
+	require.NoError(t, err)
+	payload = fmt.Sprintf(`{"expected_revision":%q,"server":"host:443","client_name":"router","mappings":[],"web_listen":"","web_username":"","mode":"hy2+udp"}`, cliRevision(t, path))
+	out.Reset()
+	errOut.Reset()
+	code = runConfig([]string{"set", "-c", path}, strings.NewReader(payload), &out, &errOut)
+	require.Equal(t, 2, code)
+	require.Contains(t, errOut.String(), `"code":"validation"`)
+	after, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+}
+
 func TestRunConfigUnknownCommand(t *testing.T) {
 	var out, errOut bytes.Buffer
 	code := runConfig([]string{"bogus"}, strings.NewReader(""), &out, &errOut)

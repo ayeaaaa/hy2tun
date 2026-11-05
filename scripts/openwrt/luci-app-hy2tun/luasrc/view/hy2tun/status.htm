@@ -141,6 +141,9 @@
 	<p class="cbi-section-descr">
 		配置文件路径：<code>/etc/hy2tun/client.yaml</code>
 	</p>
+	<p class="cbi-section-descr">
+		运行状态在此只读展示；当前实际使用的传输（HY2 或 TCP）请在客户端控制台查看。
+	</p>
 </div>
 
 <div id="hy2tun-form-section" class="cbi-section" hidden>
@@ -155,6 +158,18 @@
 					<input type="text" id="hy2tun-server" class="cbi-input-text" placeholder="example.com:24443" autocomplete="off" />
 					<div id="hy2tun-server-hint" class="cbi-value-description"></div>
 					<div id="hy2tun-migration" class="hy2tun-banner hy2tun-banner-notice" hidden>如果这是不同的服务端，保存时需要重新填写 HY2 认证和 control token。</div>
+				</div>
+			</div>
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="hy2tun-mode">传输模式</label>
+				<div class="cbi-value-field">
+					<select id="hy2tun-mode" class="cbi-input-select">
+						<option value="hy2">仅 HY2（UDP）</option>
+						<option value="tcp">仅 TCP</option>
+						<option value="hy2+tcp">HY2 + TCP 自动切换</option>
+					</select>
+					<div class="cbi-value-description">TCP 使用服务端地址的第一个端口；仅 TCP 模式不支持端口跳跃。实际使用的传输请在客户端控制台查看。</div>
 				</div>
 			</div>
 
@@ -323,6 +338,7 @@
 			server: document.getElementById("hy2tun-server"),
 			serverHint: document.getElementById("hy2tun-server-hint"),
 			migration: document.getElementById("hy2tun-migration"),
+			mode: document.getElementById("hy2tun-mode"),
 			auth: document.getElementById("hy2tun-auth"),
 			authState: document.getElementById("hy2tun-auth-state"),
 			controlToken: document.getElementById("hy2tun-token"),
@@ -441,6 +457,8 @@
 			}
 
 			el.server.value = typeof config.server === "string" ? config.server : "";
+			var mode = typeof config.mode === "string" ? config.mode : "";
+			el.mode.value = mode === "tcp" || mode === "hy2+tcp" ? mode : "hy2";
 			el.auth.value = "";
 			el.controlToken.value = "";
 			el.sni.value = typeof config.tls_sni === "string" ? config.tls_sni : "";
@@ -570,6 +588,7 @@
 			return {
 				expected_revision: state.revision || "",
 				server: el.server.value.trim(),
+				mode: el.mode.value,
 				auth: el.auth.value,
 				control_token: el.controlToken.value,
 				tls_sni: el.sni.value.trim(),
@@ -601,6 +620,9 @@
 			}
 			if (!payload.client_name) {
 				return "请填写客户端名称。";
+			}
+			if (payload.mode !== "hy2" && payload.mode !== "tcp" && payload.mode !== "hy2+tcp") {
+				return "传输模式无效。";
 			}
 
 			// A changed server is only a soft prompt: the backend compares
@@ -846,6 +868,7 @@
 
 			el.server.disabled = !formAvailable || state.running ||
 				!!(config && config.server_locked === true);
+			el.mode.disabled = !formAvailable || state.running;
 			el.auth.disabled = !formAvailable || state.running ||
 				!!(config && config.credential_generation > 1);
 			el.controlToken.disabled = !formAvailable || state.running ||

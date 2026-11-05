@@ -88,6 +88,7 @@ local CONFIG_JSON = [[{
 	"validation_error": "",
 	"advanced_error": false,
 	"unknown_fields": false,
+	"mode": "hy2+tcp",
 	"server": "host:443",
 	"server_identity": "host:443",
 	"server_locked": false,
@@ -465,6 +466,7 @@ local function run()
 	check(body.running == false, "data running")
 	check(body.enabled == false, "data enabled")
 	check(body.config and body.config.revision == "rev1", "data config")
+	check(body.config and body.config.mode == "hy2+tcp", "data config mode")
 	check(body.config_error == "", "data config_error")
 
 	-- data with config failure still returns status and logs.
@@ -525,6 +527,13 @@ local function run()
 		check(call.perm == "600", "nixio.open mode must be 600")
 	end
 	check(chmod_called == false, "controller must not call fs.chmod")
+
+	-- The controller passes the transport mode through unchanged; the view is
+	-- responsible for collecting it.
+	body, status = call_action({ op = "save", payload = '{"server":"host:443","mode":"tcp"}' })
+	check(status == 200 and body.ok == true, "save mode status")
+	check(read_file(STATE .. "/set-input.json") == '{"server":"host:443","mode":"tcp"}',
+		"mode payload passed unchanged")
 
 	-- save succeeds but the read-back fails: report saved=true and config_error.
 	touch("get_fail")

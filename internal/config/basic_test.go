@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"hy2tun/internal/testutil"
 
@@ -1495,4 +1496,214 @@ func TestSetBasicUpdatesTLSSNIAndInsecure(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, cfg.TLS.SNI)
 	require.True(t, cfg.TLS.Insecure)
+}
+
+func TestBasicModePreserveWhenAbsent(t *testing.T) {
+	// An older CLI request has no mode field. It must not silently downgrade
+	// an explicitly configured auto config back to HY2.
+	path := writeTestClientConfig(t, "mode: \"hy2+tcp\"\n"+basicTestValidYAML)
+	got, err := GetBasic(path)
+	require.NoError(t, err)
+	require.Equal(t, ModeAuto, got.Mode)
+
+	update := basicUpdate("host:443", "router", "", "", []Mapping{})
+	update.ExpectedRevision = got.Revision
+	saved, err := SetBasic(path, update, SetBasicOptions{})
+	require.NoError(t, err)
+	require.Equal(t, ModeAuto, saved.Mode)
+
+	cfg, _, err := loadClientForEdit(path)
+	require.NoError(t, err)
+	require.Equal(t, ModeAuto, cfg.Mode)
+}
+
+func TestBasicNewConfigWithoutModeOmitsMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "client.yaml")
+	update := basicUpdate("host:443", "router", "", "", []Mapping{})
+	update.Auth = basicStringPtr("auth-secret")
+	update.ControlToken = basicStringPtr("0123456789abcdef")
+
+	saved, err := SetBasic(path, update, SetBasicOptions{})
+	require.NoError(t, err)
+	require.Equal(t, ModeHY2, saved.Mode)
+
+	raw := string(readBasicTestFile(t, path))
+	require.NotContains(t, raw, "mode:")
+}
+
+func TestBasicModeRoundTrip(t *testing.T) {
+	for _, mode := range []TransportMode{ModeHY2, ModeTCP, ModeAuto} {
+		mode := mode
+		t.Run(string(mode), func(t *testing.T) {
+			path := writeTestClientConfig(t, basicTestValidYAML)
+			got, err := GetBasic(path)
+			require.NoError(t, err)
+			// A legacy config with no mode reports the effective HY2 mode.
+			require.Equal(t, ModeHY2, got.Mode)
+
+			update := basicUpdate("host:443", "router", "", "", []Mapping{})
+			update.ExpectedRevision = got.Revision
+			update.Mode = &mode
+			saved, err := SetBasic(path, update, SetBasicOptions{})
+			require.NoError(t, err)
+			require.Equal(t, mode, saved.Mode)
+
+			cfg, _, err := loadClientForEdit(path)
+			require.NoError(t, err)
+			require.Equal(t, mode, cfg.Mode)
+
+			reloaded, err := GetBasic(path)
+			require.NoError(t, err)
+			require.Equal(t, mode, reloaded.Mode)
+		})
+	}
+
+	path := writeTestClientConfig(t, "mode: \"tcp\"\n"+basicTestValidYAML)
+	before := readBasicTestFile(t, path)
+	got, err := GetBasic(path)
+	require.NoError(t, err)
+
+	invalid := TransportMode("hy2+udp")
+	update := basicUpdate("host:443", "router", "", "", []Mapping{})
+	update.ExpectedRevision = got.Revision
+	update.Mode = &invalid
+	_, err = SetBasic(path, update, SetBasicOptions{})
+	requireBasicErrorCode(t, err, BasicCodeValidation)
+	require.Equal(t, before, readBasicTestFile(t, path))
+
+	cfg, _, err := loadClientForEdit(path)
+	require.NoError(t, err)
+	require.Equal(t, ModeTCP, cfg.Mode)
+}
+
+func TestBasicModeChangeKeepsIdentityAndMappings(t *testing.T) {
+	path := writeTestClientConfig(t, `mode: "hy2"
+server: "host:443"
+auth: "secret-auth"
+control:
+  token: "0123456789abcdef"
+client:
+  id: "client-1"
+  name: "router"
+  revision: 7
+mappings:
+  - id: "map-1"
+    type: tcp
+    remote_port: 8080
+    local_addr: "127.0.0.1:22"
+    enabled: true
+`)
+	got, err := GetBasic(path)
+	require.NoError(t, err)
+	mode := ModeAuto
+	update := basicUpdate("host:443", "router", "", "", got.Mappings)
+	update.ExpectedRevision = got.Revision
+	update.Mode = &mode
+	_, err = SetBasic(path, update, SetBasicOptions{})
+	require.NoError(t, err)
+
+	cfg, _, err := loadClientForEdit(path)
+	require.NoError(t, err)
+	require.Equal(t, ModeAuto, cfg.Mode)
+	require.Equal(t, "client-1", cfg.Client.ID)
+	require.Equal(t, int64(7), cfg.Client.Revision)
+	require.Len(t, cfg.Mappings, 1)
+	require.Equal(t, "map-1", cfg.Mappings[0].ID)
+}
+
+func TestBasicTCPModeServerTrimIsNotMigration(t *testing.T) {
+	// TCP dials only the first port. Dropping the HY2-only range while
+	// switching to TCP must not rotate credentials or reset the client
+	// identity.
+	path := writeTestClientConfig(t, `mode: "hy2+tcp"
+server: "host:443,5000-6000"
+auth: "secret-auth"
+control:
+  token: "0123456789abcdef"
+client:
+  id: "client-1"
+  name: "router"
+  revision: 7
+`)
+	got, err := GetBasic(path)
+	require.NoError(t, err)
+	require.True(t, got.Valid)
+
+	mode := ModeTCP
+	update := basicUpdate("host:443", "router", "", "", []Mapping{})
+	update.ExpectedRevision = got.Revision
+	update.Mode = &mode
+	saved, err := SetBasic(path, update, SetBasicOptions{})
+	require.NoError(t, err)
+	require.Equal(t, ModeTCP, saved.Mode)
+	require.Equal(t, "host:443", saved.Server)
+
+	cfg, _, err := loadClientForEdit(path)
+	require.NoError(t, err)
+	require.Equal(t, "client-1", cfg.Client.ID)
+	require.Equal(t, int64(7), cfg.Client.Revision)
+	require.Equal(t, "secret-auth", cfg.Auth)
+	require.Equal(t, "0123456789abcdef", cfg.Control.Token)
+}
+
+func TestBasicTCPHoppingError(t *testing.T) {
+	path := writeTestClientConfig(t, `mode: "tcp"
+server: "host:443"
+auth: "secret-auth"
+control:
+  token: "0123456789abcdef"
+client:
+  name: "router"
+transport:
+  udp:
+    hop_interval: 10s
+`)
+	before := readBasicTestFile(t, path)
+
+	got, err := GetBasic(path)
+	require.NoError(t, err)
+	require.False(t, got.Valid)
+	require.True(t, got.AdvancedError)
+	require.True(t, got.Advanced)
+
+	mode := ModeTCP
+	update := basicUpdate("host:443", "router", "", "", []Mapping{})
+	update.ExpectedRevision = got.Revision
+	update.Mode = &mode
+	_, err = SetBasic(path, update, SetBasicOptions{})
+	basicErr := requireBasicErrorCode(t, err, BasicCodeAdvanced)
+	require.Contains(t, basicErr.Message, "mode tcp does not support")
+	// The invalid advanced transport must not be silently stripped.
+	require.Equal(t, before, readBasicTestFile(t, path))
+
+	cfg, _, err := loadClientForEdit(path)
+	require.NoError(t, err)
+	require.Equal(t, ModeTCP, cfg.Mode)
+	require.NotNil(t, cfg.Transport)
+	require.NotNil(t, cfg.Transport.UDP)
+	require.Equal(t, time.Duration(10*time.Second), time.Duration(cfg.Transport.UDP.HopInterval))
+}
+
+func TestModeIsKnownTopLevelKey(t *testing.T) {
+	require.True(t, isKnownTopLevelKey("mode"))
+
+	path := writeTestClientConfig(t, "mode: \"tcp\"\n"+basicTestValidYAML)
+	got, err := GetBasic(path)
+	require.NoError(t, err)
+	require.False(t, got.UnknownFields)
+	require.False(t, got.Advanced)
+	require.Equal(t, ModeTCP, got.Mode)
+
+	mode := ModeTCP
+	update := basicUpdate("host:443", "router", "", "", []Mapping{})
+	update.ExpectedRevision = got.Revision
+	update.Mode = &mode
+	saved, err := SetBasic(path, update, SetBasicOptions{})
+	require.NoError(t, err)
+	require.False(t, saved.UnknownFields)
+	require.Equal(t, ModeTCP, saved.Mode)
+
+	cfg, _, err := loadClientForEdit(path)
+	require.NoError(t, err)
+	require.Equal(t, ModeTCP, cfg.Mode)
 }

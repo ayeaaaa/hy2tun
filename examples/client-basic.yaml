@@ -9,6 +9,9 @@
 # console or edit the installed /etc/hy2tun/client.yaml over SSH.
 
 server: "us.example.com:24443"
+# Optional transport mode: "hy2" (default), "tcp", or "hy2+tcp".
+# TCP uses the first port of the server address; port hopping requires HY2.
+mode: "hy2+tcp"
 auth: "change-me"
 tls:
   sni: "us.example.com"

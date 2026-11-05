@@ -31,6 +31,7 @@ grep -q '/usr/bin/hy2tun -version' "$work/client/postinst"
 tar -xOzf "$work/client/data.tar.gz" ./etc/hy2tun/client.yaml.example \
 	> "$work/client/example.yaml"
 grep -q '^server: ' "$work/client/example.yaml"
+grep -q '^mode: ' "$work/client/example.yaml"
 grep -q '^auth: ' "$work/client/example.yaml"
 grep -q '^control:' "$work/client/example.yaml"
 grep -q '^mappings:' "$work/client/example.yaml"
@@ -41,7 +42,7 @@ grep -q '^mappings:' "$work/client/example.yaml"
 ! grep -q '^transport:' "$work/client/example.yaml"
 
 grep -q '^Package: luci-app-hy2tun$' "$work/luci/control"
-grep -q '^Depends: luci-base, luci-compat, hy2tun (>= 1.5.0)$' "$work/luci/control"
+grep -q '^Depends: luci-base, luci-compat, hy2tun (>= 1.6.0)$' "$work/luci/control"
 grep -q './usr/lib/lua/luci/controller/hy2tun.lua' "$work/luci/files.txt"
 grep -q './usr/lib/lua/luci/view/hy2tun/status.htm' "$work/luci/files.txt"
 
@@ -97,6 +98,15 @@ grep -q 'id="hy2tun-server"' "$work/luci/status.htm"
 grep -q 'id="hy2tun-mappings"' "$work/luci/status.htm"
 grep -q 'id="hy2tun-save"' "$work/luci/status.htm"
 grep -q 'https://github.com/ayeaaaa/hy2tun' "$work/luci/status.htm"
+
+# The basic form must expose the exact transport mode values and include the
+# selection in every save payload. Multi-server editing stays out of LuCI.
+grep -q 'id="hy2tun-mode"' "$work/luci/status.htm"
+grep -q '<option value="hy2">' "$work/luci/status.htm"
+grep -q '<option value="tcp">' "$work/luci/status.htm"
+grep -q '<option value="hy2+tcp">' "$work/luci/status.htm"
+grep -q 'mode: el.mode.value' "$work/luci/status.htm"
+grep -q 'config.mode' "$work/luci/status.htm"
 
 # Advanced-field guidance must separate console-editable settings from
 # SSH-only settings.
