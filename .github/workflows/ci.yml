@@ -15,6 +15,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # The compatibility matrix builds v1.5.4 from its local git tag.
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -25,6 +28,12 @@ jobs:
 
       - name: Unit, integration, and end-to-end tests
         run: go test ./... -count=1
+
+      - name: Transport fallback and compatibility E2E
+        env:
+          HY2TUN_REQUIRE_COMPAT: "1"
+        run: |
+          go test ./internal/e2e -run 'TestTransportMode|TestUDPBlocked|TestMultiTransport|TestFallback|TestTransportGate|TestOldVersionCompatibility' -count=1 -v
 
       - name: Race detector
         run: go test -race ./... -count=1
