@@ -177,11 +177,13 @@ configuration may still use ranges and port hopping, but has no TCP fallback.
 
 The TCP transport reuses the server's existing `tls.cert` and `tls.key` and the
 client's existing `tls.ca`, `tls.sni`, `tls.insecure`, and `tls.pin_sha256`
-settings. It requires TLS 1.3 or newer on both ends. A certificate pin is still
-checked when `tls.insecure` is enabled, and a configured CA and pin must both
-match. There is no separate TCP certificate or weaker fallback TLS policy.
-HY2 authentication and the control token are reused for the TCP greeting; no
-second credential pair is required.
+settings. It requires TLS 1.3 or newer on both ends. With
+`tls.insecure: false`, normal CA/hostname verification runs and a configured
+pin must also match. With `tls.insecure: true`, CA and hostname verification are
+skipped, but a configured pin is still enforced; CA and pin are not both
+required in that case. There is no separate TCP certificate or weaker fallback
+TLS policy. HY2 authentication and the control token are reused for the TCP
+greeting; no second credential pair is required.
 
 ### Fallback and recovery timing
 
@@ -234,8 +236,8 @@ punching.
 ### Controls and diagnostics
 
 - **Server Web console → Settings → 传输模式** changes the server mode. It
-  requires the current Web administrator password, binds or retires listeners,
-  and persists the mode before serving it.
+  requires the current Web administrator password, pre-binds any new listener,
+  persists the mode, then publishes the new listener and retires the old one.
 - **Client Web console → Settings → 传输模式** changes the selected server's
   mode. In a multi-server configuration each server has its own independent
   mode; the shared Web console and other servers are untouched.
@@ -251,8 +253,8 @@ punching.
   there is no single active transport; each client reports its own.
 - **Prometheus:** the client `/metrics` endpoint exports
   `hy2tun_client_transport_active{server,transport}` and
-  `hy2tun_client_transport_switches_total{server}`. The server does not label
-  its mode as one active transport.
+  `hy2tun_client_transport_switches_total{server}`. The server `/metrics`
+  exports only `hy2tun_server_*` and has no single active-transport gauge.
 
 ## What it does not do (v1)
 
@@ -355,9 +357,10 @@ compatible.
 - A public server with a TLS certificate usable for TLS 1.3 (self-signed is
   supported when the client is configured with the matching CA, optionally
   combined with a certificate pin).
-- UDP reachability to the server's HY2 port. For `mode: tcp` or
-  `mode: hy2+tcp`, TCP reachability to the same numeric port as well. TCP
-  reachability to every public mapping port you use.
+- Transport reachability to the server's numeric port depends on mode:
+  `hy2` needs UDP only; `tcp` needs TCP only; `hy2+tcp` needs both UDP and TCP
+  on the same numeric port. TCP reachability to every public mapping port you
+  use (and UDP reachability to public UDP mapping ports).
 - Linux with systemd, OpenWrt with procd, or Windows with Task Scheduler for
   the provided deployment examples.
 
@@ -467,9 +470,11 @@ directories. It prints `configuration OK` on success.
 When the web console is enabled, both binaries expose:
 
 - `GET /healthz` — returns `200` and `ok` when the process is serving.
-- `GET /metrics` — Prometheus text metrics for aggregate traffic, mappings,
-  connection state, credential generation, uptime, and client transport
-  diagnostics (`hy2tun_client_transport_active` and
+- `GET /metrics` — Prometheus text metrics for that binary. The server exports
+  `hy2tun_server_*` metrics (up, online clients, active mappings, traffic, and
+  uptime). The client exports `hy2tun_client_*` metrics, including connection,
+  mapping, traffic, credential, and transport diagnostics
+  (`hy2tun_client_transport_active` and
   `hy2tun_client_transport_switches_total`).
 
 `/healthz` is intentionally unauthenticated for local probes. `/metrics` is
@@ -859,7 +864,7 @@ Rules:
 | `servers` | Optional list of independent server entries; see [Multiple servers](#multiple-servers). Cannot be combined with legacy per-server fields. Each entry has its own optional `mode`. |
 | `auth` | HY2 password, or `user:password` for userpass auth. |
 | `tls.sni` | TLS server name. Empty uses the host part of `server`. |
-| `tls.insecure` | Skip certificate verification. Do not use on untrusted networks. |
+| `tls.insecure` | Skip CA/hostname certificate verification; a configured pin is still enforced. Do not use on untrusted networks. |
 | `tls.pin_sha256` | SHA-256 of the server certificate's DER bytes. |
 | `tls.ca` | CA certificate bundle for a private/self-signed server certificate. |
 | `obfs.type` | Must match the server. Empty or `salamander`. |
@@ -963,9 +968,10 @@ openssl x509 -in cert.pem -outform der | sha256sum
 
 The value is the 64-character hex digest (an optional `sha256:` prefix and
 colons are accepted). Pinning does not replace normal certificate
-verification: keep `tls.ca` configured, or set `tls.insecure: true` only if you
-understand the trade-off. When both a CA and a pin are configured, both must
-match.
+verification. With `tls.insecure: false`, normal CA/hostname verification runs
+and a configured pin must also match. With `tls.insecure: true`, CA/hostname
+verification is skipped but the pin is still enforced; use it only if you
+understand the trade-off.
 
 ## Hot configuration editing
 
@@ -1480,12 +1486,17 @@ If hopping does not work, check in this order:
 
 ### Firewall and NAT
 
-On the server, allow:
+Transport-port reachability depends on mode:
 
-- UDP to the `listen` port (usually 443) from the internet for HY2;
-- TCP to the same numeric `listen` port when the server mode is `tcp` or
-  `hy2+tcp` (for example TCP/443). The UDP and TCP listeners are separate
-  sockets, so opening one protocol does not open the other;
+| Mode | Server inbound | Client outbound |
+| --- | --- | --- |
+| `hy2` | UDP to the `listen` port | UDP to the server port |
+| `tcp` | TCP to the `listen` port; no UDP needed | TCP to the server port |
+| `hy2+tcp` | UDP **and** TCP on the same numeric port | UDP **and** TCP to that port |
+
+The UDP and TCP listeners are separate sockets, so opening one protocol does
+not open the other. Also allow:
+
 - TCP to every explicit public mapping port (for example 2222);
 - UDP to every explicit public UDP mapping port (for example 51820);
 - TCP to the web console only from your management network, VPN, or reverse
@@ -1496,15 +1507,16 @@ need to be reachable. Open the whole range, or pin mappings to explicit ports
 and open only those. The client makes only outbound connections, so it does not
 need router port forwarding.
 
-With port hopping, also allow the whole UDP hop range in the cloud security
-group. Let the server install the redirect with a range `listen`, or install a
-manual redirect as described in [Port hopping](#port-hopping). The host INPUT
+With port hopping in `hy2` or `hy2+tcp`, also allow the whole UDP hop range in
+the cloud security group. Let the server install the redirect with a range
+`listen`, or install a manual redirect as described in
+[Port hopping](#port-hopping). The host INPUT
 chain only needs the first `listen` port, because the redirect happens in
 PREROUTING.
 
-On the client host, allow outbound UDP to the server's HY2 port and outbound
-TCP to the same port when `tcp` or `hy2+tcp` is used. Windows may show a
-firewall prompt for the client web console; allow it on private networks only.
+On the client host, follow the outbound column above: `hy2` needs UDP only,
+`tcp` needs TCP only, and `hy2+tcp` needs both. Windows may show a firewall
+prompt for the client web console; allow it on private networks only.
 
 ### Exposing the server web console safely
 

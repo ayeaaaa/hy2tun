@@ -131,11 +131,12 @@ Get-ScheduledTaskInfo -TaskName "hy2tun"
 
 ## Firewall notes
 
-- Windows normally allows the outbound UDP connection to the server without a
-  prompt. If outbound traffic is filtered, add an outbound rule for
-  `hy2tun.exe` and UDP to the server port. For `tcp` or `hy2+tcp`, also allow
-  outbound TCP to the same numeric port; the UDP and TCP transports are
-  separate connections and one rule does not open the other.
+- Outbound transport depends on mode: `hy2` needs UDP only, `tcp` needs TCP
+  only, and `hy2+tcp` needs both on the same numeric server port. Windows
+  normally allows outbound UDP without a prompt; if traffic is filtered, add
+  an outbound rule for `hy2tun.exe` and the required protocol(s). The UDP and
+  TCP transports are separate connections, so one rule does not open the
+  other.
 - The first time the web console starts on `0.0.0.0:7501`, Windows Defender
   Firewall may show a prompt. Allow it on **Private networks only**. Do not
   allow it on public networks; the console uses HTTP unless `web.tls` is
@@ -144,13 +145,24 @@ Get-ScheduledTaskInfo -TaskName "hy2tun"
   client, so no inbound port forwarding is needed on the client for mappings.
   Only the optional web console needs an inbound rule.
 - If the client is behind a home router, no router port forwarding is needed
-  either: the client makes an outbound QUIC connection to the server.
+  either: the client makes an outbound connection to the server (QUIC/UDP for
+  `hy2`, TLS/TCP for `tcp` or fallback).
 
 ## Backup and rollback
 
-Before changing the mode or replacing the binary, copy
-`C:\ProgramData\hy2tun\client.yaml` and keep the previous `hy2tun.exe` and
-archive. To roll back:
+Before changing the mode or replacing the binary, stop the task and create the
+backup files used by the rollback commands:
+
+```powershell
+Stop-ScheduledTask -TaskName "hy2tun"
+Copy-Item "C:\ProgramData\hy2tun\client.yaml" `
+  "C:\ProgramData\hy2tun\client.yaml.bak" -Force
+Copy-Item "C:\Program Files\hy2tun\hy2tun.exe" `
+  "C:\Program Files\hy2tun\hy2tun.exe.bak" -Force
+Start-ScheduledTask -TaskName "hy2tun"
+```
+
+Keep the previous release archive as well. To roll back:
 
 ```powershell
 Stop-ScheduledTask -TaskName "hy2tun"

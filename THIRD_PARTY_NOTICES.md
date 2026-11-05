@@ -59,11 +59,18 @@ tests. They are listed here with the same attribution requirements.
 
 - MIT: [`LICENSES/MIT.txt`](LICENSES/MIT.txt). The copyright notice for each
   MIT component is listed in the tables above.
-- BSD-3-Clause (Go Authors text): [`LICENSES/BSD-3-Clause.txt`](LICENSES/BSD-3-Clause.txt).
-  Applies to `golang.org/x/crypto`, `golang.org/x/net`, `golang.org/x/time`,
+- BSD-3-Clause (Go Authors / Google LLC text):
+  [`LICENSES/BSD-3-Clause.txt`](LICENSES/BSD-3-Clause.txt). Applies to
+  `golang.org/x/crypto`, `golang.org/x/net`, `golang.org/x/time`,
   `golang.org/x/sys`, and `golang.org/x/text`.
-- BSD-3-Clause (Google Inc. text): [`LICENSES/BSD-3-Clause-Google-Inc.txt`](LICENSES/BSD-3-Clause-Google-Inc.txt).
-  Applies to `golang.org/x/exp` and `github.com/refraction-networking/utls`.
+- BSD-3-Clause (Go Authors / Google Inc. non-endorsement variant):
+  [`LICENSES/BSD-3-Clause-Google-Inc.txt`](LICENSES/BSD-3-Clause-Google-Inc.txt).
+  Applies to `golang.org/x/exp` and
+  `github.com/refraction-networking/utls`. `golang.org/x/time` uses the
+  Google LLC variant in `BSD-3-Clause.txt`, not this file. All three modules
+  use the Go Authors BSD-3-Clause license; only the named non-endorsement
+  entity differs. Both files are byte-identical to the upstream module
+  `LICENSE` texts they cover.
 - BSD-3-Clause, Apache-2.0, and MIT sections: [`LICENSES/klauspost-compress.txt`](LICENSES/klauspost-compress.txt)
   for `github.com/klauspost/compress`.
 - Apache-2.0: [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt). Applies to

@@ -133,6 +133,15 @@ opkg list-installed | grep -E 'hy2tun|luci-app-hy2tun' > /tmp/hy2tun-packages.tx
 cp /etc/hy2tun/client.yaml /etc/hy2tun/client.yaml.bak-$(date +%Y%m%d)
 ```
 
+`/tmp` is cleared on reboot, so copy the backup, package list, and config
+backup off the router before proceeding, for example from the workstation:
+
+```bash
+scp root@<router>:/tmp/hy2tun-backup-*.tar.gz .
+scp root@<router>:/tmp/hy2tun-packages.txt .
+scp root@<router>:/etc/hy2tun/client.yaml.bak-* .
+```
+
 To roll back a mode change, stop the service, restore the previous
 `client.yaml`, and start it:
 
@@ -145,11 +154,12 @@ chmod 600 /etc/hy2tun/client.yaml
 
 If a package upgrade must be reverted, install the previously saved
 `hy2tun_<old-version>_<arch>.ipk` and matching `luci-app-hy2tun` package, then
-restore the configuration backup. Keep the old `.ipk` files and the
-`client.yaml` backup until the new mode has been verified. Restoring the
-configuration is not enough if the binary is also downgraded: keep the pair
-together. A mode change that removes TCP fallback does not modify the server;
-restore the server mode separately if it was changed there.
+restore the configuration backup. Some `opkg` versions require
+`opkg install --force-downgrade` when installing an older package. Keep the old
+`.ipk` files and the `client.yaml` backup until the new mode has been verified.
+Restoring the configuration is not enough if the binary is also downgraded:
+keep the pair together. A mode change that removes TCP fallback does not modify
+the server; restore the server mode separately if it was changed there.
 
 ## Build locally
 

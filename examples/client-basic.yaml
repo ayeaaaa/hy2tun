@@ -7,6 +7,8 @@
 # This example covers a single server and the fields exposed by the LuCI
 # page. For multiple servers or advanced options, use the built-in client
 # console or edit the installed /etc/hy2tun/client.yaml over SSH.
+# This is the basic/LuCI package example, so it keeps an explicit mode field;
+# the general server/client/client-multi examples omit mode for HY2 default.
 
 server: "us.example.com:24443"
 # Optional transport mode: "hy2" (default), "tcp", or "hy2+tcp".

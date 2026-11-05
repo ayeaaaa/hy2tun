@@ -146,10 +146,11 @@ HY2 UDP 跳跃可以使用整个集合。
 
 TCP 传输复用服务端现有的 `tls.cert` 和 `tls.key`，以及客户端现有的
 `tls.ca`、`tls.sni`、`tls.insecure` 和 `tls.pin_sha256`。两端都要求
-TLS 1.3 或更高版本。即使启用 `tls.insecure`，证书固定仍会校验；配置了 CA
-和 pin 时两者都必须匹配。不存在单独的 TCP 证书，也不会使用更弱的回退 TLS
-策略。HY2 认证密码和 control token 会被 TCP greeting 复用，不需要第二套
-凭据。
+TLS 1.3 或更高版本。`tls.insecure: false` 时执行正常的 CA/主机名校验，配置
+了 pin 时还必须匹配；`tls.insecure: true` 时跳过 CA 和主机名校验，但配置的
+pin 仍会强制执行，此时不要求 CA 和 pin 同时存在。不存在单独的 TCP 证书，
+也不会使用更弱的回退 TLS 策略。HY2 认证密码和 control token 会被 TCP
+greeting 复用，不需要第二套凭据。
 
 ### 回退与恢复时序
 
@@ -192,7 +193,7 @@ Hysteria Realms 或 UDP 打洞。
 ### 控制与诊断
 
 - **服务端 Web 控制台 → 设置 → 传输模式**：修改服务端模式。需要当前 Web
-  管理员密码；先绑定或停用监听，再持久化模式，成功后才对外服务。
+  管理员密码；先预绑定候选监听，再持久化模式，最后发布新监听并停用旧监听。
 - **客户端 Web 控制台 → 设置 → 传输模式**：修改当前服务端的模式。多服务端
   配置中每个服务端模式独立，共享 Web 控制台和其他服务端不受影响。
 - **LuCI → 服务 → hy2tun**：单服务端配置有同样的模式字段。保存要求服务已
@@ -205,8 +206,8 @@ Hysteria Realms 或 UDP 打洞。
   每个客户端各自上报。
 - **Prometheus：** 客户端 `/metrics` 导出
   `hy2tun_client_transport_active{server,transport}` 和
-  `hy2tun_client_transport_switches_total{server}`。服务端不会把自身模式
-  标记为单一活跃传输。
+  `hy2tun_client_transport_switches_total{server}`。服务端 `/metrics` 只导出
+  `hy2tun_server_*`，没有单一活跃传输 gauge。
 
 ## 不包含的功能（v1）
 
@@ -289,8 +290,9 @@ hy2tun 客户端 ──────── QUIC / HY2（UDP）────┤
 - 构建需要 Go 1.26.10 或更高版本（包含标准库安全修复）。`go.mod` 锁定 HY2 核心为 v2.13.0。
 - 一台有可用于 TLS 1.3 的 TLS 证书的公网服务端（支持自签名证书：客户端配置
   对应 CA，可选叠加证书固定）。
-- 到服务端 HY2 端口的 UDP 可达性；使用 `mode: tcp` 或 `mode: hy2+tcp` 时，
-  还需要到同一数字端口的 TCP 可达性；以及到每个公网映射端口的 TCP 可达性。
+- 到服务端数字端口的传输可达性取决于模式：`hy2` 只需要 UDP；`tcp` 只需要
+  TCP；`hy2+tcp` 需要在同一数字端口上同时有 UDP 和 TCP。还需要到每个公网
+  映射端口的 TCP 可达性（以及公网 UDP 映射端口的 UDP 可达性）。
 - 部署示例面向 Linux + systemd、OpenWrt + procd，或 Windows + 任务计划
   程序。
 
@@ -394,8 +396,9 @@ hy2tun --check-config -c /etc/hy2tun/client.yaml
 启用 Web 控制台后，两个二进制都提供：
 
 - `GET /healthz` —— 进程正常时返回 `200` 和 `ok`。
-- `GET /metrics` —— Prometheus 文本指标，包含聚合流量、映射数、连接状态、
-  凭据代际、运行时间和客户端传输诊断
+- `GET /metrics` —— 各二进制自己的 Prometheus 文本指标。服务端导出
+  `hy2tun_server_*`（运行状态、在线客户端、活动映射、流量和运行时间）；
+  客户端导出 `hy2tun_client_*`，包括连接、映射、流量、凭据和传输诊断
   （`hy2tun_client_transport_active` 与
   `hy2tun_client_transport_switches_total`）。
 
@@ -756,7 +759,7 @@ servers:
 | `servers` | 可选的多服务端列表，每项完全独立；见 [多服务端](#多服务端)。不能与旧的单服务端字段混用。每个条目有独立的可选 `mode`。 |
 | `auth` | HY2 密码；`userpass` 认证时为 `user:password`。 |
 | `tls.sni` | TLS 服务器名称。为空时使用 `server` 的主机部分。 |
-| `tls.insecure` | 跳过证书验证。不要在不可信网络使用。 |
+| `tls.insecure` | 跳过 CA/主机名证书校验；配置的 pin 仍会强制执行。不要在不可信网络使用。 |
 | `tls.pin_sha256` | 服务端证书 DER 字节的 SHA-256。 |
 | `tls.ca` | 私有/自签名服务端证书的 CA 证书包。 |
 | `obfs.type` | 必须与服务端一致。空或 `salamander`。 |
@@ -853,8 +856,9 @@ openssl x509 -in cert.pem -outform der | sha256sum
 ```
 
 值是 64 个字符的十六进制摘要（可接受可选的 `sha256:` 前缀和冒号）。证书
-固定不会替代正常的证书验证：保留 `tls.ca` 配置，或者只在理解风险的情况下
-设置 `tls.insecure: true`。同时配置 CA 和 pin 时，两者都必须匹配。
+固定不会替代正常的证书验证。`tls.insecure: false` 时执行正常的 CA/主机名
+校验，配置的 pin 也必须匹配；`tls.insecure: true` 时跳过 CA/主机名校验，但
+pin 仍会强制执行；只在理解风险的情况下使用。
 
 ## 热配置编辑
 
@@ -1306,12 +1310,16 @@ ip6tables -t nat -D PREROUTING -p udp --dport 30000:40000 \
 
 ### 防火墙与 NAT
 
-服务端需要允许：
+传输端口的可达性取决于模式：
 
-- 从互联网到 `listen` 端口（通常是 443）的 UDP，用于 HY2；
-- 服务端模式为 `tcp` 或 `hy2+tcp` 时，到同一数字 `listen` 端口（例如
-  TCP/443）的 TCP。UDP 和 TCP 监听是独立 socket，只放行一种协议不会打开
-  另一种；
+| 模式 | 服务端入站 | 客户端出站 |
+| --- | --- | --- |
+| `hy2` | 到 `listen` 端口的 UDP | 到服务端端口的 UDP |
+| `tcp` | 到 `listen` 端口的 TCP；不需要 UDP | 到服务端端口的 TCP |
+| `hy2+tcp` | 同一数字端口上的 UDP **和** TCP | 到该端口的 UDP **和** TCP |
+
+UDP 和 TCP 监听是独立 socket，只放行一种协议不会打开另一种。此外还需要：
+
 - 到每个显式公网映射端口（例如 2222）的 TCP；
 - 到每个显式公网 UDP 映射端口（例如 51820）的 UDP；
 - 仅从管理网络、VPN 或反向代理到 Web 控制台的 TCP。示例
@@ -1321,14 +1329,15 @@ ip6tables -t nat -D PREROUTING -p udp --dport 30000:40000 \
 可以开放整个范围，或者把映射固定到显式端口并只开放这些端口。客户端只发起
 出站连接，因此不需要在路由器上做端口转发。
 
-使用端口跳跃时，还需要在云安全组放行整个 UDP 跳跃范围。可以让服务端通过
-范围 `listen` 自动安装重定向，或按 [端口跳跃](#端口跳跃) 手动安装。主机
+在 `hy2` 或 `hy2+tcp` 下使用端口跳跃时，还需要在云安全组放行整个 UDP
+跳跃范围。可以让服务端通过范围 `listen` 自动安装重定向，或按
+[端口跳跃](#端口跳跃) 手动安装。主机
 防火墙的 INPUT 链只需要放行 `listen` 的首个端口，因为重定向在 PREROUTING
 阶段完成。
 
-客户端主机需要允许到服务端 HY2 端口的出站 UDP；使用 `tcp` 或 `hy2+tcp`
-时，还需要到同一端口的出站 TCP。Windows 可能会为客户端 Web 控制台弹出
-防火墙提示；只在专用网络允许。
+客户端主机按上表的出站列配置：`hy2` 只需要 UDP，`tcp` 只需要 TCP，
+`hy2+tcp` 两者都需要。Windows 可能会为客户端 Web 控制台弹出防火墙提示；
+只在专用网络允许。
 
 ### 安全暴露服务端 Web 控制台
 
