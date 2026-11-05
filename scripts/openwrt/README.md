@@ -166,8 +166,8 @@ the server; restore the server mode separately if it was changed there.
 From the repository root:
 
 ```bash
-scripts/openwrt/build-ipk.sh ./hy2tun arm64 v1.6.0 dist
-scripts/openwrt/build-luci-ipk.sh v1.6.0 dist
+scripts/openwrt/build-ipk.sh ./hy2tun arm64 v1.6.1 dist
+scripts/openwrt/build-luci-ipk.sh v1.6.1 dist
 ```
 
 `build-ipk.sh` sets `Architecture: all` so opkg accepts the package on any

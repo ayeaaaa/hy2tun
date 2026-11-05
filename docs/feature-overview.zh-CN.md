@@ -1,14 +1,14 @@
-# hy2tun v1.6.0 功能介绍
+# hy2tun v1.6.1 功能介绍
 
 `hy2tun` 是一个基于 Hysteria 2 的反向端口转发工具：服务端在公网监听端口，客户端把内网服务映射出去，支持 TCP 和 UDP。适合远程 SSH、NAS、Web、DNS、游戏联机等场景。
 
-最新版 **v1.6.0** 的核心变化是：**HY2 优先，UDP 不通时自动切 TCP，网络恢复后自动回 HY2。**
+**v1.6.1** 延续 v1.6.0 的 HY2/TCP 双传输能力，并修复了一个强制重连时的旧 owner 消息竞态。核心能力仍然是：**HY2 优先，UDP 不通时自动切 TCP，网络恢复后自动回 HY2。**
 
 ## 核心功能
 
 - **反向 TCP/UDP 映射**：把内网端口映射到公网，支持固定端口、自动分配、允许/拒绝范围和离线端口保留。
 - **HY2 传输**：基于 Hysteria 2，低延迟、抗丢包；标准 Hysteria 2 客户端可以使用 HY2 代理入口。
-- **TCP 兜底（v1.6.0 新增）**：UDP 被封锁或严重丢包时，自动切换到 TLS/TCP；UDP 恢复后自动切回 HY2。
+- **TCP 兜底（v1.6 新增）**：UDP 被封锁或严重丢包时，自动切换到 TLS/TCP；UDP 恢复后自动切回 HY2。
 - **同一数字端口**：例如 `24443/UDP` 和 `24443/TCP` 同时提供，但使用两个独立 socket，防火墙需同时放行 TCP 和 UDP。
 - **三种模式**：`hy2`、`tcp`、`hy2+tcp`。服务端全局设置，多服务端客户端可按服务器独立设置。
 - **UDP over TCP**：TCP 模式下 UDP 映射不会消失，会封装成带帧的 UDP over TCP。
@@ -56,6 +56,6 @@ mode: "hy2+tcp"
 
 ## 下载
 
-- Release：<https://github.com/ayeaaaa/hy2tun/releases/tag/v1.6.0>
+- Release：<https://github.com/ayeaaaa/hy2tun/releases/tag/v1.6.1>
 - 项目：<https://github.com/ayeaaaa/hy2tun>
 - 中文文档：<https://github.com/ayeaaaa/hy2tun/blob/main/README.zh-CN.md>

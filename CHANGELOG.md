@@ -4,6 +4,24 @@
 
 All notable changes to this project are documented here.
 
+## v1.6.1 - 2026-11-05
+
+### Fixed
+
+- Forced reconnect now clears the control owner synchronously before closing
+  the stream. A Push already queued by the old reader can no longer be applied
+  after invalidation and change the client revision or mappings.
+
+### Changed
+
+- Documentation now clarifies that the client console has a recent-log view,
+  while server logs go to systemd journal or the configured log file.
+- Added a forum-ready Chinese feature overview at
+  `docs/feature-overview.zh-CN.md`.
+- Release notes are generated outside the build tree, so future release
+  binaries no longer report `vcs.modified=true` / `+dirty` metadata.
+- Hardened E2E polling and flood cleanup (test-only).
+
 ## v1.6.0 - 2026-11-05
 
 ### Added
