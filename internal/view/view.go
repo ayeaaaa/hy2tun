@@ -14,8 +14,10 @@ type MappingView struct {
 	Status       string
 	Error        string
 	AssignedPort int
-	TxBytes      uint64
-	RxBytes      uint64
+	// TxBytes counts payload bytes from the client toward the server.
+	// RxBytes counts payload bytes from the server toward the client.
+	TxBytes uint64
+	RxBytes uint64
 }
 
 // ClientView is the last-known state of one registered client.
@@ -55,10 +57,12 @@ type CredentialResult struct {
 type Overview struct {
 	OnlineClients  int
 	ActiveMappings int
-	TxBytes        uint64
-	RxBytes        uint64
-	Listen         string
-	Uptime         time.Duration
+	// TxBytes counts payload bytes from clients toward servers; RxBytes counts
+	// payload bytes from servers toward clients.
+	TxBytes uint64
+	RxBytes uint64
+	Listen  string
+	Uptime  time.Duration
 }
 
 // TransportState is one worker's secret-free policy and session snapshot.
@@ -80,8 +84,10 @@ type ClientStatus struct {
 	Version   string
 	Connected bool
 	Uptime    time.Duration
-	TxBytes   uint64
-	RxBytes   uint64
+	// TxBytes counts payload bytes from the client toward the server.
+	// RxBytes counts payload bytes from the server toward the client.
+	TxBytes uint64
+	RxBytes uint64
 
 	// CredentialGeneration is the credential generation the client currently
 	// holds. ServerCredentialGeneration is the generation reported by the

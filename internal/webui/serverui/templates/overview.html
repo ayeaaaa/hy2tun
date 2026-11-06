@@ -24,12 +24,12 @@
     <div class="stat-foot">正在监听的公网端口</div>
   </article>
   <article class="stat-card">
-    <div class="stat-label">总上行</div>
+    <div class="stat-label">客户端 → 服务端</div>
     <div class="stat-value" data-stat="tx-bytes">{{bytes .Overview.TxBytes}}</div>
     <div class="stat-foot">公网 → 客户端</div>
   </article>
   <article class="stat-card">
-    <div class="stat-label">总下行</div>
+    <div class="stat-label">服务端 → 客户端</div>
     <div class="stat-value" data-stat="rx-bytes">{{bytes .Overview.RxBytes}}</div>
     <div class="stat-foot">客户端 → 公网</div>
   </article>

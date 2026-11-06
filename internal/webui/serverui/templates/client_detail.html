@@ -27,8 +27,8 @@
   </dl>
 
   <div class="mini-stats">
-    <div><span class="mini-stat-label">上行</span><span class="mini-stat-value" data-client-stat="tx">{{bytes .TxBytes}}</span></div>
-    <div><span class="mini-stat-label">下行</span><span class="mini-stat-value" data-client-stat="rx">{{bytes .RxBytes}}</span></div>
+    <div><span class="mini-stat-label">客户端 → 服务端</span><span class="mini-stat-value" data-client-stat="tx">{{bytes .TxBytes}}</span></div>
+    <div><span class="mini-stat-label">服务端 → 客户端</span><span class="mini-stat-value" data-client-stat="rx">{{bytes .RxBytes}}</span></div>
   </div>
 
   <div class="table-wrap">
@@ -56,7 +56,7 @@
             <span class="status status-{{statusClass .Status}}"><span class="status-dot" aria-hidden="true"></span>{{statusLabel .Status}}</span>
             {{if .Error}}<span class="error-code mono">{{.Error}}</span>{{end}}
           </td>
-          <td class="mono nowrap">{{bytes .TxBytes}} ↑<br><span class="muted">{{bytes .RxBytes}} ↓</span></td>
+          <td class="mono nowrap"><span class="muted">客户端 → 服务端</span> {{bytes .TxBytes}}<br><span class="muted">服务端 → 客户端</span> {{bytes .RxBytes}}</td>
           <td class="col-actions">
             {{if $.Client.Online}}
             <button type="button" class="btn btn-quiet btn-xs" data-action="edit-mapping" data-client-id="{{$.Client.ID}}" data-mapping-id="{{.ID}}">编辑</button>

@@ -581,10 +581,10 @@ hy2tun_client_connected %d
 # HELP hy2tun_client_mappings Number of configured reverse mappings.
 # TYPE hy2tun_client_mappings gauge
 hy2tun_client_mappings %d
-# HELP hy2tun_client_tx_bytes_total Total bytes sent to the server.
+# HELP hy2tun_client_tx_bytes_total Total bytes sent from the client to the server.
 # TYPE hy2tun_client_tx_bytes_total counter
 hy2tun_client_tx_bytes_total %d
-# HELP hy2tun_client_rx_bytes_total Total bytes received from the server.
+# HELP hy2tun_client_rx_bytes_total Total bytes sent from the server to the client.
 # TYPE hy2tun_client_rx_bytes_total counter
 hy2tun_client_rx_bytes_total %d
 # HELP hy2tun_client_uptime_seconds Client process uptime in seconds.

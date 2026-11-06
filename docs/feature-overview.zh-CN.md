@@ -1,8 +1,8 @@
-# hy2tun v1.6.3 功能介绍
+# hy2tun v1.6.4 功能介绍
 
 `hy2tun` 是一个基于 Hysteria 2 的反向端口转发工具：服务端在公网监听端口，客户端把内网服务映射出去，支持 TCP 和 UDP。适合远程 SSH、NAS、Web、DNS、游戏联机等场景。
 
-**v1.6.3** 在 v1.6.2 的基础上把回退时序设置接入了客户端 Web 控制台，可以按服务端调整并立即生效。核心能力仍然是：**HY2 优先，UDP 不通时自动切 TCP，网络恢复后自动回 HY2。**
+**v1.6.4** 统一了流量方向的文案，用“客户端 → 服务端 / 服务端 → 客户端”代替容易混淆的“上行/下行”。核心能力仍然是：**HY2 优先，UDP 不通时自动切 TCP，网络恢复后自动回 HY2。**
 
 ## 核心功能
 
@@ -10,6 +10,7 @@
 - **HY2 传输**：基于 Hysteria 2，低延迟、抗丢包；标准 Hysteria 2 客户端可以使用 HY2 代理入口。
 - **TCP 兜底（v1.6 新增）**：UDP 被封锁或严重丢包时，自动切换到 TLS/TCP；UDP 恢复后自动切回 HY2。
 - **按服务端调整时序（v1.6.2 新增）**：每个服务端可以单独设置 `failover` 的连接、心跳、判死、探测和回切时间；默认值保持不变，也可以使用更快的中间档。
+- **流量方向更直白（v1.6.4）**：统计和映射表使用“客户端 → 服务端 / 服务端 → 客户端”，不再用上行/下行。
 - **同一数字端口**：例如 `24443/UDP` 和 `24443/TCP` 同时提供，但使用两个独立 socket，防火墙需同时放行 TCP 和 UDP。
 - **三种模式**：`hy2`、`tcp`、`hy2+tcp`。服务端全局设置，多服务端客户端可按服务器独立设置。
 - **UDP over TCP**：TCP 模式下 UDP 映射不会消失，会封装成带帧的 UDP over TCP。
@@ -71,6 +72,6 @@ failover:
 
 ## 下载
 
-- Release：<https://github.com/ayeaaaa/hy2tun/releases/tag/v1.6.3>
+- Release：<https://github.com/ayeaaaa/hy2tun/releases/tag/v1.6.4>
 - 项目：<https://github.com/ayeaaaa/hy2tun>
 - 中文文档：<https://github.com/ayeaaaa/hy2tun/blob/main/README.zh-CN.md>

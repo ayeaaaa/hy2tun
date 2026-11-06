@@ -189,9 +189,11 @@
     row.appendChild(stateCell);
 
     const trafficCell = element("td", "mono nowrap");
-    trafficCell.appendChild(document.createTextNode(`${fmtBytes(mapping.tx_bytes)} ↑`));
+    trafficCell.appendChild(element("span", "muted", "客户端 → 服务端 "));
+    trafficCell.appendChild(document.createTextNode(fmtBytes(mapping.tx_bytes)));
     trafficCell.appendChild(document.createElement("br"));
-    trafficCell.appendChild(element("span", "muted", `${fmtBytes(mapping.rx_bytes)} ↓`));
+    trafficCell.appendChild(element("span", "muted", "服务端 → 客户端 "));
+    trafficCell.appendChild(document.createTextNode(fmtBytes(mapping.rx_bytes)));
     row.appendChild(trafficCell);
 
     const actionCell = element("td", "col-actions");

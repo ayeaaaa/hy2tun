@@ -499,10 +499,10 @@ hy2tun_server_online_clients %d
 # HELP hy2tun_server_active_mappings Number of active reverse mappings.
 # TYPE hy2tun_server_active_mappings gauge
 hy2tun_server_active_mappings %d
-# HELP hy2tun_server_tx_bytes_total Total bytes sent to clients.
+# HELP hy2tun_server_tx_bytes_total Total bytes relayed from clients toward public peers.
 # TYPE hy2tun_server_tx_bytes_total counter
 hy2tun_server_tx_bytes_total %d
-# HELP hy2tun_server_rx_bytes_total Total bytes received from clients.
+# HELP hy2tun_server_rx_bytes_total Total bytes relayed from public peers toward clients.
 # TYPE hy2tun_server_rx_bytes_total counter
 hy2tun_server_rx_bytes_total %d
 # HELP hy2tun_server_uptime_seconds Server process uptime in seconds.

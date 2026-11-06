@@ -31,12 +31,12 @@
     <div class="stat-foot">共 <span data-stat="total">{{len .Mappings}}</span> 条映射</div>
   </article>
   <article class="stat-card">
-    <div class="stat-label">上行</div>
+    <div class="stat-label">客户端 → 服务端</div>
     <div class="stat-value" data-stat="tx">{{bytes .Status.TxBytes}}</div>
     <div class="stat-foot">客户端 → 服务端</div>
   </article>
   <article class="stat-card">
-    <div class="stat-label">下行</div>
+    <div class="stat-label">服务端 → 客户端</div>
     <div class="stat-value" data-stat="rx">{{bytes .Status.RxBytes}}</div>
     <div class="stat-foot">服务端 → 客户端</div>
   </article>
@@ -85,7 +85,7 @@
             <span class="status status-{{statusClass .Status}}"><span class="status-dot" aria-hidden="true"></span>{{statusLabel .Status}}</span>
             {{if .Error}}<span class="error-code mono">{{.Error}}</span>{{end}}
           </td>
-          <td class="mono nowrap">{{bytes .TxBytes}} ↑<br><span class="muted">{{bytes .RxBytes}} ↓</span></td>
+          <td class="mono nowrap"><span class="muted">客户端 → 服务端</span> {{bytes .TxBytes}}<br><span class="muted">服务端 → 客户端</span> {{bytes .RxBytes}}</td>
           <td class="col-actions">
             <button type="button" class="btn btn-quiet btn-xs" data-action="edit-mapping" data-mapping-id="{{.ID}}">编辑</button>
           </td>

@@ -72,7 +72,7 @@
             <span class="status status-{{statusClass .Mapping.Status}}"><span class="status-dot" aria-hidden="true"></span>{{statusLabel .Mapping.Status}}</span>
             {{if .Mapping.Error}}<span class="error-code mono">{{.Mapping.Error}}</span>{{end}}
           </td>
-          <td class="mono nowrap">{{bytes .Mapping.TxBytes}} ↑<br><span class="muted">{{bytes .Mapping.RxBytes}} ↓</span></td>
+          <td class="mono nowrap"><span class="muted">客户端 → 服务端</span> {{bytes .Mapping.TxBytes}}<br><span class="muted">服务端 → 客户端</span> {{bytes .Mapping.RxBytes}}</td>
         </tr>
         {{end}}
       </tbody>

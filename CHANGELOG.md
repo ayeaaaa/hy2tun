@@ -4,6 +4,19 @@
 
 All notable changes to this project are documented here.
 
+## v1.6.4 - 2026-11-06
+
+### Changed
+
+- Client and server traffic statistics now use **客户端 → 服务端** and
+  **服务端 → 客户端** instead of the ambiguous 上行/下行 labels. Mapping tables
+  keep their existing columns and show the two directions on separate lines.
+- Server metrics help text now describes the actual relay direction; metric
+  names and values are unchanged.
+- The `tx_bytes` / `rx_bytes` JSON fields keep their names and values:
+  `tx_bytes` is client-to-server payload, `rx_bytes` is server-to-client
+  payload.
+
 ## v1.6.3 - 2026-11-05
 
 ### Added
