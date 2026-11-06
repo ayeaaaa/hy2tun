@@ -89,6 +89,147 @@
     }
   }
 
+  function exposureValue(value) {
+    return value === "local" ? "local" : "public";
+  }
+
+  function exposureLabel(value) {
+    return exposureValue(value) === "local" ? "仅本机" : "公网";
+  }
+
+  function familyLabel(family) {
+    const key = String(family || "").trim().toLowerCase();
+    if (key === "ipv4") {
+      return "IPv4";
+    }
+    if (key === "ipv6") {
+      return "IPv6";
+    }
+    return String(family || "").trim();
+  }
+
+  function unavailableFamiliesLabel(families) {
+    if (!Array.isArray(families)) {
+      return "";
+    }
+    const labels = [];
+    for (const family of families) {
+      const label = familyLabel(family);
+      if (label && !labels.includes(label)) {
+        labels.push(label);
+      }
+    }
+    return labels.length === 0 ? "" : `${labels.join("/")} 不可用`;
+  }
+
+  function applyExposureToRow(row, exposure, families) {
+    if (!row) {
+      return;
+    }
+    const value = exposureValue(exposure);
+    const label = exposureLabel(value);
+    const button = $("[data-action='toggle-exposure']", row);
+    if (button) {
+      button.dataset.exposure = value;
+      button.textContent = label;
+      button.setAttribute("aria-label", `切换映射 ${button.dataset.mappingId || ""} 的暴露范围，当前${label}`);
+      button.title = `点击切换为${value === "local" ? "公网" : "仅本机"}`;
+    }
+    row.dataset.exposure = value;
+    const warning = $("[data-exposure-warning]", row);
+    if (warning) {
+      const text = unavailableFamiliesLabel(families);
+      warning.textContent = text;
+      warning.hidden = !text;
+    }
+  }
+
+  async function toggleExposure(button) {
+    const row = button.closest("tr");
+    if (!row) {
+      return;
+    }
+    const clientID = button.dataset.clientId || row.dataset.client || "";
+    const mappingID = button.dataset.mappingId || row.dataset.mappingId || "";
+    if (!clientID || !mappingID) {
+      showToast("缺少客户端或映射标识，请刷新后重试", "bad");
+      return;
+    }
+    const current = exposureValue(button.dataset.exposure);
+    const next = current === "public" ? "local" : "public";
+    const clientName = row.dataset.clientName || clientID;
+    const confirmText = button.dataset.confirm || "切换会立即关闭现有连接，确定继续？";
+    if (!window.confirm(`将映射 ${clientName} 的暴露范围从 ${exposureLabel(current)} 切换为 ${exposureLabel(next)}。${confirmText}`)) {
+      return;
+    }
+
+    button.disabled = true;
+    try {
+      const response = await fetch(
+        `/api/clients/${encodeURIComponent(clientID)}/mappings/${encodeURIComponent(mappingID)}/exposure`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Requested-With": "hy2tun",
+          },
+          credentials: "same-origin",
+          body: JSON.stringify({ exposure: next }),
+        }
+      );
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch (error) {
+        payload = null;
+      }
+      if (response.status === 401) {
+        window.location.href = "/login";
+        return;
+      }
+      if (response.ok) {
+        // The success body is the raw view.MappingView, so the exposure and
+        // family warning fields are PascalCase.
+        const exposure = payload && payload.Exposure;
+        const families = payload && payload.UnavailableFamilies;
+        applyExposureToRow(row, exposure, families);
+        const warning = unavailableFamiliesLabel(families);
+        showToast(warning
+          ? `暴露范围已切换为${exposureLabel(exposure)}；${warning}`
+          : `暴露范围已切换为${exposureLabel(exposure)}`);
+        return;
+      }
+      if (response.status === 409 && payload && payload.code === "exposure_conflict") {
+        // Conflict responses are snake_case and describe the state that
+        // remains active after the failed switch.
+        applyExposureToRow(row, payload.active_exposure, payload.unavailable_families);
+        let message = payload.error || (payload.closed ? "暴露范围切换失败，映射已关闭" : "暴露范围切换失败，已保留当前状态");
+        const warning = unavailableFamiliesLabel(payload.unavailable_families);
+        if (warning) {
+          message += `；${warning}`;
+        }
+        showToast(message, "bad");
+        return;
+      }
+      showToast((payload && payload.error) || `切换暴露范围失败（HTTP ${response.status}）`, "bad");
+    } catch (error) {
+      showToast(`切换暴露范围失败：${error.message}`, "bad");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function initExposure() {
+    document.addEventListener("click", (event) => {
+      const button = event.target.closest('[data-action="toggle-exposure"]');
+      if (!button) {
+        return;
+      }
+      event.preventDefault();
+      toggleExposure(button);
+    });
+  }
+
   function currentDetail() {
     return $(".client-detail");
   }
@@ -1154,6 +1295,7 @@
     initCopy();
     initLogout();
     initDrawer();
+    initExposure();
     initHtmxFallback();
     initSettings();
   }

@@ -146,16 +146,75 @@ func newLoginPage(username, message string) loginPage {
 
 type clientDetailData struct {
 	Client      view.ClientView
+	Mappings    []mappingDisplay
 	ActiveCount int
 	TxBytes     uint64
 	RxBytes     uint64
+}
+
+// mappingDisplay adds the normalized exposure labels used by the server
+// templates. The raw MappingView is embedded so existing template fields keep
+// working. Exposure is an operator control on the server console.
+type mappingDisplay struct {
+	view.MappingView
+	ExposureValue     string
+	ExposureLabel     string
+	ExposureNextLabel string
+	UnavailableLabel  string
+}
+
+func newMappingDisplay(mapping view.MappingView) mappingDisplay {
+	value, label, next := exposureDisplay(mapping.Exposure)
+	return mappingDisplay{
+		MappingView:       mapping,
+		ExposureValue:     value,
+		ExposureLabel:     label,
+		ExposureNextLabel: next,
+		UnavailableLabel:  unavailableFamiliesLabel(mapping.UnavailableFamilies),
+	}
+}
+
+// exposureDisplay treats the empty legacy value as public. Unknown values are
+// also shown as public because that is the server's historical default.
+func exposureDisplay(exposure view.Exposure) (value, label, next string) {
+	if exposure == view.ExposureLocal {
+		return string(view.ExposureLocal), "仅本机", "公网"
+	}
+	return string(view.ExposurePublic), "公网", "仅本机"
+}
+
+// unavailableFamiliesLabel renders a partial-family bind warning such as
+// "IPv6 不可用" or "IPv4/IPv6 不可用".
+func unavailableFamiliesLabel(families []string) string {
+	labels := make([]string, 0, len(families))
+	seen := make(map[string]bool, len(families))
+	for _, family := range families {
+		var label string
+		switch strings.ToLower(strings.TrimSpace(family)) {
+		case "ipv4":
+			label = "IPv4"
+		case "ipv6":
+			label = "IPv6"
+		default:
+			label = strings.TrimSpace(family)
+		}
+		if label == "" || seen[label] {
+			continue
+		}
+		seen[label] = true
+		labels = append(labels, label)
+	}
+	if len(labels) == 0 {
+		return ""
+	}
+	return strings.Join(labels, "/") + " 不可用"
 }
 
 type mappingRow struct {
 	ClientID   string
 	ClientName string
 	Online     bool
-	Mapping    view.MappingView
+	Mapping    mappingDisplay
 }
 
 type mappingEntry struct {
@@ -282,15 +341,18 @@ func (s *Server) configSummary() ConfigSummary {
 func clientDetailDataFrom(client view.ClientView) clientDetailData {
 	active := 0
 	var txBytes, rxBytes uint64
+	mappings := make([]mappingDisplay, 0, len(client.Mappings))
 	for _, mapping := range client.Mappings {
 		if mapping.Status == "running" {
 			active++
 		}
 		txBytes += mapping.TxBytes
 		rxBytes += mapping.RxBytes
+		mappings = append(mappings, newMappingDisplay(mapping))
 	}
 	return clientDetailData{
 		Client:      client,
+		Mappings:    mappings,
 		ActiveCount: active,
 		TxBytes:     txBytes,
 		RxBytes:     rxBytes,
@@ -305,7 +367,7 @@ func mappingRows(clients []view.ClientView) []mappingRow {
 				ClientID:   client.ID,
 				ClientName: client.Name,
 				Online:     client.Online,
-				Mapping:    mapping,
+				Mapping:    newMappingDisplay(mapping),
 			})
 		}
 	}

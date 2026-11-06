@@ -132,6 +132,46 @@
     }
   }
 
+  function exposureValue(value) {
+    return value === "public" || value === "local" ? value : "";
+  }
+
+  function exposureLabel(value) {
+    switch (exposureValue(value)) {
+      case "public":
+        return "公网";
+      case "local":
+        return "仅本机";
+      default:
+        return "";
+    }
+  }
+
+  function familyLabel(family) {
+    const key = String(family || "").trim().toLowerCase();
+    if (key === "ipv4") {
+      return "IPv4";
+    }
+    if (key === "ipv6") {
+      return "IPv6";
+    }
+    return String(family || "").trim();
+  }
+
+  function unavailableFamiliesLabel(families) {
+    if (!Array.isArray(families)) {
+      return "";
+    }
+    const labels = [];
+    for (const family of families) {
+      const label = familyLabel(family);
+      if (label && !labels.includes(label)) {
+        labels.push(label);
+      }
+    }
+    return labels.length === 0 ? "" : `${labels.join("/")} 不可用`;
+  }
+
   function element(tag, className, text) {
     const node = document.createElement(tag);
     if (className) {
@@ -156,6 +196,8 @@
     row.dataset.mappingEnabled = String(Boolean(mapping.enabled));
     row.dataset.mappingAssigned = String(mapping.assigned_port || 0);
     row.dataset.mappingStatus = mapping.status || "";
+    const exposure = exposureValue(mapping.exposure);
+    row.dataset.mappingExposure = exposure;
 
     const typeCell = document.createElement("td");
     typeCell.appendChild(element("span", `type-tag type-${mapping.type}`, String(mapping.type || "").toUpperCase()));
@@ -188,6 +230,17 @@
     }
     row.appendChild(stateCell);
 
+    const exposureCell = element("td", "exposure-cell");
+    const badge = element("span", exposure ? "badge badge-muted" : "muted", exposure ? exposureLabel(exposure) : "—");
+    badge.dataset.exposureBadge = "";
+    exposureCell.appendChild(badge);
+    const warningText = unavailableFamiliesLabel(mapping.unavailable_families);
+    const warning = element("span", "badge badge-bad exposure-warning", warningText);
+    warning.dataset.exposureWarning = "";
+    warning.hidden = !warningText;
+    exposureCell.appendChild(warning);
+    row.appendChild(exposureCell);
+
     const trafficCell = element("td", "mono nowrap");
     trafficCell.appendChild(element("span", "muted", "客户端 → 服务端 "));
     trafficCell.appendChild(document.createTextNode(fmtBytes(mapping.tx_bytes)));
@@ -211,7 +264,7 @@
     const row = document.createElement("tr");
     row.dataset.emptyRow = "";
     const cell = document.createElement("td");
-    cell.colSpan = 7;
+    cell.colSpan = 8;
     cell.appendChild(element("div", "empty-inline", "还没有任何映射。点击“新增映射”创建第一条。"));
     row.appendChild(cell);
     return row;

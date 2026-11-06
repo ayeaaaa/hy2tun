@@ -67,13 +67,14 @@
           <th>内网目标</th>
           <th>备注</th>
           <th>状态</th>
+          <th>暴露</th>
           <th>流量</th>
           <th class="col-actions">操作</th>
         </tr>
       </thead>
       <tbody id="mapping-rows">
-        {{range .Mappings}}
-        <tr data-mapping-row data-mapping-id="{{.ID}}" data-mapping-type="{{.Type}}" data-mapping-port="{{.RemotePort}}" data-mapping-local="{{.LocalAddr}}" data-mapping-note="{{.Note}}" data-mapping-enabled="{{.Enabled}}" data-mapping-assigned="{{.AssignedPort}}" data-mapping-status="{{.Status}}">
+        {{range .MappingRows}}
+        <tr data-mapping-row data-mapping-id="{{.ID}}" data-mapping-type="{{.Type}}" data-mapping-port="{{.RemotePort}}" data-mapping-local="{{.LocalAddr}}" data-mapping-note="{{.Note}}" data-mapping-enabled="{{.Enabled}}" data-mapping-assigned="{{.AssignedPort}}" data-mapping-status="{{.Status}}" data-mapping-exposure="{{.ExposureValue}}">
           <td><span class="type-tag type-{{.Type}}">{{upper .Type}}</span></td>
           <td class="mono">
             <span class="server-endpoint">{{$.Status.Server}}</span><br>
@@ -85,6 +86,10 @@
             <span class="status status-{{statusClass .Status}}"><span class="status-dot" aria-hidden="true"></span>{{statusLabel .Status}}</span>
             {{if .Error}}<span class="error-code mono">{{.Error}}</span>{{end}}
           </td>
+          <td class="exposure-cell">
+            {{if .ExposureKnown}}<span class="badge badge-muted" data-exposure-badge>{{.ExposureLabel}}</span>{{else}}<span class="muted" data-exposure-badge>—</span>{{end}}
+            <span class="badge badge-bad exposure-warning" data-exposure-warning {{if not .UnavailableLabel}}hidden{{end}}>{{.UnavailableLabel}}</span>
+          </td>
           <td class="mono nowrap"><span class="muted">客户端 → 服务端</span> {{bytes .TxBytes}}<br><span class="muted">服务端 → 客户端</span> {{bytes .RxBytes}}</td>
           <td class="col-actions">
             <button type="button" class="btn btn-quiet btn-xs" data-action="edit-mapping" data-mapping-id="{{.ID}}">编辑</button>
@@ -92,7 +97,7 @@
         </tr>
         {{end}}
         <tr data-empty-row {{if .Mappings}}hidden{{end}}>
-          <td colspan="7"><div class="empty-inline">还没有任何映射。点击“新增映射”创建第一条。</div></td>
+          <td colspan="8"><div class="empty-inline">还没有任何映射。点击“新增映射”创建第一条。</div></td>
         </tr>
       </tbody>
     </table>

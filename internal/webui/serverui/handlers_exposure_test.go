@@ -560,3 +560,93 @@ func TestExposureAPISuccess(t *testing.T) {
 		require.Equal(t, view.ExposureLocal, exposure)
 	})
 }
+
+func exposurePageAPI() *fakeExposureAPI {
+	return &fakeExposureAPI{fakeServerAPI: &fakeServerAPI{
+		clients: []view.ClientView{{
+			ID:       "c1",
+			Name:     "home",
+			Online:   true,
+			Revision: 4,
+			Mappings: []view.MappingView{
+				{
+					Mapping:             config.Mapping{ID: "m1", Type: "tcp", RemotePort: 2222, LocalAddr: "127.0.0.1:22", Note: "ssh", Enabled: true},
+					Status:              "running",
+					AssignedPort:        2222,
+					Exposure:            view.ExposureLocal,
+					UnavailableFamilies: []string{"ipv6"},
+				},
+				{
+					Mapping:      config.Mapping{ID: "m2", Type: "udp", RemotePort: 5353, LocalAddr: "127.0.0.1:53", Enabled: true},
+					Status:       "pending",
+					Exposure:     view.ExposurePublic,
+					AssignedPort: 5353,
+				},
+			},
+		}},
+	}}
+}
+
+func TestExposurePageControl(t *testing.T) {
+	api := exposurePageAPI()
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	resp := doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/mappings", "", cookie,
+		map[string]string{"Accept": "text/html"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readBody(t, resp)
+
+	require.Equal(t, 2, strings.Count(body, `data-action="toggle-exposure"`),
+		"each server mapping row needs an exposure control")
+	require.Contains(t, body, `data-client-id="c1"`)
+	require.Contains(t, body, `data-mapping-id="m1"`)
+	require.Contains(t, body, `data-exposure="local"`)
+	require.Contains(t, body, `data-exposure="public"`)
+	require.Contains(t, body, "仅本机")
+	require.Contains(t, body, "公网")
+	require.Contains(t, body, "立即关闭现有连接",
+		"the confirmation text must warn that switching closes existing connections")
+	require.NotContains(t, body, `type="password"`, "the exposure control must not ask for a password")
+	require.NotContains(t, body, "current_password")
+
+	resp = doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/clients/c1/detail", "", cookie, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	detail := readBody(t, resp)
+	require.Contains(t, detail, `data-action="toggle-exposure"`)
+	require.Contains(t, detail, `data-mapping-id="m1"`)
+	require.Contains(t, detail, "仅本机")
+	require.Contains(t, detail, "立即关闭现有连接")
+	require.NotContains(t, detail, `type="password"`, "the client detail exposure control must not ask for a password")
+}
+
+func TestExposurePageWarning(t *testing.T) {
+	api := exposurePageAPI()
+	api.clients[0].Mappings = append(api.clients[0].Mappings, view.MappingView{
+		Mapping:             config.Mapping{ID: "m3", Type: "tcp", RemotePort: 8080, LocalAddr: "127.0.0.1:80", Enabled: true},
+		Status:              "running",
+		AssignedPort:        8080,
+		Exposure:            view.ExposurePublic,
+		UnavailableFamilies: []string{"ipv4", "ipv6"},
+	})
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	resp := doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/mappings", "", cookie,
+		map[string]string{"Accept": "text/html"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readBody(t, resp)
+
+	require.Contains(t, body, "IPv6 不可用")
+	require.Contains(t, body, "IPv4/IPv6 不可用")
+	require.Contains(t, body, `data-exposure-warning`)
+	require.Equal(t, 2, strings.Count(body, "IPv6 不可用"),
+		"the IPv6-only and dual-family warnings must both be rendered")
+
+	resp = doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/clients/c1/detail", "", cookie, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	detail := readBody(t, resp)
+	require.Contains(t, detail, "IPv6 不可用")
+	require.Contains(t, detail, "IPv4/IPv6 不可用")
+	require.Contains(t, detail, `data-exposure-warning`)
+}

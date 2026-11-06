@@ -52,12 +52,13 @@
           <th>内网目标</th>
           <th>备注</th>
           <th>状态</th>
+          <th>暴露</th>
           <th>流量</th>
         </tr>
       </thead>
       <tbody>
         {{range .Rows}}
-        <tr data-mapping-row data-client="{{.ClientID}}" data-client-name="{{.ClientName}}" data-type="{{.Mapping.Type}}" data-status="{{.Mapping.Status}}" data-port="{{if .Mapping.AssignedPort}}{{.Mapping.AssignedPort}}{{else}}{{.Mapping.RemotePort}}{{end}}" data-search="{{.ClientName}} {{.ClientID}} {{.Mapping.LocalAddr}} {{.Mapping.Note}}">
+        <tr data-mapping-row data-client="{{.ClientID}}" data-client-name="{{.ClientName}}" data-mapping-id="{{.Mapping.ID}}" data-exposure="{{.Mapping.ExposureValue}}" data-type="{{.Mapping.Type}}" data-status="{{.Mapping.Status}}" data-port="{{if .Mapping.AssignedPort}}{{.Mapping.AssignedPort}}{{else}}{{.Mapping.RemotePort}}{{end}}" data-search="{{.ClientName}} {{.ClientID}} {{.Mapping.LocalAddr}} {{.Mapping.Note}}">
           <td>
             <a class="link" href="/clients?id={{.ClientID}}">
               <span class="status-dot {{if .Online}}is-online{{else}}is-offline{{end}}" aria-hidden="true"></span>
@@ -71,6 +72,10 @@
           <td>
             <span class="status status-{{statusClass .Mapping.Status}}"><span class="status-dot" aria-hidden="true"></span>{{statusLabel .Mapping.Status}}</span>
             {{if .Mapping.Error}}<span class="error-code mono">{{.Mapping.Error}}</span>{{end}}
+          </td>
+          <td class="exposure-cell">
+            <button type="button" class="btn btn-quiet btn-xs exposure-toggle" data-action="toggle-exposure" data-exposure-control="true" data-client-id="{{.ClientID}}" data-mapping-id="{{.Mapping.ID}}" data-exposure="{{.Mapping.ExposureValue}}" data-confirm="切换暴露范围会立即关闭现有连接，确定继续？" aria-label="切换映射 {{.Mapping.ID}} 的暴露范围，当前{{.Mapping.ExposureLabel}}" title="点击切换为{{.Mapping.ExposureNextLabel}}">{{.Mapping.ExposureLabel}}</button>
+            <span class="badge badge-bad exposure-warning" data-exposure-warning {{if not .Mapping.UnavailableLabel}}hidden{{end}}>{{.Mapping.UnavailableLabel}}</span>
           </td>
           <td class="mono nowrap"><span class="muted">客户端 → 服务端</span> {{bytes .Mapping.TxBytes}}<br><span class="muted">服务端 → 客户端</span> {{bytes .Mapping.RxBytes}}</td>
         </tr>

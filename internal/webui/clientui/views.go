@@ -105,6 +105,79 @@ type indexPage struct {
 	FailoverAvailable bool
 }
 
+// MappingRows returns the read-only display rows for the mapping table. The
+// handler keeps passing the raw read model; the template only needs labels.
+func (p indexPage) MappingRows() []clientMappingDisplay {
+	return clientMappingDisplays(p.Mappings)
+}
+
+// clientMappingDisplay adds the read-only exposure labels shown by the client
+// console. Exposure is selected by the server and must never be editable here.
+type clientMappingDisplay struct {
+	view.MappingView
+	ExposureValue    string
+	ExposureLabel    string
+	ExposureKnown    bool
+	UnavailableLabel string
+}
+
+func newClientMappingDisplay(mapping view.MappingView) clientMappingDisplay {
+	value, label, known := clientExposureDisplay(mapping.Exposure)
+	return clientMappingDisplay{
+		MappingView:      mapping,
+		ExposureValue:    value,
+		ExposureLabel:    label,
+		ExposureKnown:    known,
+		UnavailableLabel: unavailableFamiliesLabel(mapping.UnavailableFamilies),
+	}
+}
+
+// clientExposureDisplay leaves unknown/legacy values unknown so the client
+// console can render an em dash instead of guessing the server state.
+func clientExposureDisplay(exposure view.Exposure) (value, label string, known bool) {
+	switch exposure {
+	case view.ExposurePublic:
+		return string(view.ExposurePublic), "公网", true
+	case view.ExposureLocal:
+		return string(view.ExposureLocal), "仅本机", true
+	default:
+		return "", "", false
+	}
+}
+
+func unavailableFamiliesLabel(families []string) string {
+	labels := make([]string, 0, len(families))
+	seen := make(map[string]bool, len(families))
+	for _, family := range families {
+		var label string
+		switch strings.ToLower(strings.TrimSpace(family)) {
+		case "ipv4":
+			label = "IPv4"
+		case "ipv6":
+			label = "IPv6"
+		default:
+			label = strings.TrimSpace(family)
+		}
+		if label == "" || seen[label] {
+			continue
+		}
+		seen[label] = true
+		labels = append(labels, label)
+	}
+	if len(labels) == 0 {
+		return ""
+	}
+	return strings.Join(labels, "/") + " 不可用"
+}
+
+func clientMappingDisplays(mappings []view.MappingView) []clientMappingDisplay {
+	out := make([]clientMappingDisplay, 0, len(mappings))
+	for _, mapping := range mappings {
+		out = append(out, newClientMappingDisplay(mapping))
+	}
+	return out
+}
+
 type loginPage struct {
 	Username string
 	Error    string
@@ -127,17 +200,19 @@ type statusResponse struct {
 }
 
 type mappingResponse struct {
-	ID           string `json:"id"`
-	Type         string `json:"type"`
-	RemotePort   int    `json:"remote_port"`
-	LocalAddr    string `json:"local_addr"`
-	Note         string `json:"note"`
-	Enabled      bool   `json:"enabled"`
-	Status       string `json:"status"`
-	Error        string `json:"error,omitempty"`
-	AssignedPort int    `json:"assigned_port"`
-	TxBytes      uint64 `json:"tx_bytes"`
-	RxBytes      uint64 `json:"rx_bytes"`
+	ID                  string        `json:"id"`
+	Type                string        `json:"type"`
+	RemotePort          int           `json:"remote_port"`
+	LocalAddr           string        `json:"local_addr"`
+	Note                string        `json:"note"`
+	Enabled             bool          `json:"enabled"`
+	Status              string        `json:"status"`
+	Error               string        `json:"error,omitempty"`
+	AssignedPort        int           `json:"assigned_port"`
+	Exposure            view.Exposure `json:"exposure"`
+	UnavailableFamilies []string      `json:"unavailable_families"`
+	TxBytes             uint64        `json:"tx_bytes"`
+	RxBytes             uint64        `json:"rx_bytes"`
 }
 
 type sseSnapshot struct {
@@ -257,17 +332,19 @@ func countActiveMappings(mappings []view.MappingView) int {
 
 func mappingResponseFrom(mapping view.MappingView) mappingResponse {
 	return mappingResponse{
-		ID:           mapping.ID,
-		Type:         mapping.Type,
-		RemotePort:   mapping.RemotePort,
-		LocalAddr:    mapping.LocalAddr,
-		Note:         mapping.Note,
-		Enabled:      mapping.Enabled,
-		Status:       mapping.Status,
-		Error:        mapping.Error,
-		AssignedPort: mapping.AssignedPort,
-		TxBytes:      mapping.TxBytes,
-		RxBytes:      mapping.RxBytes,
+		ID:                  mapping.ID,
+		Type:                mapping.Type,
+		RemotePort:          mapping.RemotePort,
+		LocalAddr:           mapping.LocalAddr,
+		Note:                mapping.Note,
+		Enabled:             mapping.Enabled,
+		Status:              mapping.Status,
+		Error:               mapping.Error,
+		AssignedPort:        mapping.AssignedPort,
+		Exposure:            mapping.Exposure,
+		UnavailableFamilies: mapping.UnavailableFamilies,
+		TxBytes:             mapping.TxBytes,
+		RxBytes:             mapping.RxBytes,
 	}
 }
 
