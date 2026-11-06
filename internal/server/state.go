@@ -361,16 +361,22 @@ func (m *mappingManager) preparePushLocked(sess *clientSession, mappings []confi
 	for i, plan := range plans {
 		if plan.keep {
 			results[i] = control.Result{
-				ID:           plan.mapping.ID,
-				OK:           true,
-				AssignedPort: plan.old.assignedPort,
-				UDPToken:     plan.old.udpToken,
+				ID:                  plan.mapping.ID,
+				OK:                  true,
+				AssignedPort:        plan.old.assignedPort,
+				UDPToken:            plan.old.udpToken,
+				UnavailableFamilies: mappingWarnings(plan.old),
+				Exposure:            string(exposureOrDefault(plan.old.exposure)),
 			}
 			continue
 		}
 		if !plan.mapping.Enabled {
 			plan.fresh = m.newRuntime(sess.id, plan.mapping, mappingStatusDisabled)
-			results[i] = control.Result{ID: plan.mapping.ID, OK: true}
+			results[i] = control.Result{
+				ID:       plan.mapping.ID,
+				OK:       true,
+				Exposure: string(exposureOrDefault(plan.fresh.exposure)),
+			}
 			continue
 		}
 

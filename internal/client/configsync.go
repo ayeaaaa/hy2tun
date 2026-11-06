@@ -427,6 +427,12 @@ func mergeViews(old []view.MappingView, mappings []config.Mapping) []view.Mappin
 	for _, mapping := range mappings {
 		mappingView := view.MappingView{Mapping: mapping, Status: "pending"}
 		previous, ok := oldByID[mapping.ID]
+		if ok {
+			// Exposure is a server read model; keep showing the last known
+			// value while a local edit is waiting for its ack.
+			mappingView.Exposure = previous.Exposure
+			mappingView.UnavailableFamilies = append([]string(nil), previous.UnavailableFamilies...)
+		}
 		switch {
 		case !mapping.Enabled:
 			mappingView.Status = "disabled"
@@ -537,6 +543,11 @@ func helloViews(snapshot, current []config.Mapping, results []control.Result) []
 	views := make([]view.MappingView, 0, len(current))
 	for _, mapping := range current {
 		mappingView := view.MappingView{Mapping: mapping, Status: "pending"}
+		result, hasResult := byID[mapping.ID]
+		if hasResult {
+			mappingView.Exposure = view.Exposure(result.Exposure)
+			mappingView.UnavailableFamilies = append([]string(nil), result.UnavailableFamilies...)
+		}
 		switch {
 		case !mapping.Enabled:
 			mappingView.Status = "disabled"
@@ -545,8 +556,7 @@ func helloViews(snapshot, current []config.Mapping, results []control.Result) []
 			if !ok || previous.Type != mapping.Type || previous.Enabled != mapping.Enabled {
 				break
 			}
-			result, ok := byID[mapping.ID]
-			if !ok {
+			if !hasResult {
 				break
 			}
 			oldPort := previous.RemotePort
@@ -592,10 +602,15 @@ func applyPushTokens(tokens map[string]string, mappings []config.Mapping, result
 
 // pushViews builds the read models for a pushed mapping list. A UDP mapping
 // without a token stays pending because push does not carry tokens.
-func pushViews(mappings []config.Mapping, tokens map[string]string) []view.MappingView {
+func pushViews(mappings []config.Mapping, tokens map[string]string, results []control.Result) []view.MappingView {
+	byID := resultMap(results)
 	views := make([]view.MappingView, 0, len(mappings))
 	for _, mapping := range mappings {
 		mappingView := view.MappingView{Mapping: mapping}
+		if result, ok := byID[mapping.ID]; ok {
+			mappingView.Exposure = view.Exposure(result.Exposure)
+			mappingView.UnavailableFamilies = append([]string(nil), result.UnavailableFamilies...)
+		}
 		switch {
 		case !mapping.Enabled:
 			mappingView.Status = "disabled"

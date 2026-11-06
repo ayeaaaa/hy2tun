@@ -61,6 +61,7 @@ type clientSession struct {
 	authenticatedGeneration int64
 	credentialSynced        bool
 	canCredentialUpdate     bool
+	canExposureUpdate       bool
 	// credentialAck receives the next CredentialAck, including its OK/Error
 	// result. The control read loop sends non-blockingly, so a late ack cannot
 	// stall it.
@@ -139,6 +140,28 @@ func (s *clientSession) credentialStateSnapshot() (reported, authenticated int64
 func (s *clientSession) credentialState() (generation int64, synced, capable bool) {
 	generation, _, synced, capable = s.credentialStateSnapshot()
 	return generation, synced, capable
+}
+
+// setExposureCapability records whether the client advertised exposure_v1.
+// The flag is written once at Hello and read when the server pushes a runtime
+// exposure change.
+func (s *clientSession) setExposureCapability(capable bool) {
+	if s == nil {
+		return
+	}
+	s.credentialMu.Lock()
+	s.canExposureUpdate = capable
+	s.credentialMu.Unlock()
+}
+
+// exposureCapability reports whether the client accepts ExposureUpdate.
+func (s *clientSession) exposureCapability() bool {
+	if s == nil {
+		return false
+	}
+	s.credentialMu.Lock()
+	defer s.credentialMu.Unlock()
+	return s.canExposureUpdate
 }
 
 // authenticatedCredentialState returns the generation whose control token

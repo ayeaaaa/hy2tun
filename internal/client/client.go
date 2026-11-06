@@ -934,6 +934,11 @@ func mappingViews(mappings []config.Mapping, results map[string]control.Result) 
 	views := make([]view.MappingView, 0, len(mappings))
 	for _, mapping := range mappings {
 		mappingView := view.MappingView{Mapping: mapping, Status: "pending"}
+		result, hasResult := results[mapping.ID]
+		if hasResult {
+			mappingView.Exposure = view.Exposure(result.Exposure)
+			mappingView.UnavailableFamilies = append([]string(nil), result.UnavailableFamilies...)
+		}
 		if !mapping.Enabled {
 			mappingView.Status = "disabled"
 			views = append(views, mappingView)
@@ -943,9 +948,8 @@ func mappingViews(mappings []config.Mapping, results map[string]control.Result) 
 			views = append(views, mappingView)
 			continue
 		}
-		result, ok := results[mapping.ID]
 		switch {
-		case !ok:
+		case !hasResult:
 			mappingView.Status = "failed"
 			mappingView.Error = "internal"
 		case result.OK:

@@ -132,6 +132,47 @@ func TestNewControlFieldsUseWireNames(t *testing.T) {
 	}
 }
 
+func TestExposureUpdateFrame(t *testing.T) {
+	in := &ExposureUpdate{
+		Type:                TypeExposureUpdate,
+		ID:                  "m1",
+		Exposure:            "local",
+		UnavailableFamilies: []string{"ipv6"},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, WriteMessage(&buf, in))
+	out, err := ReadMessage(&buf)
+	require.NoError(t, err)
+	require.Equal(t, in, out)
+}
+
+func TestResultExposureJSONCompatibility(t *testing.T) {
+	// An old server omits the new fields; a new client must still decode it.
+	var legacy bytes.Buffer
+	writeRawFrame(t, &legacy, []byte(`{"type":"hello_ack","ok":true,"results":[{"id":"m1","ok":true,"assigned_port":23456}]}`))
+	out, err := ReadMessage(&legacy)
+	require.NoError(t, err)
+	ack, ok := out.(*HelloAck)
+	require.True(t, ok)
+	require.Len(t, ack.Results, 1)
+	require.Equal(t, Result{ID: "m1", OK: true, AssignedPort: 23456}, ack.Results[0])
+
+	// A new server's extra fields round-trip without changing the old shape.
+	var current bytes.Buffer
+	writeRawFrame(t, &current, []byte(`{"type":"hello_ack","ok":true,"results":[{"id":"m1","ok":true,"assigned_port":23456,"exposure":"local","unavailable_families":["ipv6"]}]}`))
+	out, err = ReadMessage(&current)
+	require.NoError(t, err)
+	ack, ok = out.(*HelloAck)
+	require.True(t, ok)
+	require.Equal(t, Result{
+		ID:                  "m1",
+		OK:                  true,
+		AssignedPort:        23456,
+		Exposure:            "local",
+		UnavailableFamilies: []string{"ipv6"},
+	}, ack.Results[0])
+}
+
 func TestUpdateOmitsEmptyName(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(t, WriteMessage(&buf, &Update{Type: TypeUpdate, Revision: 3}))

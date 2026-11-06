@@ -21,6 +21,7 @@ import (
 	"hy2tun/internal/control"
 	"hy2tun/internal/state"
 	"hy2tun/internal/testutil"
+	"hy2tun/internal/view"
 )
 
 // testPair is a running server and client used by the control-plane tests.
@@ -263,6 +264,94 @@ func TestHelloCurrentGenerationAndCapability(t *testing.T) {
 			v[0].CredentialSynced &&
 			v[0].CredentialCapable
 	}))
+}
+
+// openTestControl opens a raw control stream, sends Hello, and returns the
+// authenticated connection and HelloAck.
+func openTestControl(t *testing.T, srv *Server, clientID string, capabilities []string, mappings []config.Mapping) (net.Conn, *control.HelloAck) {
+	t.Helper()
+
+	hy := newHY2Client(t, srv, "pw", nil)
+	conn, err := hy.TCP("_hy2tun_control_:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	require.NoError(t, control.WriteMessage(conn, &control.Hello{
+		Type:         control.TypeHello,
+		Protocol:     control.ProtocolVersion,
+		Token:        "0123456789abcdef0123456789abcdef",
+		ClientID:     clientID,
+		Name:         clientID,
+		Version:      "test",
+		Revision:     0,
+		Capabilities: capabilities,
+		Mappings:     mappings,
+	}))
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+	msg, err := control.ReadMessage(conn)
+	require.NoError(t, err)
+	require.NoError(t, conn.SetReadDeadline(time.Time{}))
+	ack, ok := msg.(*control.HelloAck)
+	require.True(t, ok)
+	require.True(t, ack.OK)
+	return conn, ack
+}
+
+func TestExposureCapability(t *testing.T) {
+	srv, stop := startTestServer(t)
+	defer stop()
+
+	conn, ack := openTestControl(t, srv, "exposure-client", []string{control.CapabilityExposure}, []config.Mapping{
+		{ID: "m1", Type: "tcp", RemotePort: 0, LocalAddr: "127.0.0.1:9001", Enabled: true},
+	})
+	require.Len(t, ack.Results, 1)
+	require.True(t, ack.Results[0].OK)
+	require.Equal(t, "public", ack.Results[0].Exposure)
+
+	switched, err := srv.SetMappingExposure("exposure-client", "m1", view.ExposureLocal)
+	require.NoError(t, err)
+	require.Equal(t, view.ExposureLocal, switched.Exposure)
+
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(2*time.Second)))
+	msg, err := control.ReadMessage(conn)
+	require.NoError(t, err)
+	update, ok := msg.(*control.ExposureUpdate)
+	require.True(t, ok, "capable client must receive exposure_update, got %T", msg)
+	require.Equal(t, "m1", update.ID)
+	require.Equal(t, "local", update.Exposure)
+	require.Empty(t, update.UnavailableFamilies)
+
+	client, ok := srv.Client("exposure-client")
+	require.True(t, ok)
+	require.Len(t, client.Mappings, 1)
+	require.Equal(t, view.ExposureLocal, client.Mappings[0].Exposure)
+}
+
+func TestExposureUpdateOldClient(t *testing.T) {
+	srv, stop := startTestServer(t)
+	defer stop()
+
+	// A legacy client omits Capabilities entirely and must never receive the
+	// new message type.
+	conn, ack := openTestControl(t, srv, "legacy-client", nil, []config.Mapping{
+		{ID: "m1", Type: "tcp", RemotePort: 0, LocalAddr: "127.0.0.1:9001", Enabled: true},
+	})
+	require.Len(t, ack.Results, 1)
+	require.True(t, ack.Results[0].OK)
+	require.Equal(t, "public", ack.Results[0].Exposure, "Result fields are additive for old clients")
+
+	_, err := srv.SetMappingExposure("legacy-client", "m1", view.ExposureLocal)
+	require.NoError(t, err)
+
+	// The ping response is the next frame. An exposure_update would have been
+	// written synchronously before SetMappingExposure returned.
+	require.NoError(t, control.WriteMessage(conn, &control.Ping{Type: control.TypePing, TS: 42}))
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(2*time.Second)))
+	msg, err := control.ReadMessage(conn)
+	require.NoError(t, err)
+	pong, ok := msg.(*control.Pong)
+	require.True(t, ok, "old client must receive only its pong, got %T", msg)
+	require.Equal(t, int64(42), pong.TS)
 }
 
 func TestCredentialAckIsForwardedToSession(t *testing.T) {

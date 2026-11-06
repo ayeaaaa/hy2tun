@@ -47,6 +47,7 @@ func TestControlRoundTripAllMessageTypes(t *testing.T) {
 		{"open_result", &OpenResult{Type: TypeOpenResult, Token: "a1b2", OK: false, Error: "dial_failed"}},
 		{"ping", &Ping{Type: TypePing, TS: 1793076000}},
 		{"pong", &Pong{Type: TypePong, TS: 1793076000}},
+		{"exposure_update", &ExposureUpdate{Type: TypeExposureUpdate, ID: "m1", Exposure: "local", UnavailableFamilies: []string{"ipv6"}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -82,6 +83,12 @@ func TestCapabilityCredentialUpdateValue(t *testing.T) {
 	require.Equal(t, "credential_update_v1", CapabilityCredentialUpdate)
 }
 
+func TestCapabilityExposureValue(t *testing.T) {
+	// This string is part of the wire contract; clients and servers negotiate
+	// exposure updates by exact match.
+	require.Equal(t, "exposure_v1", CapabilityExposure)
+}
+
 func TestReadMessageIgnoresUnknownFields(t *testing.T) {
 	var buf bytes.Buffer
 	writeRawFrame(t, &buf, []byte(`{"type":"ping","ts":42,"future":{"nested":true}}`))
@@ -115,7 +122,7 @@ func TestMessageTypeNames(t *testing.T) {
 	types := []string{
 		TypeHello, TypeHelloAck, TypeUpdate, TypeUpdateAck, TypePush,
 		TypePushAck, TypeOpen, TypeOpenResult, TypePing, TypePong,
-		TypeCredentialUpdate, TypeCredentialAck,
+		TypeCredentialUpdate, TypeCredentialAck, TypeExposureUpdate,
 	}
 	seen := make(map[string]bool, len(types))
 	for _, typ := range types {

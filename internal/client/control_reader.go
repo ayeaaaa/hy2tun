@@ -56,7 +56,7 @@ func (c *Client) startControlReader(parent context.Context, owner net.Conn, clos
 				continue
 			case *control.PushAck, *control.OpenResult, *control.HelloAck:
 				continue
-			case *control.Open, *control.Push, *control.UpdateAck, *control.CredentialUpdate:
+			case *control.Open, *control.Push, *control.UpdateAck, *control.CredentialUpdate, *control.ExposureUpdate:
 			default:
 				fail(transport.ErrProtocol)
 				return

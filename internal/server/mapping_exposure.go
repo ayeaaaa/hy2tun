@@ -149,14 +149,19 @@ func (m *mappingManager) exposureFor(clientID, mappingID string) view.Exposure {
 	return exposureOrDefault(view.Exposure(m.store.Exposure(clientID, mappingID)))
 }
 
+// mappingWarnings returns the families a live runtime could not bind. It is
+// used by control results and read models so both report the same list.
+func mappingWarnings(rt *mappingRuntime) []string {
+	if rt == nil || rt.listeners == nil {
+		return nil
+	}
+	return rt.listeners.Warnings()
+}
+
 // mappingViewForRuntime builds the read model for a live runtime.
 func mappingViewForRuntime(rt *mappingRuntime) view.MappingView {
 	if rt == nil {
 		return view.MappingView{}
-	}
-	var unavailable []string
-	if rt.listeners != nil {
-		unavailable = rt.listeners.Warnings()
 	}
 	return view.MappingView{
 		Mapping:             rt.mapping,
@@ -164,7 +169,7 @@ func mappingViewForRuntime(rt *mappingRuntime) view.MappingView {
 		Error:               rt.errCode,
 		AssignedPort:        rt.assignedPort,
 		Exposure:            exposureOrDefault(rt.exposure),
-		UnavailableFamilies: unavailable,
+		UnavailableFamilies: mappingWarnings(rt),
 		TxBytes:             rt.txBytes.Load(),
 		RxBytes:             rt.rxBytes.Load(),
 	}
@@ -248,32 +253,53 @@ func (m *mappingManager) SetExposure(clientID, mappingID string, exposure view.E
 
 		// Disabled, failed, or already-closed mappings have no listener to
 		// switch. Store the desired exposure for the next bind.
-		if rt.closed.Load() || rt.status != mappingStatusRunning || rt.listeners == nil {
-			result, err := m.setStoredExposureForRuntimeLocked(sess, rt, exposure)
-			m.mu.Unlock()
-			m.exposureMu.Unlock()
-			sess.controlMu.Unlock()
-			return result, err
+		var result view.MappingView
+		var err error
+		switch {
+		case rt.closed.Load() || rt.status != mappingStatusRunning || rt.listeners == nil:
+			result, err = m.setStoredExposureForRuntimeLocked(sess, rt, exposure)
+		case exposureOrDefault(rt.exposure) == exposure && len(rt.listeners.Warnings()) == 0:
+			// A healthy same-value request is a read, not a listener rebuild.
+			// Keep the retry path when a family warning is present so a repeated
+			// request can recover the missing family.
+			result = mappingViewForRuntime(rt)
+		default:
+			result, err = m.switchExposureLocked(sess, rt, exposure)
 		}
-
-		// A healthy same-value request is a read, not a listener rebuild. Keep
-		// the retry path when a family warning is present so a repeated
-		// request can recover the missing family.
-		if exposureOrDefault(rt.exposure) == exposure && len(rt.listeners.Warnings()) == 0 {
-			result := mappingViewForRuntime(rt)
-			m.mu.Unlock()
-			m.exposureMu.Unlock()
-			sess.controlMu.Unlock()
-			return result, nil
-		}
-
-		result, err := m.switchExposureLocked(sess, rt, exposure)
 		m.mu.Unlock()
 		m.exposureMu.Unlock()
+		if err == nil {
+			// Keep controlMu while notifying so the read-only update cannot
+			// overtake a push or update ack for the same session.
+			m.notifyExposureUpdate(sess, result)
+		}
 		sess.controlMu.Unlock()
 		return result, err
 	}
 	return view.MappingView{}, control.ErrClientOffline
+}
+
+// notifyExposureUpdate sends one exposure_update frame to a client that
+// advertised exposure_v1. The caller must hold sess.controlMu and must not hold
+// m.mu or exposureMu. Notification is best-effort: the exposure change is
+// already committed, and a failed write is corrected by the next hello.
+func (m *mappingManager) notifyExposureUpdate(sess *clientSession, result view.MappingView) {
+	if sess == nil || !sess.exposureCapability() {
+		return
+	}
+	update := &control.ExposureUpdate{
+		Type:                control.TypeExposureUpdate,
+		ID:                  result.ID,
+		Exposure:            string(exposureOrDefault(result.Exposure)),
+		UnavailableFamilies: append([]string(nil), result.UnavailableFamilies...),
+	}
+	if err := sess.write(update); err != nil {
+		m.log.Debug("send exposure update",
+			"client", sess.id,
+			"mapping", result.ID,
+			"error", err,
+		)
+	}
 }
 
 // setStoredExposureLocked stores the desired exposure for an offline client.

@@ -18,12 +18,18 @@ const (
 	TypePong             = "pong"
 	TypeCredentialUpdate = "credential_update"
 	TypeCredentialAck    = "credential_ack"
+	TypeExposureUpdate   = "exposure_update"
 )
 
 // CapabilityCredentialUpdate is advertised in Hello.Capabilities by clients
 // that accept server-pushed CredentialUpdate messages. Clients that omit it
 // are treated as legacy clients and must update credentials manually.
 const CapabilityCredentialUpdate = "credential_update_v1"
+
+// CapabilityExposure is advertised in Hello.Capabilities by clients that accept
+// server-pushed ExposureUpdate messages. Clients that omit it never receive
+// them.
+const CapabilityExposure = "exposure_v1"
 
 // Hello is sent by the client immediately after opening the control stream.
 // It authenticates the client and publishes the authoritative mapping list.
@@ -65,6 +71,9 @@ type Result struct {
 	// UnavailableFamilies lists address families ("ipv4"/"ipv6") that could
 	// not be bound while the mapping still serves on the other family.
 	UnavailableFamilies []string `json:"unavailable_families,omitempty"`
+	// Exposure is the server-selected mapping exposure ("public"/"local").
+	// It is a read-only read model; old servers omit it.
+	Exposure string `json:"exposure,omitempty"`
 }
 
 // Update is sent by the client after a local configuration change. It carries
@@ -133,6 +142,16 @@ type CredentialAck struct {
 	Error      string `json:"error"`
 }
 
+// ExposureUpdate is pushed by the server to a capable client when a mapping's
+// exposure or address-family availability changes at runtime. It updates the
+// client read model only; the client must not persist it or bump its revision.
+type ExposureUpdate struct {
+	Type                string   `json:"type"`
+	ID                  string   `json:"id"`
+	Exposure            string   `json:"exposure"`
+	UnavailableFamilies []string `json:"unavailable_families,omitempty"`
+}
+
 // Open asks the client to dial a local target for an incoming public
 // connection identified by Token.
 type Open struct {
@@ -188,6 +207,8 @@ func newMessage(typ string) (any, bool) {
 		return &CredentialUpdate{}, true
 	case TypeCredentialAck:
 		return &CredentialAck{}, true
+	case TypeExposureUpdate:
+		return &ExposureUpdate{}, true
 	default:
 		return nil, false
 	}

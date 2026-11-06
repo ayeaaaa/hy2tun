@@ -115,6 +115,7 @@ func (h *controlHandler) serveWithMeta(conn net.Conn, meta sessionMeta) {
 	// control token, not the generation the client claims.
 	synced := set.Synced(authenticatedGeneration)
 	capable := hasCapability(hello.Capabilities, control.CapabilityCredentialUpdate)
+	exposureCapable := hasCapability(hello.Capabilities, control.CapabilityExposure)
 
 	sess := &clientSession{
 		id:              hello.ClientID,
@@ -130,6 +131,7 @@ func (h *controlHandler) serveWithMeta(conn net.Conn, meta sessionMeta) {
 		done:            make(chan struct{}),
 	}
 	sess.setCredentialStateFor(generation, authenticatedGeneration, synced, capable)
+	sess.setExposureCapability(exposureCapable)
 	results, err := h.server.registerControl(sess, hello, meta, deadline, generation, capable)
 	if err != nil {
 		return

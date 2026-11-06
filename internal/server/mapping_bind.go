@@ -95,6 +95,7 @@ func (m *mappingManager) bindLocked(sess *clientSession, rt *mappingRuntime, ign
 				OK:                  true,
 				AssignedPort:        rt.assignedPort,
 				UnavailableFamilies: listeners.Warnings(),
+				Exposure:            string(exposureOrDefault(rt.exposure)),
 			}
 		}
 
@@ -111,6 +112,7 @@ func (m *mappingManager) bindLocked(sess *clientSession, rt *mappingRuntime, ign
 			AssignedPort:        rt.assignedPort,
 			UDPToken:            rt.udpToken,
 			UnavailableFamilies: listeners.Warnings(),
+			Exposure:            string(exposureOrDefault(rt.exposure)),
 		}
 	}
 }

@@ -287,16 +287,22 @@ func (m *mappingManager) updateLocked(sess *clientSession, revision int64, mappi
 		plan := &plans[i]
 		if plan.keep {
 			results[i] = control.Result{
-				ID:           plan.mapping.ID,
-				OK:           true,
-				AssignedPort: plan.old.assignedPort,
-				UDPToken:     plan.old.udpToken,
+				ID:                  plan.mapping.ID,
+				OK:                  true,
+				AssignedPort:        plan.old.assignedPort,
+				UDPToken:            plan.old.udpToken,
+				UnavailableFamilies: mappingWarnings(plan.old),
+				Exposure:            string(exposureOrDefault(plan.old.exposure)),
 			}
 			continue
 		}
 		if !plan.mapping.Enabled {
 			plan.fresh = m.newRuntime(sess.id, plan.mapping, mappingStatusDisabled)
-			results[i] = control.Result{ID: plan.mapping.ID, OK: true}
+			results[i] = control.Result{
+				ID:       plan.mapping.ID,
+				OK:       true,
+				Exposure: string(exposureOrDefault(plan.fresh.exposure)),
+			}
 			continue
 		}
 
@@ -367,11 +373,13 @@ func (m *mappingManager) currentResultsLocked(sess *clientSession) []control.Res
 			continue
 		}
 		results = append(results, control.Result{
-			ID:           id,
-			OK:           rt.errCode == "",
-			AssignedPort: rt.assignedPort,
-			UDPToken:     rt.udpToken,
-			Error:        rt.errCode,
+			ID:                  id,
+			OK:                  rt.errCode == "",
+			AssignedPort:        rt.assignedPort,
+			UDPToken:            rt.udpToken,
+			Error:               rt.errCode,
+			UnavailableFamilies: mappingWarnings(rt),
+			Exposure:            string(exposureOrDefault(rt.exposure)),
 		})
 	}
 	return results
@@ -589,7 +597,11 @@ func (m *mappingManager) applyLocked(sess *clientSession, mappings []config.Mapp
 
 		if !mapping.Enabled {
 			rt.status = mappingStatusDisabled
-			results = append(results, control.Result{ID: mapping.ID, OK: true})
+			results = append(results, control.Result{
+				ID:       mapping.ID,
+				OK:       true,
+				Exposure: string(exposureOrDefault(rt.exposure)),
+			})
 			continue
 		}
 		results = append(results, m.bindLocked(sess, rt, nil, nil))
@@ -602,7 +614,11 @@ func (m *mappingManager) applyLocked(sess *clientSession, mappings []config.Mapp
 func (m *mappingManager) fail(rt *mappingRuntime, code control.ErrorCode) control.Result {
 	rt.status = mappingStatusFailed
 	rt.errCode = string(code)
-	return control.Result{ID: rt.mapping.ID, Error: string(code)}
+	return control.Result{
+		ID:       rt.mapping.ID,
+		Error:    string(code),
+		Exposure: string(exposureOrDefault(rt.exposure)),
+	}
 }
 
 // acceptAndCloseTCP keeps a listener live but refuses traffic. It is only used

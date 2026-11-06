@@ -11,6 +11,7 @@ import (
 	"hy2tun/internal/control"
 	"hy2tun/internal/transport"
 	"hy2tun/internal/version"
+	"hy2tun/internal/view"
 )
 
 const controlHandshakeTimeout = 10 * time.Second
@@ -86,7 +87,7 @@ func (c *Client) handshakeWire(ctx context.Context, conn net.Conn, accept func()
 		Version:              version.Version,
 		Revision:             cfg.Client.Revision,
 		CredentialGeneration: generation,
-		Capabilities:         []string{control.CapabilityCredentialUpdate},
+		Capabilities:         []string{control.CapabilityCredentialUpdate, control.CapabilityExposure},
 		Mappings:             cfg.Mappings,
 	}
 	c.writeMu.Lock()
@@ -245,6 +246,8 @@ func (c *Client) dispatchControl(conn net.Conn, msg any) error {
 		c.handleUpdateAck(message)
 	case *control.CredentialUpdate:
 		c.handleCredentialUpdate(conn, message)
+	case *control.ExposureUpdate:
+		c.handleExposureUpdate(message)
 	case *control.Ping:
 		if err := c.writeControl(conn, &control.Pong{
 			Type: control.TypePong,
@@ -260,6 +263,25 @@ func (c *Client) dispatchControl(conn net.Conn, msg any) error {
 		return transport.ErrProtocol
 	}
 	return nil
+}
+
+// handleExposureUpdate applies a server-pushed exposure read model. It only
+// updates the in-memory mapping view: exposure is not client configuration, so
+// it is never written to YAML and never changes the revision.
+func (c *Client) handleExposureUpdate(msg *control.ExposureUpdate) {
+	if msg == nil || msg.ID == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range c.mappings {
+		if c.mappings[i].ID != msg.ID {
+			continue
+		}
+		c.mappings[i].Exposure = view.Exposure(msg.Exposure)
+		c.mappings[i].UnavailableFamilies = append([]string(nil), msg.UnavailableFamilies...)
+		return
+	}
 }
 
 // handlePush applies an authoritative mapping list from the server. The client
@@ -331,7 +353,7 @@ func (c *Client) handlePush(conn net.Conn, msg *control.Push) {
 
 	tokens := retainTokensForPush(c.cfg.Mappings, next.Mappings, c.udpTokenSnapshot(), c.mappingSnapshot())
 	applyPushTokens(tokens, next.Mappings, msg.Results)
-	views := pushViews(next.Mappings, tokens)
+	views := pushViews(next.Mappings, tokens, msg.Results)
 	c.storeConfigLocked(next, tokens, views)
 	c.configMu.Unlock()
 
