@@ -16,6 +16,16 @@ import (
 )
 
 func main() {
+	// Subcommands are dispatched before the server's global flag parsing. The
+	// exposure command must never start the server or generate a Web password.
+	if len(os.Args) > 1 && os.Args[1] == "exposure" {
+		if err := runExposure(os.Args[2:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintf(os.Stderr, "hy2tund: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "hy2tund: %v\n", err)
 		os.Exit(1)
