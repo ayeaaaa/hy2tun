@@ -12,6 +12,7 @@ import (
 
 	"hy2tun/internal/config"
 	"hy2tun/internal/control"
+	"hy2tun/internal/view"
 )
 
 func TestCredentialStateAccessors(t *testing.T) {
@@ -62,6 +63,8 @@ type testRuntimeSnapshot struct {
 	status       string
 	mapping      config.Mapping
 	assignedPort int
+	exposure     view.Exposure
+	unavailable  []string
 }
 
 func snapshotTestRuntime(t *testing.T, srv *Server, clientID, mappingID string) testRuntimeSnapshot {
@@ -79,8 +82,10 @@ func snapshotTestRuntime(t *testing.T, srv *Server, clientID, mappingID string) 
 		listener = rt.listeners.TCP[0]
 	}
 	var udpConn *multiUDPConn
+	var unavailable []string
 	if rt.listeners != nil {
 		udpConn = rt.listeners.UDP
+		unavailable = rt.listeners.Warnings()
 	}
 	return testRuntimeSnapshot{
 		runtime:      rt,
@@ -90,6 +95,8 @@ func snapshotTestRuntime(t *testing.T, srv *Server, clientID, mappingID string) 
 		status:       rt.status,
 		mapping:      rt.mapping,
 		assignedPort: rt.assignedPort,
+		exposure:     exposureOrDefault(rt.exposure),
+		unavailable:  unavailable,
 	}
 }
 

@@ -369,12 +369,12 @@ func (m *mappingManager) preparePushLocked(sess *clientSession, mappings []confi
 			continue
 		}
 		if !plan.mapping.Enabled {
-			plan.fresh = m.newRuntime(plan.mapping, mappingStatusDisabled)
+			plan.fresh = m.newRuntime(sess.id, plan.mapping, mappingStatusDisabled)
 			results[i] = control.Result{ID: plan.mapping.ID, OK: true}
 			continue
 		}
 
-		rt := m.newRuntime(plan.mapping, mappingStatusPending)
+		rt := m.newRuntime(sess.id, plan.mapping, mappingStatusPending)
 		result := m.bindLocked(sess, rt, ignored, prebound)
 		results[i] = result
 		if !result.OK {

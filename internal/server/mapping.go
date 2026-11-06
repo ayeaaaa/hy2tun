@@ -89,13 +89,16 @@ func (m *mappingManager) SetPolicy(policy *ports.Policy) {
 }
 
 // newRuntime creates a mapping runtime attached to this manager's data-plane
-// token registry.
-func (m *mappingManager) newRuntime(mapping config.Mapping, status string) *mappingRuntime {
+// token registry. Every bind path goes through here so a mapping's stored
+// exposure is applied even when it is rebound by an update, push, enable, or
+// retry.
+func (m *mappingManager) newRuntime(clientID string, mapping config.Mapping, status string) *mappingRuntime {
 	return &mappingRuntime{
-		id:      mapping.ID,
-		mapping: mapping,
-		status:  status,
-		data:    m.data,
+		id:       mapping.ID,
+		mapping:  mapping,
+		status:   status,
+		exposure: m.exposureFor(clientID, mapping.ID),
+		data:     m.data,
 	}
 }
 
@@ -277,12 +280,12 @@ func (m *mappingManager) updateLocked(sess *clientSession, revision int64, mappi
 			continue
 		}
 		if !plan.mapping.Enabled {
-			plan.fresh = m.newRuntime(plan.mapping, mappingStatusDisabled)
+			plan.fresh = m.newRuntime(sess.id, plan.mapping, mappingStatusDisabled)
 			results[i] = control.Result{ID: plan.mapping.ID, OK: true}
 			continue
 		}
 
-		rt := m.newRuntime(plan.mapping, mappingStatusPending)
+		rt := m.newRuntime(sess.id, plan.mapping, mappingStatusPending)
 		result := m.bindLocked(sess, rt, ignored, prebound)
 		results[i] = result
 		if !result.OK {
@@ -565,7 +568,7 @@ func (m *mappingManager) applyLocked(sess *clientSession, mappings []config.Mapp
 		}
 		seen[mapping.ID] = struct{}{}
 
-		rt := m.newRuntime(mapping, mappingStatusPending)
+		rt := m.newRuntime(sess.id, mapping, mappingStatusPending)
 		sess.mappings[mapping.ID] = rt
 		sess.order = append(sess.order, mapping.ID)
 
@@ -654,7 +657,9 @@ func (m *mappingManager) softReservedPortsLocked(clientID string) map[int]struct
 }
 
 // persistLocked records the effective mapping list, with assigned ports filled
-// in, so offline reservations survive a restart.
+// in, so offline reservations survive a restart. The exposure map is rebuilt
+// from the current mapping IDs, which both carries stored values through
+// ordinary edits and removes entries for mappings that no longer exist.
 func (m *mappingManager) persistLocked(sess *clientSession, now time.Time) {
 	if m.store == nil {
 		return
@@ -671,6 +676,12 @@ func (m *mappingManager) persistLocked(sess *clientSession, now time.Time) {
 		}
 		mappings = append(mappings, mapping)
 	}
+	exposures := make(map[string]string, len(mappings))
+	for _, mapping := range mappings {
+		if value := m.store.Exposure(sess.id, mapping.ID); value != "" {
+			exposures[mapping.ID] = value
+		}
+	}
 	m.store.Upsert(state.ClientState{
 		ID:        sess.id,
 		Name:      sess.name,
@@ -679,6 +690,7 @@ func (m *mappingManager) persistLocked(sess *clientSession, now time.Time) {
 		Online:    true,
 		LastSeen:  now,
 		Mappings:  mappings,
+		Exposures: exposures,
 		Transport: string(sess.transport),
 	})
 }
@@ -771,6 +783,7 @@ func (m *mappingManager) clientViews() []view.ClientView {
 					Mapping:      mapping,
 					Status:       status,
 					AssignedPort: mapping.RemotePort,
+					Exposure:     exposureOrDefault(view.Exposure(client.Exposures[mapping.ID])),
 				})
 			}
 			out = append(out, clientView)
@@ -800,14 +813,7 @@ func sessionView(sess *clientSession) view.ClientView {
 		if rt == nil {
 			continue
 		}
-		clientView.Mappings = append(clientView.Mappings, view.MappingView{
-			Mapping:      rt.mapping,
-			Status:       rt.status,
-			Error:        rt.errCode,
-			AssignedPort: rt.assignedPort,
-			TxBytes:      rt.txBytes.Load(),
-			RxBytes:      rt.rxBytes.Load(),
-		})
+		clientView.Mappings = append(clientView.Mappings, mappingViewForRuntime(rt))
 	}
 	return clientView
 }

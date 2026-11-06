@@ -177,7 +177,16 @@ func (s *Server) publicUDPConn(m *mappingRuntime) *publicUDPConn {
 }
 
 func (s *Server) attachPublicUDPConn(m *mappingRuntime, bridge transport.DatagramConn) *publicUDPConn {
-	if m == nil || m.listeners == nil || m.listeners.UDP == nil {
+	if m == nil {
+		return nil
+	}
+
+	// Lock before reading the listener set: an exposure switch replaces it
+	// while holding the same mutex, so a racing attachment cannot capture the
+	// sockets that are being closed.
+	m.udpMu.Lock()
+	defer m.udpMu.Unlock()
+	if m.closed.Load() || m.listeners == nil || m.listeners.UDP == nil {
 		return nil
 	}
 	c := &publicUDPConn{
@@ -189,11 +198,6 @@ func (s *Server) attachPublicUDPConn(m *mappingRuntime, bridge transport.Datagra
 		bridge:      bridge,
 	}
 
-	m.udpMu.Lock()
-	defer m.udpMu.Unlock()
-	if m.closed.Load() {
-		return nil
-	}
 	old := m.udpSession
 	if old != nil {
 		_ = old.Close()

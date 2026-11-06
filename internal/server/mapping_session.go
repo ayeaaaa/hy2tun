@@ -26,7 +26,9 @@ type clientSession struct {
 	order    []string
 
 	// controlMu serializes configuration changes initiated by the client and
-	// by the server's web API.
+	// by the server's web API, including mapping exposure switches. It is held
+	// across the bind/persist/serve transaction so a switch cannot interleave
+	// with an update or push for the same session.
 	controlMu sync.Mutex
 	// writeGate serializes frames written to the control stream. It is a
 	// channel rather than a mutex so a credential push can bound its wait

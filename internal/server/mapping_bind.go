@@ -16,6 +16,16 @@ func (m *mappingManager) bindLocked(sess *clientSession, rt *mappingRuntime, ign
 	if mapping.RemotePort < 0 || mapping.RemotePort > 65535 {
 		return m.fail(rt, control.CodeBadMessage)
 	}
+	// A corrupt or hand-edited state file must not silently reopen a mapping
+	// publicly. Empty is the legacy public default; any other invalid value
+	// fails closed.
+	if rt.exposure != "" && !rt.exposure.Valid() {
+		m.log.Warn("mapping has an invalid stored exposure; refusing to bind",
+			"mapping", rt.id,
+			"exposure", rt.exposure,
+		)
+		return m.fail(rt, control.CodeInternal)
+	}
 
 	requested := mapping.RemotePort
 	if requested > 0 {
@@ -75,16 +85,11 @@ func (m *mappingManager) bindLocked(sess *clientSession, rt *mappingRuntime, ign
 
 		rt.listeners = listeners
 		rt.assignedPort = listeners.Port()
+		rt.errCode = ""
 		if mapping.Type == "tcp" {
 			rt.connSem = make(chan struct{}, maxConnectionsPerMapping)
 			rt.status = mappingStatusRunning
-			for _, listener := range listeners.TCP {
-				if m.serveTCP != nil {
-					go m.serveTCP(sess, rt, listener)
-				} else {
-					go acceptAndCloseTCP(listener)
-				}
-			}
+			m.startTCPListenersLocked(sess, rt, listeners)
 			return control.Result{
 				ID:                  mapping.ID,
 				OK:                  true,
