@@ -1,6 +1,7 @@
 package state
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -294,4 +295,142 @@ func TestDeleteAndSaveCommittedSyncFailureDoesNotRestoreClient(t *testing.T) {
 	data, readErr := os.ReadFile(path)
 	require.NoError(t, readErr)
 	require.NotContains(t, string(data), `"gone"`)
+}
+
+func TestExposureStatePersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	s, err := Open(path, time.Hour)
+	require.NoError(t, err)
+	s.Upsert(ClientState{
+		ID:       "c1",
+		Name:     "home",
+		Mappings: []config.Mapping{{ID: "m1", Type: "tcp", RemotePort: 2222}},
+	})
+
+	require.Equal(t, "", s.Exposure("c1", "m1"), "an absent exposure is the public default")
+	require.Equal(t, "", s.Exposure("missing", "m1"))
+	require.NoError(t, s.SetExposure("c1", "m1", "local"))
+	require.Equal(t, "local", s.Exposure("c1", "m1"))
+
+	snapshot := s.Snapshot()
+	snapshot.Clients["c1"].Exposures["m1"] = "public"
+	require.Equal(t, "local", s.Exposure("c1", "m1"), "Snapshot must deep-copy exposures")
+
+	// An ordinary client/mapping upsert with no exposure map must not erase
+	// the exposure stored for this client.
+	s.Upsert(ClientState{
+		ID:       "c1",
+		Name:     "renamed",
+		Mappings: []config.Mapping{{ID: "m1", Type: "tcp", RemotePort: 2222}},
+	})
+	require.Equal(t, "local", s.Exposure("c1", "m1"))
+
+	// A second client without exposures must not gain an "exposures" key.
+	s.Upsert(ClientState{ID: "c2", Name: "plain"})
+	require.NoError(t, s.Close())
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var persisted State
+	require.NoError(t, json.Unmarshal(data, &persisted))
+	require.Nil(t, persisted.Clients["c2"].Exposures, "an absent exposure map must stay omitted")
+	require.NotContains(t, string(data), `"exposures": {}`)
+
+	reopened, err := Open(path, time.Hour)
+	require.NoError(t, err)
+	require.Equal(t, "local", reopened.Exposure("c1", "m1"), "exposure must survive a restart")
+	require.Equal(t, "", reopened.Exposure("c1", "m2"))
+	require.Equal(t, "", reopened.Exposure("c2", "m1"))
+
+	// Explicit public is also persisted rather than normalized away.
+	require.NoError(t, reopened.SetExposure("c1", "m2", "public"))
+	require.NoError(t, reopened.Close())
+
+	reopenedAgain, err := Open(path, time.Hour)
+	require.NoError(t, err)
+	defer reopenedAgain.Close()
+	require.Equal(t, "public", reopenedAgain.Exposure("c1", "m2"))
+	require.Equal(t, "local", reopenedAgain.Exposure("c1", "m1"))
+}
+
+func TestExposureDelete(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	s, err := Open(path, time.Hour)
+	require.NoError(t, err)
+	s.Upsert(ClientState{
+		ID:       "c1",
+		Mappings: []config.Mapping{{ID: "m1", Type: "tcp", RemotePort: 2222}, {ID: "m2", Type: "udp", RemotePort: 2223}},
+	})
+	require.NoError(t, s.SetExposure("c1", "m1", "local"))
+	require.NoError(t, s.SetExposure("c1", "m2", "local"))
+
+	require.NoError(t, s.DeleteExposure("c1", "m1"))
+	require.Equal(t, "", s.Exposure("c1", "m1"))
+	require.Equal(t, "local", s.Exposure("c1", "m2"), "deleting one exposure must not clear another")
+	require.NoError(t, s.DeleteExposure("c1", "absent"), "deleting an absent exposure is a no-op")
+	require.NoError(t, s.DeleteExposure("missing", "m1"), "deleting from an unknown client is a no-op")
+	require.NoError(t, s.Close())
+
+	reopened, err := Open(path, time.Hour)
+	require.NoError(t, err)
+	require.Equal(t, "", reopened.Exposure("c1", "m1"), "deleted exposure must stay deleted after restart")
+	require.Equal(t, "local", reopened.Exposure("c1", "m2"))
+
+	deleted, err := reopened.DeleteAndSave("c1")
+	require.NoError(t, err)
+	require.True(t, deleted)
+	require.Equal(t, "", reopened.Exposure("c1", "m2"), "deleting the client must remove its exposures")
+	require.NoError(t, reopened.Close())
+
+	reopenedAgain, err := Open(path, time.Hour)
+	require.NoError(t, err)
+	defer reopenedAgain.Close()
+	require.Equal(t, "", reopenedAgain.Exposure("c1", "m2"))
+}
+
+func TestExposureSaveFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "missing", "state.json")
+	s, err := Open(path, time.Hour)
+	require.NoError(t, err)
+	s.Upsert(ClientState{ID: "c1", Mappings: []config.Mapping{{ID: "m1", Type: "tcp", RemotePort: 2222}}})
+	require.Equal(t, "", s.Exposure("c1", "m1"))
+
+	// A failure before the rename is not committed: the in-memory value must
+	// roll back so callers never observe state that is absent from disk.
+	require.Error(t, s.SetExposure("c1", "m1", "local"))
+	require.Equal(t, "", s.Exposure("c1", "m1"))
+
+	// The same client remains usable once persistence can succeed.
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0700))
+	require.NoError(t, s.SetExposure("c1", "m1", "local"))
+	require.Equal(t, "local", s.Exposure("c1", "m1"))
+
+	// Delete failures roll back the same way.
+	require.NoError(t, os.RemoveAll(filepath.Dir(path)))
+	require.Error(t, s.DeleteExposure("c1", "m1"))
+	require.Equal(t, "local", s.Exposure("c1", "m1"))
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0700))
+	require.NoError(t, s.Close())
+
+	// A post-rename directory sync failure is reported as committed and must
+	// not be rolled back: the new value is already the on-disk state.
+	committedPath := filepath.Join(t.TempDir(), "state.json")
+	committed, err := Open(committedPath, time.Hour)
+	require.NoError(t, err)
+	committed.Upsert(ClientState{ID: "c1", Mappings: []config.Mapping{{ID: "m1", Type: "tcp", RemotePort: 2222}}})
+	oldSyncDir := syncDirFn
+	syncDirFn = func(string) error { return errors.New("sync failed") }
+	defer func() { syncDirFn = oldSyncDir }()
+
+	err = committed.SetExposure("c1", "m1", "local")
+	require.ErrorIs(t, err, ErrCommitted)
+	require.Equal(t, "local", committed.Exposure("c1", "m1"), "a committed rename must not be rolled back in memory")
+
+	data, readErr := os.ReadFile(committedPath)
+	require.NoError(t, readErr)
+	require.Contains(t, string(data), `"m1": "local"`)
+
+	syncDirFn = oldSyncDir
+	require.NoError(t, committed.Close())
 }

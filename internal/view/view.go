@@ -8,12 +8,36 @@ import (
 	"hy2tun/internal/config"
 )
 
+// Exposure controls whether a mapping listens on public interfaces or only on
+// loopback. The empty value is legacy and treated as public.
+type Exposure string
+
+const (
+	// ExposurePublic binds the mapping's public listeners.
+	ExposurePublic Exposure = "public"
+	// ExposureLocal binds loopback-only listeners.
+	ExposureLocal Exposure = "local"
+)
+
+// Valid reports whether e is a defined exposure mode. Empty is not valid for
+// new input; callers treat it as the legacy public default.
+func (e Exposure) Valid() bool {
+	return e == ExposurePublic || e == ExposureLocal
+}
+
 // MappingView is one mapping together with its runtime state.
 type MappingView struct {
 	config.Mapping
 	Status       string
 	Error        string
 	AssignedPort int
+	// Exposure is the server-selected exposure. Empty is legacy and treated as
+	// public. Clients must treat it as read-only.
+	Exposure Exposure
+	// UnavailableFamilies lists address families ("ipv4", "ipv6") that could
+	// not be bound for this mapping. It is runtime diagnostics, not persisted
+	// state.
+	UnavailableFamilies []string
 	// TxBytes counts payload bytes from the client toward the server.
 	// RxBytes counts payload bytes from the server toward the client.
 	TxBytes uint64

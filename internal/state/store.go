@@ -43,6 +43,10 @@ type ClientState struct {
 	LastSeen      time.Time        `json:"last_seen"`
 	Mappings      []config.Mapping `json:"mappings"`
 	ReservedUntil time.Time        `json:"reserved_until"`
+	// Exposures maps mapping IDs to their server-selected exposure. An absent
+	// entry means public, so only non-default values need storage. It never
+	// contains secrets.
+	Exposures map[string]string `json:"exposures,omitempty"`
 	// Transport records the last actual wire transport for offline diagnostics.
 	// It never makes an offline client look active.
 	Transport string `json:"transport,omitempty"`
@@ -119,7 +123,9 @@ func (s *Store) snapshotLocked() State {
 }
 
 // Upsert stores a copy of client, replacing any previous state with the same
-// ID. The caller retains ownership of the argument.
+// ID. The caller retains ownership of the argument. A nil Exposures map keeps
+// the existing exposures, so ordinary mapping updates cannot erase them; a
+// non-nil map replaces them, including with an empty map.
 func (s *Store) Upsert(client ClientState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -127,8 +133,124 @@ func (s *Store) Upsert(client ClientState) {
 	if s.state.Clients == nil {
 		s.state.Clients = make(map[string]*ClientState)
 	}
+	if client.Exposures == nil {
+		if previous := s.state.Clients[client.ID]; previous != nil {
+			client.Exposures = previous.Exposures
+		}
+	}
 	s.state.Clients[client.ID] = client.clone()
 	s.dirty = true
+}
+
+// Exposure returns the stored exposure for one mapping. An absent entry is
+// reported as the empty string, which callers treat as public.
+func (s *Store) Exposure(clientID, mappingID string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	client := s.state.Clients[clientID]
+	if client == nil {
+		return ""
+	}
+	return client.Exposures[mappingID]
+}
+
+// SetExposure stores the exposure for one mapping and persists the state
+// atomically. The empty string removes the entry and restores the public
+// default. Unknown clients and values other than public/local/empty are
+// rejected. On a save failure the previous in-memory value is restored unless
+// the new state was already committed to disk.
+func (s *Store) SetExposure(clientID, mappingID, exposure string) error {
+	if mappingID == "" {
+		return errors.New("state: empty mapping ID")
+	}
+	switch exposure {
+	case "", "public", "local":
+	default:
+		return fmt.Errorf("state: invalid exposure %q", exposure)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	client := s.state.Clients[clientID]
+	if client == nil {
+		return fmt.Errorf("state: exposure for unknown client %q", clientID)
+	}
+
+	previous, existed := "", false
+	if client.Exposures != nil {
+		previous, existed = client.Exposures[mappingID]
+	}
+	if exposure == "" {
+		if !existed {
+			return nil
+		}
+		delete(client.Exposures, mappingID)
+		if len(client.Exposures) == 0 {
+			client.Exposures = nil
+		}
+	} else {
+		if client.Exposures == nil {
+			client.Exposures = make(map[string]string)
+		}
+		client.Exposures[mappingID] = exposure
+	}
+
+	committed, err := s.saveLocked()
+	if err != nil {
+		if !committed {
+			if existed {
+				if client.Exposures == nil {
+					client.Exposures = make(map[string]string)
+				}
+				client.Exposures[mappingID] = previous
+			} else if client.Exposures != nil {
+				delete(client.Exposures, mappingID)
+				if len(client.Exposures) == 0 {
+					client.Exposures = nil
+				}
+			}
+			s.dirty = true
+		}
+		return err
+	}
+	return nil
+}
+
+// DeleteExposure removes the stored exposure for one mapping and persists the
+// state atomically. Deleting an absent entry or an unknown client is a no-op.
+// On a save failure the previous in-memory value is restored unless the new
+// state was already committed to disk.
+func (s *Store) DeleteExposure(clientID, mappingID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	client := s.state.Clients[clientID]
+	if client == nil || client.Exposures == nil {
+		return nil
+	}
+	previous, existed := client.Exposures[mappingID]
+	if !existed {
+		return nil
+	}
+	delete(client.Exposures, mappingID)
+	if len(client.Exposures) == 0 {
+		client.Exposures = nil
+	}
+
+	committed, err := s.saveLocked()
+	if err != nil {
+		if !committed {
+			if client.Exposures == nil {
+				client.Exposures = make(map[string]string)
+			}
+			client.Exposures[mappingID] = previous
+			s.dirty = true
+		}
+		return err
+	}
+	return nil
 }
 
 // DeleteAndSave removes a client and atomically persists the resulting state.
@@ -300,6 +422,12 @@ func (c *ClientState) clone() *ClientState {
 	out := *c
 	if c.Mappings != nil {
 		out.Mappings = append([]config.Mapping(nil), c.Mappings...)
+	}
+	if c.Exposures != nil {
+		out.Exposures = make(map[string]string, len(c.Exposures))
+		for mappingID, exposure := range c.Exposures {
+			out.Exposures[mappingID] = exposure
+		}
 	}
 	return &out
 }
