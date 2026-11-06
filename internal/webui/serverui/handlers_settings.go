@@ -42,11 +42,10 @@ func decodeSettingsBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return true
 }
 
-// confirmCurrentPassword implements the re-authentication required for
-// security-critical settings mutations (web administrator and HY2 credentials).
-// Routine policy changes do not require it. Failed attempts are rate-limited
-// per client IP so a stolen session cannot brute-force the web password. The
-// submitted value is never logged.
+// confirmCurrentPassword implements the re-authentication required when
+// changing the Web administrator username or password. Failed attempts are
+// rate-limited per client IP so a stolen session cannot brute-force the web
+// password. The submitted value is never logged.
 func (s *Server) confirmCurrentPassword(w http.ResponseWriter, r *http.Request, password string) bool {
 	ip := shared.ClientIPWithProxy(r, s.trustProxy.Load())
 	if !s.settingsLimiter.Allow(ip) {
@@ -159,9 +158,6 @@ func (s *Server) handleUpdateTrustProxy(w http.ResponseWriter, r *http.Request) 
 	if !decodeSettingsBody(w, r, &request) {
 		return
 	}
-	if !s.confirmCurrentPassword(w, r, request.secret()) {
-		return
-	}
 	if err := s.api.SetTrustProxy(request.TrustProxy); err != nil {
 		s.writeSettingsMutationError(w, err, "invalid_proxy_config", "更新代理信任失败")
 		return
@@ -185,9 +181,6 @@ func (s *Server) handleRotateCredentials(w http.ResponseWriter, r *http.Request)
 		SyncMode     string `json:"sync_mode"`
 	}
 	if !decodeSettingsBody(w, r, &request) {
-		return
-	}
-	if !s.confirmCurrentPassword(w, r, request.secret()) {
 		return
 	}
 	syncMode := strings.TrimSpace(request.SyncMode)
@@ -222,9 +215,6 @@ func (s *Server) handleRevokeCredentials(w http.ResponseWriter, r *http.Request)
 	if !decodeSettingsBody(w, r, &request) {
 		return
 	}
-	if !s.confirmCurrentPassword(w, r, request.secret()) {
-		return
-	}
 	if err := s.api.RevokePreviousCredentials(); err != nil {
 		s.writeSettingsMutationError(w, err, "revoke_failed", "撤销旧凭据失败")
 		return
@@ -248,10 +238,6 @@ type revealCredentialsResponse struct {
 func (s *Server) handleRevealCredentials(w http.ResponseWriter, r *http.Request) {
 	var request passwordRequest
 	if !decodeSettingsBody(w, r, &request) {
-		return
-	}
-
-	if !s.confirmCurrentPassword(w, r, request.secret()) {
 		return
 	}
 

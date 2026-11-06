@@ -28,9 +28,6 @@ func (s *Server) handleUpdateMode(w http.ResponseWriter, r *http.Request) {
 	if !decodeSettingsBody(w, r, &request) {
 		return
 	}
-	if !s.confirmCurrentPassword(w, r, request.secret()) {
-		return
-	}
 	if err := request.Mode.Validate(); err != nil {
 		writeJSONErrorCode(w, http.StatusBadRequest, "invalid_mode", err.Error())
 		return

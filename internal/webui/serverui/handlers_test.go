@@ -1365,7 +1365,7 @@ func TestServerSettingsRotateCredentials(t *testing.T) {
 	_, ts := newTestWeb(t, api)
 	cookie := login(t, ts)
 
-	body := `{"current_password":"pw","auth":"new-auth-password","control_token":"0123456789abcdef","sync_mode":"auto"}`
+	body := `{"auth":"new-auth-password","control_token":"0123456789abcdef","sync_mode":"auto"}`
 	resp := doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/credentials", body, cookie, csrfHeaders(ts.URL))
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var result struct {
@@ -1383,12 +1383,12 @@ func TestServerSettingsRotateCredentials(t *testing.T) {
 	require.Equal(t, "0123456789abcdef", api.rotateToken)
 	require.Equal(t, "auto", api.rotateSync)
 
-	// A wrong current password never reaches the API.
+	// A submitted current password is ignored for backward compatibility.
 	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/credentials",
 		`{"current_password":"wrong","auth":"another-password","sync_mode":"manual"}`, cookie, csrfHeaders(ts.URL))
-	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 	resp.Body.Close()
-	require.Equal(t, 1, api.rotateCalls)
+	require.Equal(t, 2, api.rotateCalls)
 
 	// The CSRF header and same-origin Origin remain mandatory.
 	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/credentials", body, cookie, map[string]string{
@@ -1397,10 +1397,10 @@ func TestServerSettingsRotateCredentials(t *testing.T) {
 	})
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	resp.Body.Close()
-	require.Equal(t, 1, api.rotateCalls)
+	require.Equal(t, 2, api.rotateCalls)
 }
 
-func TestServerSettingsRevealRequiresPasswordAndNoStore(t *testing.T) {
+func TestServerSettingsRevealWithoutPasswordAndNoStore(t *testing.T) {
 	api := &fakeServerAPI{snapshot: &credentials.Set{
 		Generation:           2,
 		Auth:                 "current-auth-secret",
@@ -1412,42 +1412,39 @@ func TestServerSettingsRevealRequiresPasswordAndNoStore(t *testing.T) {
 	_, ts := newTestWeb(t, api)
 	cookie := login(t, ts)
 
+	// Missing CSRF still fails and never reveals the secrets.
 	resp := doRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/settings/credentials/reveal",
-		`{"password":"wrong"}`, cookie, csrfHeaders(ts.URL))
+		`{}`, cookie, nil)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
-	require.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
 	raw := readBody(t, resp)
 	require.NotContains(t, raw, "current-auth-secret")
 	require.NotContains(t, raw, "previous-token-secret")
 
+	// A valid session plus CSRF is enough; no current password is required.
 	resp = doRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/settings/credentials/reveal",
-		`{"password":"pw"}`, cookie, csrfHeaders(ts.URL))
+		`{}`, cookie, csrfHeaders(ts.URL))
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
-	var revealed struct {
-		Current struct {
-			Generation   int64  `json:"generation"`
-			Auth         string `json:"auth"`
-			ControlToken string `json:"control_token"`
-		} `json:"current"`
-		Previous struct {
-			Generation   int64  `json:"generation"`
-			Auth         string `json:"auth"`
-			ControlToken string `json:"control_token"`
-		} `json:"previous"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&revealed))
-	resp.Body.Close()
+	revealed := readJSON[revealCredentialsResponse](t, resp)
 	require.Equal(t, int64(2), revealed.Current.Generation)
 	require.Equal(t, "current-auth-secret", revealed.Current.Auth)
 	require.Equal(t, "current-token-secret", revealed.Current.ControlToken)
+	require.NotNil(t, revealed.Previous)
 	require.Equal(t, int64(1), revealed.Previous.Generation)
 	require.Equal(t, "previous-auth-secret", revealed.Previous.Auth)
 	require.Equal(t, "previous-token-secret", revealed.Previous.ControlToken)
 
-	// Missing Origin is rejected before the password is checked.
+	// A submitted password is ignored for backward compatibility.
 	resp = doRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/settings/credentials/reveal",
-		`{"password":"pw"}`, cookie, map[string]string{
+		`{"password":"wrong"}`, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
+	revealed = readJSON[revealCredentialsResponse](t, resp)
+	require.Equal(t, "current-auth-secret", revealed.Current.Auth)
+
+	// Missing Origin is rejected before the body is read.
+	resp = doRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/settings/credentials/reveal",
+		`{}`, cookie, map[string]string{
 			"Content-Type":     "application/json",
 			"X-Requested-With": "hy2tun",
 		})
@@ -1500,17 +1497,26 @@ func TestServerSettingsWebUpdateRevokesSession(t *testing.T) {
 	require.Equal(t, 1, api.updateWebCalls)
 }
 
-func TestServerSettingsTrustProxyStillRequiresPassword(t *testing.T) {
+func TestServerSettingsTrustProxyRequiresCSRF(t *testing.T) {
 	api := &fakeServerAPI{}
 	web, ts := newTestWeb(t, api)
 	cookie := login(t, ts)
 
+	// Missing CSRF still fails.
 	resp := doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/proxy",
-		`{"trust_proxy":true}`, cookie, csrfHeaders(ts.URL))
+		`{"trust_proxy":true}`, cookie, nil)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	resp.Body.Close()
 	require.Zero(t, api.setTrustProxyCalls)
 	require.False(t, web.login.TrustProxy)
+
+	// A valid session plus CSRF is enough; no current password is required.
+	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/proxy",
+		`{"trust_proxy":true}`, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	resp.Body.Close()
+	require.Equal(t, 1, api.setTrustProxyCalls)
+	require.True(t, web.login.TrustProxy)
 }
 
 func TestServerSettingsPagePasswordFields(t *testing.T) {
@@ -1521,9 +1527,15 @@ func TestServerSettingsPagePasswordFields(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	body := readBody(t, resp)
 	require.Contains(t, body, `id="web-current-password"`)
-	require.Contains(t, body, `id="credentials-current-password"`)
-	require.Contains(t, body, `id="proxy-current-password"`)
-	require.NotContains(t, body, `id="ports-current-password"`)
+	for _, id := range []string{
+		"credentials-current-password",
+		"credentials-reveal-password",
+		"credentials-revoke-password",
+		"proxy-current-password",
+		"mode-current-password",
+	} {
+		require.NotContains(t, body, `id="`+id+`"`, "server settings must not render a redundant current-password field")
+	}
 }
 
 func TestServerSettingsPortsAndTrustProxy(t *testing.T) {
@@ -1555,10 +1567,10 @@ func TestServerSettingsPortsAndTrustProxy(t *testing.T) {
 	require.Equal(t, 2, api.updatePortsCalls)
 
 	// The trust-proxy toggle has its own authenticated mutation and updates
-	// the live login limiter.
+	// the live login limiter; no current password is required.
 	require.False(t, web.login.TrustProxy)
 	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/proxy",
-		`{"current_password":"pw","trust_proxy":true}`, cookie, csrfHeaders(ts.URL))
+		`{"trust_proxy":true}`, cookie, csrfHeaders(ts.URL))
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	resp.Body.Close()
 	require.Equal(t, 1, api.setTrustProxyCalls)
@@ -1566,7 +1578,7 @@ func TestServerSettingsPortsAndTrustProxy(t *testing.T) {
 	require.True(t, web.login.TrustProxy)
 
 	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/proxy",
-		`{"current_password":"pw","trust_proxy":false}`, cookie, map[string]string{
+		`{"trust_proxy":false}`, cookie, map[string]string{
 			"Content-Type":     "application/json",
 			"X-Requested-With": "hy2tun",
 		})
@@ -1580,17 +1592,162 @@ func TestServerSettingsRevokePreviousCredentials(t *testing.T) {
 	_, ts := newTestWeb(t, api)
 	cookie := login(t, ts)
 
+	// Missing CSRF still fails.
 	resp := doRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/settings/credentials/revoke",
-		`{"current_password":"pw"}`, cookie, csrfHeaders(ts.URL))
+		`{}`, cookie, nil)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	resp.Body.Close()
+	require.Zero(t, api.revokeCalls)
+
+	// A valid session plus CSRF is enough; no current password is required.
+	resp = doRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/settings/credentials/revoke",
+		`{}`, cookie, csrfHeaders(ts.URL))
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 	resp.Body.Close()
 	require.Equal(t, 1, api.revokeCalls)
 
+	// A submitted current password is ignored for backward compatibility.
 	resp = doRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/settings/credentials/revoke",
 		`{"current_password":"wrong"}`, cookie, csrfHeaders(ts.URL))
-	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 	resp.Body.Close()
-	require.Equal(t, 1, api.revokeCalls)
+	require.Equal(t, 2, api.revokeCalls)
+}
+
+func TestSettingsMutations(t *testing.T) {
+	cases := []struct {
+		name        string
+		method      string
+		path        string
+		body        string
+		compatBody  string
+		successCode int
+		apiCalls    func(*fakeServerAPI) int
+	}{
+		{
+			name:        "mode",
+			method:      http.MethodPut,
+			path:        "/api/settings/mode",
+			body:        `{"mode":"tcp"}`,
+			compatBody:  `{"mode":"hy2","current_password":"wrong"}`,
+			successCode: http.StatusOK,
+			apiCalls:    func(api *fakeServerAPI) int { return api.modeCalls },
+		},
+		{
+			name:        "trust proxy",
+			method:      http.MethodPut,
+			path:        "/api/settings/proxy",
+			body:        `{"trust_proxy":true}`,
+			compatBody:  `{"trust_proxy":false,"current_password":"wrong"}`,
+			successCode: http.StatusOK,
+			apiCalls:    func(api *fakeServerAPI) int { return api.setTrustProxyCalls },
+		},
+		{
+			name:        "rotate credentials",
+			method:      http.MethodPut,
+			path:        "/api/settings/credentials",
+			body:        `{"auth":"new-auth-password","control_token":"0123456789abcdef","sync_mode":"auto"}`,
+			compatBody:  `{"current_password":"wrong","auth":"another-password","sync_mode":"manual"}`,
+			successCode: http.StatusOK,
+			apiCalls:    func(api *fakeServerAPI) int { return api.rotateCalls },
+		},
+		{
+			name:        "revoke credentials",
+			method:      http.MethodPost,
+			path:        "/api/settings/credentials/revoke",
+			body:        `{}`,
+			compatBody:  `{"current_password":"wrong"}`,
+			successCode: http.StatusNoContent,
+			apiCalls:    func(api *fakeServerAPI) int { return api.revokeCalls },
+		},
+		{
+			name:        "reveal credentials",
+			method:      http.MethodPost,
+			path:        "/api/settings/credentials/reveal",
+			body:        `{}`,
+			compatBody:  `{"password":"wrong"}`,
+			successCode: http.StatusOK,
+			apiCalls: func(api *fakeServerAPI) int {
+				// Reveal is read-only, so assert it returned secrets instead.
+				return 0
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &fakeServerAPI{snapshot: &credentials.Set{
+				Generation:   1,
+				Auth:         "current-auth",
+				ControlToken: "current-token",
+			}}
+			_, ts := newTestWeb(t, api)
+			cookie := login(t, ts)
+
+			// A session remains mandatory.
+			resp := doRequest(t, ts.Client(), tc.method, ts.URL+tc.path, tc.body, nil, csrfHeaders(ts.URL))
+			require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+			readBody(t, resp)
+			require.Zero(t, tc.apiCalls(api), "missing session must not mutate")
+
+			// CSRF remains mandatory.
+			resp = doRequest(t, ts.Client(), tc.method, ts.URL+tc.path, tc.body, cookie, nil)
+			require.Equal(t, http.StatusForbidden, resp.StatusCode)
+			readBody(t, resp)
+			require.Zero(t, tc.apiCalls(api), "missing CSRF must not mutate")
+
+			// A valid session plus CSRF is enough; no current password is required.
+			resp = doRequest(t, ts.Client(), tc.method, ts.URL+tc.path, tc.body, cookie, csrfHeaders(ts.URL))
+			require.Equal(t, tc.successCode, resp.StatusCode)
+			body := readBody(t, resp)
+			if tc.path == "/api/settings/credentials/reveal" {
+				require.Contains(t, body, "current-auth")
+				require.Contains(t, body, "current-token")
+			}
+
+			// A submitted current password is ignored for backward compatibility.
+			resp = doRequest(t, ts.Client(), tc.method, ts.URL+tc.path, tc.compatBody, cookie, csrfHeaders(ts.URL))
+			require.Equal(t, tc.successCode, resp.StatusCode)
+			body = readBody(t, resp)
+			if tc.path == "/api/settings/credentials/reveal" {
+				require.Contains(t, body, "current-auth")
+				require.Contains(t, body, "current-token")
+			}
+		})
+	}
+}
+
+func TestSettingsWebAdminRequiresCurrentPassword(t *testing.T) {
+	api := &fakeServerAPI{}
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	// Missing and wrong current passwords are rejected without calling the API.
+	resp := doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/web",
+		`{"username":"root","new_password":"new-password"}`, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	readBody(t, resp)
+	require.Zero(t, api.updateWebCalls)
+
+	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/web",
+		`{"username":"root","current_password":"wrong","new_password":"new-password"}`, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	readBody(t, resp)
+	require.Zero(t, api.updateWebCalls)
+
+	// CSRF remains mandatory for the Web-admin change.
+	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/web",
+		`{"username":"root","current_password":"pw","new_password":"new-password"}`, cookie, nil)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	readBody(t, resp)
+	require.Zero(t, api.updateWebCalls)
+
+	// The correct current password still succeeds.
+	resp = doRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/web",
+		`{"username":"root","current_password":"pw","new_password":"new-password"}`, cookie, csrfHeaders(ts.URL))
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	readBody(t, resp)
+	require.Equal(t, 1, api.updateWebCalls)
 }
 
 func TestServerSettingsWebUpdateFailureKeepsSession(t *testing.T) {
@@ -1616,7 +1773,7 @@ func TestServerSettingsWebUpdateFailureKeepsSession(t *testing.T) {
 	resp.Body.Close()
 }
 
-func TestServerSettingsReauthRateLimitsMutations(t *testing.T) {
+func TestServerSettingsWebPasswordFailuresAreRateLimited(t *testing.T) {
 	cases := []struct {
 		name        string
 		path        string
@@ -1630,13 +1787,6 @@ func TestServerSettingsReauthRateLimitsMutations(t *testing.T) {
 			wrongBody:   `{"username":"root","current_password":"wrong","new_password":"new-password"}`,
 			correctBody: `{"username":"root","current_password":"pw","new_password":"new-password"}`,
 			apiCalls:    func(api *fakeServerAPI) int { return api.updateWebCalls },
-		},
-		{
-			name:        "rotate credentials",
-			path:        "/api/settings/credentials",
-			wrongBody:   `{"current_password":"wrong","auth":"new-auth-password","sync_mode":"manual"}`,
-			correctBody: `{"current_password":"pw","auth":"new-auth-password","sync_mode":"manual"}`,
-			apiCalls:    func(api *fakeServerAPI) int { return api.rotateCalls },
 		},
 	}
 

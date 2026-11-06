@@ -494,16 +494,10 @@ func TestServerWebHotSettingsEndToEnd(t *testing.T) {
 	webClient := &http.Client{Timeout: 10 * time.Second}
 	cookie := loginWebAt(t, webClient, pair.ServerWebAddr, "admin", integrationServerWebPassword)
 
-	// Reveal: a wrong password is rejected, the correct one returns the live
-	// pair with an explicit no-store policy.
+	// Reveal: the session and CSRF are enough; no Web password is required.
+	// A submitted password is ignored for backward compatibility.
 	resp := doWebJSON(t, webClient, http.MethodPost, pair.ServerWebAddr, "/api/settings/credentials/reveal", cookie, map[string]any{
 		"password": "wrong-password",
-	})
-	require.Equal(t, http.StatusForbidden, resp.StatusCode)
-	require.NotContains(t, readWebBody(t, resp), defaultTestAuth)
-
-	resp = doWebJSON(t, webClient, http.MethodPost, pair.ServerWebAddr, "/api/settings/credentials/reveal", cookie, map[string]any{
-		"password": integrationServerWebPassword,
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
@@ -522,7 +516,6 @@ func TestServerWebHotSettingsEndToEnd(t *testing.T) {
 
 	// Hot port policy: only the existing mapping's port stays allowed.
 	resp = doWebJSON(t, webClient, http.MethodPut, pair.ServerWebAddr, "/api/settings/ports", cookie, map[string]any{
-		"current_password":        integrationServerWebPassword,
 		"allow":                   []string{strconv.Itoa(publicPort)},
 		"deny":                    []string{},
 		"auto_range":              "25000-25099",

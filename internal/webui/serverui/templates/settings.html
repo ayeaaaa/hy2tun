@@ -2,7 +2,7 @@
 <div class="page-head">
   <div>
     <h1>设置</h1>
-    <p class="page-sub">热更新配置：保存后立即生效，无需重启。修改 Web 管理员密码、代理信任、显示/轮换/撤销 HY2 凭据时需要当前 Web 密码确认。</p>
+    <p class="page-sub">热更新配置：保存后立即生效，无需重启。修改 Web 管理员密码时需要当前 Web 密码确认。</p>
   </div>
   <div class="page-head-meta"><span class="pill pill-ok">可在线编辑</span></div>
 </div>
@@ -43,11 +43,7 @@
         <input type="checkbox" id="trust-proxy" {{if .Settings.TrustProxy}}checked{{end}}>
         信任反向代理的 X-Forwarded-For / X-Real-IP
       </label>
-      <p class="field-hint">仅当反向代理会覆盖这些请求头时启用；否则客户端可以伪造来源 IP，绕过登录和显示凭据的限速。</p>
-      <div class="field">
-        <label class="field-label" for="proxy-current-password">当前密码</label>
-        <input class="input" id="proxy-current-password" type="password" autocomplete="current-password" required>
-      </div>
+      <p class="field-hint">仅当反向代理会覆盖这些请求头时启用；否则客户端可以伪造来源 IP，绕过登录和管理员密码确认的限速。</p>
       <div class="form-actions">
         <button type="submit" class="btn btn-primary">保存代理信任</button>
       </div>
@@ -62,20 +58,14 @@
   </div>
   {{if .ModeAvailable}}
   <form id="settings-mode-form" class="settings-form" autocomplete="off">
-    <div class="grid-2">
-      <div class="field">
-        <label class="field-label" for="transport-mode">模式</label>
-        <select class="input select" id="transport-mode">
-          <option value="hy2" {{if or (eq .Settings.Mode "hy2") (eq .Settings.Mode "")}}selected{{end}}>HY2（QUIC）</option>
-          <option value="tcp" {{if eq .Settings.Mode "tcp"}}selected{{end}}>TCP（UDP over TCP）</option>
-          <option value="hy2+tcp" {{if eq .Settings.Mode "hy2+tcp"}}selected{{end}}>HY2 + TCP（自动回退）</option>
-        </select>
-        <span class="field-hint">服务端只在启用的传输上监听；客户端仍按自身模式选择实际传输。</span>
-      </div>
-      <div class="field">
-        <label class="field-label" for="mode-current-password">当前密码</label>
-        <input class="input" id="mode-current-password" type="password" autocomplete="current-password" required>
-      </div>
+    <div class="field">
+      <label class="field-label" for="transport-mode">模式</label>
+      <select class="input select" id="transport-mode">
+        <option value="hy2" {{if or (eq .Settings.Mode "hy2") (eq .Settings.Mode "")}}selected{{end}}>HY2（QUIC）</option>
+        <option value="tcp" {{if eq .Settings.Mode "tcp"}}selected{{end}}>TCP（UDP over TCP）</option>
+        <option value="hy2+tcp" {{if eq .Settings.Mode "hy2+tcp"}}selected{{end}}>HY2 + TCP（自动回退）</option>
+      </select>
+      <span class="field-hint">服务端只在启用的传输上监听；客户端仍按自身模式选择实际传输。</span>
     </div>
     <div class="notice">切换会断开现有连接；TCP 模式将 UDP 映射封装为 UDP over TCP，可能丢失 UDP 数据包。不保证无缝切换或零丢包。</div>
     <div class="form-actions">
@@ -106,10 +96,6 @@
   </dl>
 
   <div class="settings-inline">
-    <div class="field">
-      <label class="field-label" for="credentials-reveal-password">当前密码（显示凭据）</label>
-      <input class="input" id="credentials-reveal-password" type="password" autocomplete="current-password">
-    </div>
     <button type="button" class="btn btn-quiet" data-reveal-credentials>显示凭据</button>
     <button type="button" class="btn btn-quiet" data-hide-secrets hidden>隐藏凭据</button>
   </div>
@@ -129,18 +115,12 @@
         <input class="input" id="credentials-token" type="password" autocomplete="new-password" placeholder="留空保持不变，至少 16 个字符">
       </div>
     </div>
-    <div class="grid-2">
-      <div class="field">
-        <label class="field-label" for="credentials-sync">同步方式</label>
-        <select class="input select" id="credentials-sync">
-          <option value="auto">自动推送（等待在线客户端确认）</option>
-          <option value="manual">手动同步（客户端稍后自行更新）</option>
-        </select>
-      </div>
-      <div class="field">
-        <label class="field-label" for="credentials-current-password">当前密码</label>
-        <input class="input" id="credentials-current-password" type="password" autocomplete="current-password" required>
-      </div>
+    <div class="field">
+      <label class="field-label" for="credentials-sync">同步方式</label>
+      <select class="input select" id="credentials-sync">
+        <option value="auto">自动推送（等待在线客户端确认）</option>
+        <option value="manual">手动同步（客户端稍后自行更新）</option>
+      </select>
     </div>
     <div class="notice">
       轮换后旧凭据仍然有效，直到点击“撤销旧凭据”或被下一次轮换替换。自动推送最多等待每个客户端 5 秒；未确认的客户端保持待同步。旧客户端不支持推送时会显示“不支持”。
@@ -154,10 +134,6 @@
   </form>
 
   <div class="settings-inline">
-    <div class="field">
-      <label class="field-label" for="credentials-revoke-password">当前密码（撤销确认）</label>
-      <input class="input" id="credentials-revoke-password" type="password" autocomplete="current-password">
-    </div>
     <button type="button" class="btn btn-danger" data-revoke-credentials {{if not .Settings.Credentials.PreviousGeneration}}disabled{{end}}>撤销旧凭据</button>
   </div>
   <p class="field-hint settings-hint">撤销后上一代密码和 token 立即失效，仍在使用旧代际的客户端会失去连接。</p>

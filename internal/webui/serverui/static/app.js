@@ -1270,27 +1270,15 @@
     document.addEventListener("click", async (event) => {
       const revealButton = event.target.closest("[data-reveal-credentials]");
       if (revealButton) {
-        const passwordInput = $("#credentials-reveal-password");
-        const password = passwordInput ? passwordInput.value : "";
-        if (!password) {
-          showToast("请输入当前 Web 密码", "bad");
-          if (passwordInput) {
-            passwordInput.focus();
-          }
-          return;
-        }
         revealButton.disabled = true;
         try {
-          const data = await settingsRequest("/api/settings/credentials/reveal", "POST", { password });
+          const data = await settingsRequest("/api/settings/credentials/reveal", "POST", {});
           showSecrets(data);
           showToast("已显示凭据，30 秒后自动隐藏");
         } catch (error) {
           showToast(error.message, "bad");
         } finally {
           revealButton.disabled = false;
-          if (passwordInput) {
-            passwordInput.value = "";
-          }
         }
         return;
       }
@@ -1302,25 +1290,13 @@
 
       const revokeButton = event.target.closest("[data-revoke-credentials]");
       if (revokeButton) {
-        const passwordInput = $("#credentials-revoke-password");
-        const password = passwordInput ? passwordInput.value : "";
-        if (!password) {
-          showToast("请输入当前 Web 密码", "bad");
-          if (passwordInput) {
-            passwordInput.focus();
-          }
-          return;
-        }
         if (!window.confirm("撤销后上一代密码和 control token 立即失效，仍在使用旧代际的客户端会失去连接。确定撤销？")) {
           return;
         }
         revokeButton.disabled = true;
         try {
-          await settingsRequest("/api/settings/credentials/revoke", "POST", { current_password: password });
+          await settingsRequest("/api/settings/credentials/revoke", "POST", {});
           showToast("旧凭据已撤销");
-          if (passwordInput) {
-            passwordInput.value = "";
-          }
           maskSecrets();
           await refreshSettings();
         } catch (error) {
@@ -1370,17 +1346,9 @@
       modeForm.addEventListener("submit", async (event) => {
         event.preventDefault();
         const select = $("#transport-mode");
-        const passwordInput = $("#mode-current-password");
         const mode = select ? select.value : "";
         if (!mode) {
           showToast("请选择传输模式", "bad");
-          return;
-        }
-        if (!passwordInput || !passwordInput.value) {
-          showToast("请输入当前 Web 密码", "bad");
-          if (passwordInput) {
-            passwordInput.focus();
-          }
           return;
         }
         const button = $("button[type='submit']", modeForm);
@@ -1390,10 +1358,8 @@
         try {
           const settings = await settingsRequest("/api/settings/mode", "PUT", {
             mode,
-            current_password: passwordInput.value,
           });
           applyTransportMode(settings);
-          passwordInput.value = "";
           showToast("传输模式已更新");
           await refreshSettings();
         } catch (error) {
@@ -1409,13 +1375,10 @@
     const proxyForm = $("#settings-proxy-form");
     proxyForm.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const passwordInput = $("#proxy-current-password");
       try {
         await settingsRequest("/api/settings/proxy", "PUT", {
-          current_password: passwordInput.value,
           trust_proxy: $("#trust-proxy").checked,
         });
-        passwordInput.value = "";
         showToast("代理信任设置已更新");
       } catch (error) {
         showToast(error.message, "bad");
@@ -1427,7 +1390,6 @@
       event.preventDefault();
       const auth = $("#credentials-auth").value;
       const token = $("#credentials-token").value;
-      const currentPassword = $("#credentials-current-password").value;
       const syncMode = $("#credentials-sync").value;
       if (!auth && !token) {
         showToast("请填写新的 HY2 密码或 control token", "bad");
@@ -1451,14 +1413,12 @@
       }
       try {
         const result = await settingsRequest("/api/settings/credentials", "PUT", {
-          current_password: currentPassword,
           auth,
           control_token: token,
           sync_mode: syncMode,
         });
         $("#credentials-auth").value = "";
         $("#credentials-token").value = "";
-        $("#credentials-current-password").value = "";
         maskSecrets();
         showToast(`凭据已轮换到代际 ${result.generation}`);
         await refreshSettings();
