@@ -146,15 +146,18 @@ func clientExposureDisplay(exposure view.Exposure) (value, label string, known b
 }
 
 func unavailableFamiliesLabel(families []string) string {
-	labels := make([]string, 0, len(families))
+	hasIPv4, hasIPv6 := false, false
+	others := make([]string, 0, len(families))
 	seen := make(map[string]bool, len(families))
 	for _, family := range families {
 		var label string
 		switch strings.ToLower(strings.TrimSpace(family)) {
 		case "ipv4":
-			label = "IPv4"
+			hasIPv4 = true
+			continue
 		case "ipv6":
-			label = "IPv6"
+			hasIPv6 = true
+			continue
 		default:
 			label = strings.TrimSpace(family)
 		}
@@ -162,8 +165,16 @@ func unavailableFamiliesLabel(families []string) string {
 			continue
 		}
 		seen[label] = true
-		labels = append(labels, label)
+		others = append(others, label)
 	}
+	labels := make([]string, 0, 2+len(others))
+	if hasIPv4 {
+		labels = append(labels, "IPv4")
+	}
+	if hasIPv6 {
+		labels = append(labels, "IPv6")
+	}
+	labels = append(labels, others...)
 	if len(labels) == 0 {
 		return ""
 	}

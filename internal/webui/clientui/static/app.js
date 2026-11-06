@@ -162,13 +162,27 @@
     if (!Array.isArray(families)) {
       return "";
     }
-    const labels = [];
+    let hasIPv4 = false;
+    let hasIPv6 = false;
+    const others = [];
     for (const family of families) {
       const label = familyLabel(family);
-      if (label && !labels.includes(label)) {
-        labels.push(label);
+      if (label === "IPv4") {
+        hasIPv4 = true;
+      } else if (label === "IPv6") {
+        hasIPv6 = true;
+      } else if (label && !others.includes(label)) {
+        others.push(label);
       }
     }
+    const labels = [];
+    if (hasIPv4) {
+      labels.push("IPv4");
+    }
+    if (hasIPv6) {
+      labels.push("IPv6");
+    }
+    labels.push(...others);
     return labels.length === 0 ? "" : `${labels.join("/")} 不可用`;
   }
 

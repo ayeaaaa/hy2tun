@@ -51,13 +51,14 @@ func TestExposureClientBadge(t *testing.T) {
 				Status:              "running",
 				AssignedPort:        2222,
 				Exposure:            view.ExposureLocal,
-				UnavailableFamilies: []string{"ipv6"},
+				UnavailableFamilies: []string{"ipv6", "ipv4"},
 			},
 			{
-				Mapping:      config.Mapping{ID: "m2", Type: "tcp", RemotePort: 2223, LocalAddr: "127.0.0.1:23", Enabled: true},
-				Status:       "running",
-				AssignedPort: 2223,
-				Exposure:     view.ExposurePublic,
+				Mapping:             config.Mapping{ID: "m2", Type: "tcp", RemotePort: 2223, LocalAddr: "127.0.0.1:23", Enabled: true},
+				Status:              "running",
+				AssignedPort:        2223,
+				Exposure:            view.ExposurePublic,
+				UnavailableFamilies: []string{"ipv6"},
 			},
 			{
 				Mapping: config.Mapping{ID: "m3", Type: "udp", RemotePort: 5353, LocalAddr: "127.0.0.1:53", Enabled: true},
@@ -77,6 +78,8 @@ func TestExposureClientBadge(t *testing.T) {
 	require.Contains(t, body, "公网")
 	require.Contains(t, body, "—", "an unknown legacy exposure must render as an em dash")
 	require.Contains(t, body, "IPv6 不可用")
+	require.Contains(t, body, "IPv4/IPv6 不可用",
+		"family labels must be canonicalized to IPv4 before IPv6")
 	require.Contains(t, body, `data-mapping-exposure="local"`)
 	require.Contains(t, body, `data-mapping-exposure="public"`)
 	require.Contains(t, body, `data-mapping-exposure=""`)
@@ -96,8 +99,9 @@ func TestExposureClientBadge(t *testing.T) {
 	mappings := readClientJSON[[]mappingResponse](t, resp)
 	require.Len(t, mappings, 3)
 	require.Equal(t, view.ExposureLocal, mappings[0].Exposure)
-	require.Equal(t, []string{"ipv6"}, mappings[0].UnavailableFamilies)
+	require.ElementsMatch(t, []string{"ipv6", "ipv4"}, mappings[0].UnavailableFamilies)
 	require.Equal(t, view.ExposurePublic, mappings[1].Exposure)
+	require.Equal(t, []string{"ipv6"}, mappings[1].UnavailableFamilies)
 	require.Empty(t, mappings[2].Exposure)
 
 	resp = doClientRequest(t, ts.Client(), http.MethodGet, ts.URL+"/static/app.js", "", cookie, nil)

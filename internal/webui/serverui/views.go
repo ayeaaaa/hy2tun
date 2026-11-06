@@ -174,27 +174,36 @@ func newMappingDisplay(mapping view.MappingView) mappingDisplay {
 	}
 }
 
-// exposureDisplay treats the empty legacy value as public. Unknown values are
-// also shown as public because that is the server's historical default.
+// exposureDisplay treats the empty legacy value as public. A non-empty
+// unknown value is shown as unknown (—) instead of guessing public, matching
+// the fail-closed server behavior for corrupted state.
 func exposureDisplay(exposure view.Exposure) (value, label, next string) {
-	if exposure == view.ExposureLocal {
+	switch exposure {
+	case view.ExposureLocal:
 		return string(view.ExposureLocal), "仅本机", "公网"
+	case view.ExposurePublic, "":
+		return string(view.ExposurePublic), "公网", "仅本机"
+	default:
+		return "", "—", "仅本机"
 	}
-	return string(view.ExposurePublic), "公网", "仅本机"
 }
 
 // unavailableFamiliesLabel renders a partial-family bind warning such as
-// "IPv6 不可用" or "IPv4/IPv6 不可用".
+// "IPv6 不可用" or "IPv4/IPv6 不可用". Labels are canonicalized so input order
+// cannot produce "IPv6/IPv4".
 func unavailableFamiliesLabel(families []string) string {
-	labels := make([]string, 0, len(families))
+	hasIPv4, hasIPv6 := false, false
+	others := make([]string, 0, len(families))
 	seen := make(map[string]bool, len(families))
 	for _, family := range families {
 		var label string
 		switch strings.ToLower(strings.TrimSpace(family)) {
 		case "ipv4":
-			label = "IPv4"
+			hasIPv4 = true
+			continue
 		case "ipv6":
-			label = "IPv6"
+			hasIPv6 = true
+			continue
 		default:
 			label = strings.TrimSpace(family)
 		}
@@ -202,8 +211,16 @@ func unavailableFamiliesLabel(families []string) string {
 			continue
 		}
 		seen[label] = true
-		labels = append(labels, label)
+		others = append(others, label)
 	}
+	labels := make([]string, 0, 2+len(others))
+	if hasIPv4 {
+		labels = append(labels, "IPv4")
+	}
+	if hasIPv6 {
+		labels = append(labels, "IPv6")
+	}
+	labels = append(labels, others...)
 	if len(labels) == 0 {
 		return ""
 	}

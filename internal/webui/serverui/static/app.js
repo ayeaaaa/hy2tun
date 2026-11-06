@@ -90,11 +90,48 @@
   }
 
   function exposureValue(value) {
-    return value === "local" ? "local" : "public";
+    return value === "public" || value === "local" ? value : "";
   }
 
   function exposureLabel(value) {
-    return exposureValue(value) === "local" ? "仅本机" : "公网";
+    switch (exposureValue(value)) {
+      case "public":
+        return "公网";
+      case "local":
+        return "仅本机";
+      default:
+        return "—";
+    }
+  }
+
+  function statusLabel(status) {
+    switch (status) {
+      case "running":
+        return "运行中";
+      case "pending":
+        return "待启动";
+      case "failed":
+        return "失败";
+      case "disabled":
+        return "已禁用";
+      case "offline":
+        return "离线";
+      default:
+        return "未知";
+    }
+  }
+
+  function statusClass(status) {
+    switch (status) {
+      case "running":
+        return "ok";
+      case "pending":
+        return "warn";
+      case "failed":
+        return "bad";
+      default:
+        return "muted";
+    }
   }
 
   function familyLabel(family) {
@@ -112,14 +149,38 @@
     if (!Array.isArray(families)) {
       return "";
     }
-    const labels = [];
+    let hasIPv4 = false;
+    let hasIPv6 = false;
+    const others = [];
     for (const family of families) {
       const label = familyLabel(family);
-      if (label && !labels.includes(label)) {
-        labels.push(label);
+      if (label === "IPv4") {
+        hasIPv4 = true;
+      } else if (label === "IPv6") {
+        hasIPv6 = true;
+      } else if (label && !others.includes(label)) {
+        others.push(label);
       }
     }
+    const labels = [];
+    if (hasIPv4) {
+      labels.push("IPv4");
+    }
+    if (hasIPv6) {
+      labels.push("IPv6");
+    }
+    labels.push(...others);
     return labels.length === 0 ? "" : `${labels.join("/")} 不可用`;
+  }
+
+  function mappingValue(mapping, pascal, snake) {
+    if (mapping && mapping[pascal] !== undefined) {
+      return mapping[pascal];
+    }
+    if (mapping && mapping[snake] !== undefined) {
+      return mapping[snake];
+    }
+    return undefined;
   }
 
   function applyExposureToRow(row, exposure, families) {
@@ -144,6 +205,136 @@
     }
   }
 
+  // applyMappingToRow refreshes every visible part of a row from the raw
+  // view.MappingView returned by the server (PascalCase runtime fields plus
+  // the embedded snake_case mapping fields).
+  function applyMappingToRow(row, mapping) {
+    if (!row || !mapping) {
+      return;
+    }
+    applyExposureToRow(
+      row,
+      mappingValue(mapping, "Exposure", "exposure"),
+      mappingValue(mapping, "UnavailableFamilies", "unavailable_families")
+    );
+
+    const status = String(mappingValue(mapping, "Status", "status") || "");
+    if (status) {
+      row.dataset.status = status;
+      row.dataset.mappingStatus = status;
+      const statusElement = $("[data-mapping-status-label]", row);
+      if (statusElement) {
+        statusElement.className = `status status-${statusClass(status)}`;
+        statusElement.replaceChildren();
+        const dot = document.createElement("span");
+        dot.className = "status-dot";
+        dot.setAttribute("aria-hidden", "true");
+        statusElement.appendChild(dot);
+        statusElement.appendChild(document.createTextNode(statusLabel(status)));
+      }
+    }
+
+    const error = String(mappingValue(mapping, "Error", "error") || "");
+    row.dataset.mappingError = error;
+    const errorElement = $("[data-mapping-error]", row);
+    if (errorElement) {
+      errorElement.textContent = error;
+      errorElement.hidden = !error;
+    }
+
+    const assigned = Number(mappingValue(mapping, "AssignedPort", "assigned_port") || 0);
+    const remote = Number(mappingValue(mapping, "RemotePort", "remote_port") || 0);
+    const port = assigned || remote;
+    row.dataset.mappingAssigned = String(assigned);
+    row.dataset.port = String(port);
+    const portElement = $("[data-mapping-port-cell]", row);
+    if (portElement) {
+      if (port) {
+        portElement.textContent = String(port);
+      } else {
+        portElement.replaceChildren();
+        const automatic = document.createElement("span");
+        automatic.className = "muted";
+        automatic.textContent = "自动";
+        portElement.appendChild(automatic);
+      }
+    }
+
+    const tx = mappingValue(mapping, "TxBytes", "tx_bytes");
+    const rx = mappingValue(mapping, "RxBytes", "rx_bytes");
+    const txElement = $("[data-mapping-tx]", row);
+    if (txElement && tx !== undefined) {
+      txElement.textContent = fmtBytes(tx);
+    }
+    const rxElement = $("[data-mapping-rx]", row);
+    if (rxElement && rx !== undefined) {
+      rxElement.textContent = fmtBytes(rx);
+    }
+  }
+
+  function findClientMapping(clients, clientID, mappingID) {
+    if (!Array.isArray(clients)) {
+      return null;
+    }
+    for (const client of clients) {
+      const id = client.ID !== undefined ? client.ID : client.id;
+      if (id !== clientID) {
+        continue;
+      }
+      const mappings = client.Mappings !== undefined ? client.Mappings : client.mappings;
+      if (!Array.isArray(mappings)) {
+        return null;
+      }
+      for (const mapping of mappings) {
+        const idValue = mapping.ID !== undefined ? mapping.ID : mapping.id;
+        if (idValue === mappingID) {
+          return mapping;
+        }
+      }
+      return null;
+    }
+    return null;
+  }
+
+  async function refreshMappingRow(clientID, mappingID, row) {
+    try {
+      const response = await fetch("/api/clients", {
+        headers: { Accept: "application/json" },
+        credentials: "same-origin",
+      });
+      if (response.status === 401) {
+        window.location.href = "/login";
+        return true;
+      }
+      if (!response.ok) {
+        return false;
+      }
+      const mapping = findClientMapping(await response.json(), clientID, mappingID);
+      if (!mapping) {
+        return false;
+      }
+      applyMappingToRow(row, mapping);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  async function refreshAfterExposureFailure(clientID, mappingID, row) {
+    const detail = currentDetail();
+    if (detail && detail.dataset.clientId === clientID) {
+      const refreshed = await refreshDetail(clientID, true);
+      if (!refreshed) {
+        window.location.reload();
+      }
+      return;
+    }
+    const refreshed = await refreshMappingRow(clientID, mappingID, row);
+    if (!refreshed) {
+      window.location.reload();
+    }
+  }
+
   async function toggleExposure(button) {
     const row = button.closest("tr");
     if (!row) {
@@ -156,7 +347,8 @@
       return;
     }
     const current = exposureValue(button.dataset.exposure);
-    const next = current === "public" ? "local" : "public";
+    // Unknown legacy/corrupt state switches to the fail-closed local mode.
+    const next = current === "local" ? "public" : "local";
     const clientName = row.dataset.clientName || clientID;
     const confirmText = button.dataset.confirm || "切换会立即关闭现有连接，确定继续？";
     if (!window.confirm(`将映射 ${clientName} 的暴露范围从 ${exposureLabel(current)} 切换为 ${exposureLabel(next)}。${confirmText}`)) {
@@ -188,11 +380,12 @@
         return;
       }
       if (response.ok) {
-        // The success body is the raw view.MappingView, so the exposure and
-        // family warning fields are PascalCase.
-        const exposure = payload && payload.Exposure;
-        const families = payload && payload.UnavailableFamilies;
-        applyExposureToRow(row, exposure, families);
+        // The success body is the raw view.MappingView, so status, error,
+        // assigned port, exposure, and family warning are all refreshed from
+        // the actual server state.
+        applyMappingToRow(row, payload);
+        const exposure = mappingValue(payload, "Exposure", "exposure");
+        const families = mappingValue(payload, "UnavailableFamilies", "unavailable_families");
         const warning = unavailableFamiliesLabel(families);
         showToast(warning
           ? `暴露范围已切换为${exposureLabel(exposure)}；${warning}`
@@ -201,19 +394,31 @@
       }
       if (response.status === 409 && payload && payload.code === "exposure_conflict") {
         // Conflict responses are snake_case and describe the state that
-        // remains active after the failed switch.
+        // remains active after the failed switch. The row status/error is
+        // re-read because a closed rollback can change it.
         applyExposureToRow(row, payload.active_exposure, payload.unavailable_families);
         let message = payload.error || (payload.closed ? "暴露范围切换失败，映射已关闭" : "暴露范围切换失败，已保留当前状态");
+        if (payload.closed && !message.includes("关闭")) {
+          message += "；映射已关闭";
+        }
         const warning = unavailableFamiliesLabel(payload.unavailable_families);
         if (warning) {
           message += `；${warning}`;
         }
         showToast(message, "bad");
+        await refreshAfterExposureFailure(clientID, mappingID, row);
         return;
       }
       showToast((payload && payload.error) || `切换暴露范围失败（HTTP ${response.status}）`, "bad");
+      if (response.status === 404 || response.status === 409 || response.status >= 500) {
+        // The response is not a structured conflict, so the actual row state
+        // is uncertain (for example a 500 after a failed rollback) or the
+        // mapping may no longer exist.
+        await refreshAfterExposureFailure(clientID, mappingID, row);
+      }
     } catch (error) {
       showToast(`切换暴露范围失败：${error.message}`, "bad");
+      await refreshAfterExposureFailure(clientID, mappingID, row);
     } finally {
       button.disabled = false;
     }
@@ -242,11 +447,11 @@
   let refreshing = false;
   async function refreshDetail(clientId, silent) {
     if (!clientId || refreshing) {
-      return;
+      return false;
     }
     const target = document.getElementById("client-detail");
     if (!target) {
-      return;
+      return false;
     }
     refreshing = true;
     try {
@@ -256,7 +461,7 @@
       });
       if (response.status === 401) {
         window.location.href = "/login";
-        return;
+        return true;
       }
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
@@ -265,10 +470,12 @@
       if (!silent) {
         showToast("已刷新");
       }
+      return true;
     } catch (error) {
       if (!silent) {
         showToast(`刷新失败：${error.message}`, "bad");
       }
+      return false;
     } finally {
       refreshing = false;
     }

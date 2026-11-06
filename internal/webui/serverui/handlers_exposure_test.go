@@ -589,6 +589,13 @@ func exposurePageAPI() *fakeExposureAPI {
 
 func TestExposurePageControl(t *testing.T) {
 	api := exposurePageAPI()
+	api.clients[0].Mappings = append(api.clients[0].Mappings, view.MappingView{
+		Mapping:      config.Mapping{ID: "m3", Type: "udp", RemotePort: 6000, LocalAddr: "127.0.0.1:6000", Enabled: true},
+		Status:       "failed",
+		Error:        "invalid_exposure",
+		AssignedPort: 6000,
+		Exposure:     view.Exposure("bogus"),
+	})
 	_, ts := newTestWeb(t, api)
 	cookie := login(t, ts)
 
@@ -597,27 +604,64 @@ func TestExposurePageControl(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	body := readBody(t, resp)
 
-	require.Equal(t, 2, strings.Count(body, `data-action="toggle-exposure"`),
+	require.Equal(t, 3, strings.Count(body, `data-action="toggle-exposure"`),
 		"each server mapping row needs an exposure control")
 	require.Contains(t, body, `data-client-id="c1"`)
 	require.Contains(t, body, `data-mapping-id="m1"`)
 	require.Contains(t, body, `data-exposure="local"`)
 	require.Contains(t, body, `data-exposure="public"`)
-	require.Contains(t, body, "仅本机")
-	require.Contains(t, body, "公网")
+	require.Contains(t, body, `data-exposure=""`,
+		"an unknown non-empty exposure must render as unknown, not public")
+	require.Contains(t, body, ">仅本机</button>")
+	require.Contains(t, body, ">公网</button>")
+	require.Contains(t, body, ">—</button>")
 	require.Contains(t, body, "立即关闭现有连接",
 		"the confirmation text must warn that switching closes existing connections")
 	require.NotContains(t, body, `type="password"`, "the exposure control must not ask for a password")
 	require.NotContains(t, body, "current_password")
+
+	// Stable row hooks used by the exposure JS to refresh status/error/port
+	// after a switch or a failed rollback.
+	require.Contains(t, body, `data-mapping-status="running"`)
+	require.Contains(t, body, `data-mapping-error=""`)
+	require.Contains(t, body, `data-mapping-assigned="2222"`)
+	require.Contains(t, body, `data-mapping-port-cell`)
+	require.Contains(t, body, `data-mapping-status-label`)
+	require.Contains(t, body, `data-mapping-error`)
+	require.Contains(t, body, `data-mapping-tx`)
+	require.Contains(t, body, `data-mapping-rx`)
+	require.Contains(t, body, `aria-describedby="exposure-warning-c1-m1"`)
+	require.Contains(t, body, `aria-live="polite"`)
 
 	resp = doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/clients/c1/detail", "", cookie, nil)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	detail := readBody(t, resp)
 	require.Contains(t, detail, `data-action="toggle-exposure"`)
 	require.Contains(t, detail, `data-mapping-id="m1"`)
+	require.Contains(t, detail, `data-client-name="home"`)
+	require.Contains(t, detail, `data-mapping-status="running"`)
+	require.Contains(t, detail, `data-mapping-port-cell`)
+	require.Contains(t, detail, `data-mapping-status-label`)
+	require.Contains(t, detail, `aria-describedby="exposure-warning-c1-m1"`)
 	require.Contains(t, detail, "仅本机")
 	require.Contains(t, detail, "立即关闭现有连接")
 	require.NotContains(t, detail, `type="password"`, "the client detail exposure control must not ask for a password")
+}
+
+func TestExposurePageOfflineCopy(t *testing.T) {
+	api := exposurePageAPI()
+	api.clients[0].Online = false
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	resp := doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/clients/c1/detail", "", cookie, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readBody(t, resp)
+	require.Contains(t, body, `data-action="toggle-exposure"`,
+		"the server-side desired exposure remains editable while the client is offline")
+	require.Contains(t, body, "暴露范围仍可在服务端调整",
+		"offline copy must not imply the exposure control is unavailable")
+	require.NotContains(t, body, "配置只读。重新连接后可在线编辑")
 }
 
 func TestExposurePageWarning(t *testing.T) {
@@ -627,7 +671,7 @@ func TestExposurePageWarning(t *testing.T) {
 		Status:              "running",
 		AssignedPort:        8080,
 		Exposure:            view.ExposurePublic,
-		UnavailableFamilies: []string{"ipv4", "ipv6"},
+		UnavailableFamilies: []string{"ipv6", "ipv4"},
 	})
 	_, ts := newTestWeb(t, api)
 	cookie := login(t, ts)
