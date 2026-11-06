@@ -28,6 +28,10 @@ type pendingConn struct {
 	mapping *mappingRuntime
 	owner   *clientSession
 	expires time.Time
+	// generation is the mapping accept generation that accepted conn. A
+	// pending stream from an older generation is rejected even if it was
+	// added after the switch's dropMapping pass.
+	generation uint64
 }
 
 // dataStreams maps one-time 128-bit tokens to public connections that are
@@ -104,6 +108,10 @@ func (d *dataStreams) take(token string) (net.Conn, error) {
 		_ = pc.conn.Close()
 		return nil, fmt.Errorf("hy2tun data stream mapping is closed")
 	}
+	if pc.mapping != nil && pc.mapping.acceptGen.Load() != pc.generation {
+		_ = pc.conn.Close()
+		return nil, fmt.Errorf("hy2tun data stream mapping generation is stale")
+	}
 	return pc.conn, nil
 }
 
@@ -130,6 +138,10 @@ func (d *dataStreams) takeFor(token string, owner *clientSession) (net.Conn, err
 	if !time.Now().Before(pc.expires) || pc.mapping.closed.Load() {
 		_ = pc.conn.Close()
 		return nil, fmt.Errorf("hy2tun data stream is unavailable")
+	}
+	if pc.mapping.acceptGen.Load() != pc.generation {
+		_ = pc.conn.Close()
+		return nil, fmt.Errorf("hy2tun data stream mapping generation is stale")
 	}
 	return pc.conn, nil
 }
@@ -297,12 +309,16 @@ func (c *activeConn) Close() error {
 // owning client to open a data stream for each of them. A transient Accept
 // error (for example EMFILE) must not stop the accept loop: the listener stays
 // bound, so returning would leave a "running" mapping that never accepts again.
-func (s *Server) serveTCP(sess *clientSession, m *mappingRuntime, listener net.Listener) {
+// generation is the mapping's accept generation when this listener set was
+// published; a connection accepted after it is retired is closed instead of
+// being relayed on the new exposure.
+func (s *Server) serveTCP(sess *clientSession, m *mappingRuntime, listener net.Listener, generation uint64) {
 	backoff := 5 * time.Millisecond
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			if errors.Is(err, net.ErrClosed) || (m != nil && m.closed.Load()) {
+			if errors.Is(err, net.ErrClosed) ||
+				(m != nil && (m.closed.Load() || m.acceptGen.Load() != generation)) {
 				return
 			}
 			mappingID := ""
@@ -323,13 +339,22 @@ func (s *Server) serveTCP(sess *clientSession, m *mappingRuntime, listener net.L
 			continue
 		}
 		backoff = 5 * time.Millisecond
-		go s.openPublicConn(sess, m, conn)
+		if m == nil || m.acceptGen.Load() != generation {
+			_ = conn.Close()
+			return
+		}
+		go s.openPublicConn(sess, m, conn, generation)
 	}
 }
 
 // openPublicConn hands one accepted public connection to the client. The
-// connection is closed when no data stream can be opened for it.
-func (s *Server) openPublicConn(sess *clientSession, m *mappingRuntime, conn net.Conn) {
+// connection is closed when its accept generation is stale or no data stream
+// can be opened for it.
+func (s *Server) openPublicConn(sess *clientSession, m *mappingRuntime, conn net.Conn, generation uint64) {
+	if m == nil || m.acceptGen.Load() != generation {
+		_ = conn.Close()
+		return
+	}
 	if m.connSem != nil {
 		select {
 		case m.connSem <- struct{}{}:
@@ -342,10 +367,21 @@ func (s *Server) openPublicConn(sess *clientSession, m *mappingRuntime, conn net
 			return
 		}
 	}
+	if m.acceptGen.Load() != generation {
+		if m.connSem != nil {
+			<-m.connSem
+		}
+		_ = conn.Close()
+		return
+	}
 	public := &activeConn{Conn: conn, mapping: m, sem: m.connSem}
 	m.trackActive(public)
+	if m.acceptGen.Load() != generation {
+		_ = public.Close()
+		return
+	}
 
-	if err := s.openDataStream(sess, m, public); err != nil {
+	if err := s.openDataStream(sess, m, public, generation); err != nil {
 		s.log.Debug("reverse TCP open failed",
 			"mapping", m.id,
 			"error", err,
@@ -355,13 +391,18 @@ func (s *Server) openPublicConn(sess *clientSession, m *mappingRuntime, conn net
 }
 
 // openDataStream allocates a one-time token for public and sends an open
-// request over the mapping owner's control stream.
-func (s *Server) openDataStream(sess *clientSession, m *mappingRuntime, public net.Conn) error {
+// request over the mapping owner's control stream. The token carries the
+// accept generation so a stream that arrives after an exposure switch is
+// rejected by take/takeFor.
+func (s *Server) openDataStream(sess *clientSession, m *mappingRuntime, public net.Conn, generation uint64) error {
 	if sess == nil || m == nil || public == nil {
 		return fmt.Errorf("open data stream: missing session, mapping, or connection")
 	}
 	if s.data == nil {
 		return fmt.Errorf("open data stream: data plane is not initialized")
+	}
+	if m.acceptGen.Load() != generation {
+		return fmt.Errorf("open data stream: mapping generation changed")
 	}
 	if err := sess.waitReady(dataTokenTTL); err != nil {
 		return fmt.Errorf("open data stream: %w", err)
@@ -369,15 +410,23 @@ func (s *Server) openDataStream(sess *clientSession, m *mappingRuntime, public n
 	if m.closed.Load() {
 		return fmt.Errorf("open data stream: mapping is closed")
 	}
+	if m.acceptGen.Load() != generation {
+		return fmt.Errorf("open data stream: mapping generation changed")
+	}
 
 	token, err := s.data.add(&pendingConn{
-		conn:    public,
-		mapping: m,
-		owner:   sess,
-		expires: time.Now().Add(dataTokenTTL),
+		conn:       public,
+		mapping:    m,
+		owner:      sess,
+		expires:    time.Now().Add(dataTokenTTL),
+		generation: generation,
 	})
 	if err != nil {
 		return err
+	}
+	if m.acceptGen.Load() != generation {
+		s.data.remove(token)
+		return fmt.Errorf("open data stream: mapping generation changed")
 	}
 	if err := sess.write(&control.Open{
 		Type:      control.TypeOpen,

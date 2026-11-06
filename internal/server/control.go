@@ -217,8 +217,14 @@ func (s *Server) acquireAdmission() *config.ServerConfig {
 // avoids the settings-writer -> manager lock order used by hot port updates, and
 // does not prevent revocation while this Hello waits for the manager.
 func (s *Server) registerControl(sess *clientSession, hello *control.Hello, meta sessionMeta, deadline time.Time, reported int64, capable bool) ([]control.Result, error) {
-	settings := s.acquireAdmission()
 	m := s.mappings
+	// A Hello replaces the session. Hold the exposure transaction lock until
+	// the registration is fully committed and saved so a live switch that has
+	// released mu for its state fsync cannot have its session replaced.
+	m.exposureMu.Lock()
+	defer m.exposureMu.Unlock()
+
+	settings := s.acquireAdmission()
 	var old *clientSession
 	commit := func() error {
 		current := s.currentCredentials()

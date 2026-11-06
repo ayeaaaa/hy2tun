@@ -66,12 +66,14 @@ func (e *ExposureInvalidError) InvalidExposure() bool { return true }
 // ExposureSwitchError reports a live exposure switch that could not be applied.
 // Exposure is the exposure still active after rollback (or the previous
 // exposure when the mapping is left closed), and Closed reports that no
-// listener remains. It never contains secret material.
+// listener remains. Persistence distinguishes a state-save failure (500) from
+// a bind/rollback conflict (409). It never contains secret material.
 type ExposureSwitchError struct {
 	Requested           view.Exposure
 	Exposure            view.Exposure
 	UnavailableFamilies []string
 	Closed              bool
+	Persistence         bool
 	Err                 error
 }
 
@@ -98,8 +100,12 @@ func (e *ExposureSwitchError) Unwrap() error {
 	return e.Err
 }
 
-// ExposureConflict marks the error class for cross-package classification.
-func (e *ExposureSwitchError) ExposureConflict() bool { return true }
+// ExposureConflict marks a bind/rollback conflict for cross-package
+// classification. Persistence failures return false so the API can map them to
+// 500 rather than 409.
+func (e *ExposureSwitchError) ExposureConflict() bool {
+	return e != nil && !e.Persistence
+}
 
 // ActiveExposure returns the exposure that remains active after rollback.
 func (e *ExposureSwitchError) ActiveExposure() view.Exposure {
@@ -189,6 +195,11 @@ func (m *mappingManager) SetExposure(clientID, mappingID string, exposure view.E
 	if m == nil {
 		return view.MappingView{}, control.ErrClientNotFound
 	}
+	// Registration replaces the session without taking controlMu. Hold the
+	// exposure transaction lock for the whole operation so a switch that
+	// releases mu around its state fsync cannot have its session replaced.
+	m.exposureMu.Lock()
+	defer m.exposureMu.Unlock()
 
 	// A session can be replaced between looking it up and locking its control
 	// queue. Retry a few times, then report the churn instead of silently
@@ -224,6 +235,16 @@ func (m *mappingManager) SetExposure(clientID, mappingID string, exposure view.E
 			m.mu.Unlock()
 			sess.controlMu.Unlock()
 			return result, err
+		}
+
+		// A healthy same-value request is a read, not a listener rebuild. Keep
+		// the retry path when a family warning is present so a repeated
+		// request can recover the missing family.
+		if exposureOrDefault(rt.exposure) == exposure && len(rt.listeners.Warnings()) == 0 {
+			result := mappingViewForRuntime(rt)
+			m.mu.Unlock()
+			sess.controlMu.Unlock()
+			return result, nil
 		}
 
 		result, err := m.switchExposureLocked(sess, rt, exposure)
@@ -306,17 +327,30 @@ func (m *mappingManager) persistExposure(clientID, mappingID string, exposure vi
 	return err
 }
 
+// persistExposureTransaction applies the live-switch persistence seam.
+func (m *mappingManager) persistExposureTransaction(clientID, mappingID string, exposure view.Exposure) error {
+	if m.persistExposureFn != nil {
+		return m.persistExposureFn(clientID, mappingID, exposure)
+	}
+	return m.persistExposure(clientID, mappingID, exposure)
+}
+
 // switchExposureLocked performs the live switch transaction. The caller must
-// hold m.mu and the session's controlMu.
+// hold m.mu and the session's controlMu. The manager lock is released around
+// the state fsync; the caller's m.mu is held again on return.
 func (m *mappingManager) switchExposureLocked(sess *clientSession, rt *mappingRuntime, requested view.Exposure) (view.MappingView, error) {
 	oldExposure := exposureOrDefault(rt.exposure)
 	oldListeners := rt.listeners
 	oldPort := rt.assignedPort
 
+	// Retire the old accept generation before closing anything so an accepted
+	// but not-yet-tracked public connection cannot be relayed on the new
+	// exposure.
+	rt.acceptGen.Add(1)
+
 	// Keep UDP attachment serialized with the listener swap. An attachment
 	// racing the switch would otherwise capture the socket set being closed.
 	rt.udpMu.Lock()
-	defer rt.udpMu.Unlock()
 
 	oldPublic := rt.udpSession
 	rt.udpSession = nil
@@ -333,7 +367,8 @@ func (m *mappingManager) switchExposureLocked(sess *clientSession, rt *mappingRu
 	rt.closeActive()
 	if rt.data != nil {
 		// Pending reverse data streams for connections accepted by the old
-		// listeners are no longer valid after the switch.
+		// listeners are no longer valid after the switch. The generation check
+		// in take/takeFor also rejects any stream added after this pass.
 		rt.data.dropMapping(rt)
 	}
 	rt.status = mappingStatusPending
@@ -341,21 +376,67 @@ func (m *mappingManager) switchExposureLocked(sess *clientSession, rt *mappingRu
 
 	newListeners, bindErr := bindMappingListeners(requested, m.bindHost, rt.mapping.Type, oldPort)
 	if bindErr != nil {
-		return m.rollbackExposureLocked(sess, rt, oldExposure, oldPort, requested, bindErr)
+		result, err := m.rollbackExposureLocked(sess, rt, oldExposure, oldPort, requested, bindErr, false)
+		rt.udpMu.Unlock()
+		return result, err
 	}
 
-	// Persist after a successful bind and before accepting traffic. ErrCommitted
-	// is a success: the new value is already on disk.
-	if err := m.persistExposure(sess.id, rt.id, requested); err != nil {
+	// The new set is not published yet. Release udpMu before the fsync so an
+	// attachment sees nil and returns instead of blocking on disk I/O.
+	rt.udpMu.Unlock()
+
+	// Persist outside the manager lock. exposureMu prevents registration from
+	// replacing the session; detach/closeAll can still remove it, so re-check
+	// the exact session/runtime identity before publishing anything.
+	m.mu.Unlock()
+	persistErr := m.persistExposureTransaction(sess.id, rt.id, requested)
+	m.mu.Lock()
+
+	if m.sessions[sess.id] != sess || sess.mappings[rt.id] != rt {
 		_ = newListeners.Close()
-		return m.rollbackExposureLocked(sess, rt, oldExposure, oldPort, requested, err)
+		rt.udpMu.Lock()
+		rt.listeners = nil
+		rt.status = mappingStatusFailed
+		rt.errCode = string(control.CodeInternal)
+		rt.exposure = oldExposure
+		rt.udpMu.Unlock()
+		result := mappingViewForRuntime(rt)
+		if persistErr != nil {
+			return result, &ExposureSwitchError{
+				Requested:   requested,
+				Exposure:    oldExposure,
+				Closed:      true,
+				Persistence: true,
+				Err:         persistErr,
+			}
+		}
+		return result, &ExposureSwitchError{
+			Requested: requested,
+			Exposure:  oldExposure,
+			Closed:    true,
+			Err:       control.ErrClientOffline,
+		}
 	}
 
+	if persistErr != nil {
+		// Close the bound-but-unpublished set before rebinding the old
+		// exposure; otherwise a wildcard rollback can conflict with the new
+		// loopback sockets on the same port.
+		_ = newListeners.Close()
+		rt.udpMu.Lock()
+		result, err := m.rollbackExposureLocked(sess, rt, oldExposure, oldPort, requested, persistErr, true)
+		rt.udpMu.Unlock()
+		return result, err
+	}
+
+	// Publish only after persistence and the identity re-check succeeded.
+	rt.udpMu.Lock()
 	rt.listeners = newListeners
 	rt.assignedPort = newListeners.Port()
 	rt.exposure = requested
 	rt.status = mappingStatusRunning
 	rt.errCode = ""
+	rt.udpMu.Unlock()
 	if rt.mapping.Type == "tcp" {
 		m.startTCPListenersLocked(sess, rt, newListeners)
 	}
@@ -364,8 +445,9 @@ func (m *mappingManager) switchExposureLocked(sess *clientSession, rt *mappingRu
 
 // rollbackExposureLocked restores the previous exposure after a failed switch.
 // If the restore also fails the mapping stays closed and the error reports the
-// actual state instead of pretending the old listeners are active.
-func (m *mappingManager) rollbackExposureLocked(sess *clientSession, rt *mappingRuntime, oldExposure view.Exposure, port int, requested view.Exposure, cause error) (view.MappingView, error) {
+// actual state instead of pretending the old listeners are active. persistence
+// classifies the original failure for the Web API (409 vs 500).
+func (m *mappingManager) rollbackExposureLocked(sess *clientSession, rt *mappingRuntime, oldExposure view.Exposure, port int, requested view.Exposure, cause error, persistence bool) (view.MappingView, error) {
 	restored, restoreErr := bindMappingListeners(oldExposure, m.bindHost, rt.mapping.Type, port)
 	if restoreErr != nil {
 		rt.listeners = nil
@@ -380,10 +462,11 @@ func (m *mappingManager) rollbackExposureLocked(sess *clientSession, rt *mapping
 			"error", errors.Join(cause, restoreErr),
 		)
 		return mappingViewForRuntime(rt), &ExposureSwitchError{
-			Requested: requested,
-			Exposure:  oldExposure,
-			Closed:    true,
-			Err:       errors.Join(cause, restoreErr),
+			Requested:   requested,
+			Exposure:    oldExposure,
+			Closed:      true,
+			Persistence: persistence,
+			Err:         errors.Join(cause, restoreErr),
 		}
 	}
 
@@ -406,20 +489,23 @@ func (m *mappingManager) rollbackExposureLocked(sess *clientSession, rt *mapping
 		Requested:           requested,
 		Exposure:            oldExposure,
 		UnavailableFamilies: restored.Warnings(),
+		Persistence:         persistence,
 		Err:                 cause,
 	}
 }
 
-// startTCPListenersLocked starts one accept loop per bound family. It is called
-// after the new listeners are persisted, so a failed switch never accepts
-// traffic on a listener set that was rolled back.
+// startTCPListenersLocked starts one accept loop per bound family. It captures
+// the current accept generation once so every listener in the set retires
+// together. It is called after the new listeners are persisted, so a failed
+// switch never accepts traffic on a listener set that was rolled back.
 func (m *mappingManager) startTCPListenersLocked(sess *clientSession, rt *mappingRuntime, listeners *mappingListenerSet) {
 	if listeners == nil {
 		return
 	}
+	generation := rt.acceptGen.Load()
 	for _, listener := range listeners.TCP {
 		if m.serveTCP != nil {
-			go m.serveTCP(sess, rt, listener)
+			go m.serveTCP(sess, rt, listener, generation)
 		} else {
 			go acceptAndCloseTCP(listener)
 		}

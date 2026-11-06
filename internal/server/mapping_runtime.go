@@ -30,6 +30,11 @@ type mappingRuntime struct {
 	listeners *mappingListenerSet
 	data      *dataStreams
 	closed    atomic.Bool
+	// acceptGen is incremented whenever the listener set is retired by an
+	// exposure switch or close. Accept loops and accepted connections capture
+	// it so a connection accepted by an old listener cannot be relayed after
+	// the mapping stops listening on that address family.
+	acceptGen atomic.Uint64
 	closeOnce sync.Once
 
 	// udpMu serializes publicUDPConn creation with the eviction of the
@@ -118,6 +123,9 @@ func (m *mappingRuntime) closeActive() {
 // runtime and are closed here exactly once.
 func (m *mappingRuntime) close() {
 	m.closeOnce.Do(func() {
+		// Retire the current accept generation before closing the listeners so
+		// an accepted-but-not-yet-tracked connection cannot be relayed.
+		m.acceptGen.Add(1)
 		m.closed.Store(true)
 		if m.listeners != nil {
 			_ = m.listeners.Close()

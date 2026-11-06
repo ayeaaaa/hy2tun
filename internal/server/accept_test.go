@@ -57,7 +57,7 @@ func TestServeTCPRetriesTransientAcceptErrors(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		srv.serveTCP(nil, runtime, listener)
+		srv.serveTCP(nil, runtime, listener, runtime.acceptGen.Load())
 		close(done)
 	}()
 

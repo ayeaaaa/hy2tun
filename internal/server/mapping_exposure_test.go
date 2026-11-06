@@ -260,6 +260,7 @@ func TestMappingExposureSwitchLocal(t *testing.T) {
 
 		before := registerExposureMapping(t, env.manager, sess, mapping)
 		requirePublicListeners(t, before.listeners)
+		beforeGeneration := before.runtime.acceptGen.Load()
 		active := trackExposureConn(t, before.runtime)
 
 		switched, err := env.manager.SetExposure("client", "m1", view.ExposureLocal)
@@ -268,6 +269,7 @@ func TestMappingExposureSwitchLocal(t *testing.T) {
 		require.Equal(t, "running", switched.Status)
 		require.True(t, active.closed.Load(), "an existing public connection must be closed")
 		require.Equal(t, "local", env.store.Exposure("client", "m1"))
+		require.Greater(t, before.runtime.acceptGen.Load(), beforeGeneration, "a switch must retire the old accept generation")
 
 		local := snapshotExposureRuntime(t, env.manager, "client", "m1")
 		require.Equal(t, view.ExposureLocal, local.exposure)
@@ -306,6 +308,11 @@ func TestMappingExposureSwitchLocal(t *testing.T) {
 		local := snapshotExposureRuntime(t, env.manager, "client", "m1")
 		require.Equal(t, view.ExposureLocal, local.exposure)
 		requireLoopbackUDP(t, local.listeners)
+
+		// The old public fan-in must be closed, not merely replaced.
+		_, _, readErr := before.listeners.UDP.ReadFrom(make([]byte, 1))
+		require.Error(t, readErr)
+		require.ErrorIs(t, readErr, net.ErrClosed)
 
 		_, err = env.manager.SetExposure("client", "m1", view.ExposurePublic)
 		require.NoError(t, err)
@@ -399,6 +406,8 @@ func TestMappingExposureRollback(t *testing.T) {
 		require.Equal(t, view.ExposureLocal, switchErr.Requested)
 		require.Equal(t, view.ExposurePublic, switchErr.Exposure)
 		require.False(t, switchErr.Closed)
+		require.False(t, switchErr.Persistence)
+		require.True(t, switchErr.ExposureConflict())
 		require.Equal(t, view.ExposurePublic, switched.Exposure)
 		require.Equal(t, "running", switched.Status)
 		require.True(t, active.closed.Load())
@@ -439,6 +448,8 @@ func TestMappingExposureRollback(t *testing.T) {
 		require.Equal(t, view.ExposurePublic, switchErr.Requested)
 		require.Equal(t, view.ExposureLocal, switchErr.Exposure)
 		require.False(t, switchErr.Closed)
+		require.False(t, switchErr.Persistence)
+		require.True(t, switchErr.ExposureConflict())
 		require.Equal(t, view.ExposureLocal, switched.Exposure)
 		require.True(t, active.closed.Load())
 
@@ -473,6 +484,8 @@ func TestMappingExposureRollback(t *testing.T) {
 		require.Equal(t, view.ExposureLocal, switchErr.Requested)
 		require.Equal(t, view.ExposurePublic, switchErr.Exposure)
 		require.False(t, switchErr.Closed)
+		require.True(t, switchErr.Persistence)
+		require.False(t, switchErr.ExposureConflict())
 		require.Equal(t, view.ExposurePublic, switched.Exposure)
 		require.True(t, active.closed.Load())
 
@@ -493,6 +506,309 @@ func TestMappingExposureRollback(t *testing.T) {
 	})
 }
 
+func TestMappingExposureSameValue(t *testing.T) {
+	t.Run("healthy mapping does not rebuild", func(t *testing.T) {
+		env := newExposureEnv(t, "")
+		sess := newExposureSession("client")
+		port := freeExposureTCPPort(t)
+		mapping := config.Mapping{ID: "m1", Type: "tcp", RemotePort: port, LocalAddr: "127.0.0.1:9001", Enabled: true}
+
+		before := registerExposureMapping(t, env.manager, sess, mapping)
+		active := trackExposureConn(t, before.runtime)
+
+		switched, err := env.manager.SetExposure("client", "m1", view.ExposurePublic)
+		require.NoError(t, err)
+		require.Equal(t, view.ExposurePublic, switched.Exposure)
+		require.False(t, active.closed.Load(), "a same-value public request must not close connections")
+		afterPublic := snapshotExposureRuntime(t, env.manager, "client", "m1")
+		require.Same(t, before.runtime, afterPublic.runtime)
+		require.Same(t, before.listeners, afterPublic.listeners)
+
+		_, err = env.manager.SetExposure("client", "m1", view.ExposureLocal)
+		require.NoError(t, err)
+		local := snapshotExposureRuntime(t, env.manager, "client", "m1")
+		activeLocal := trackExposureConn(t, local.runtime)
+
+		_, err = env.manager.SetExposure("client", "m1", view.ExposureLocal)
+		require.NoError(t, err)
+		require.False(t, activeLocal.closed.Load(), "a same-value local request must not close connections")
+		afterLocal := snapshotExposureRuntime(t, env.manager, "client", "m1")
+		require.Same(t, local.runtime, afterLocal.runtime)
+		require.Same(t, local.listeners, afterLocal.listeners)
+	})
+
+	t.Run("warning retry still rebuilds", func(t *testing.T) {
+		env := newExposureEnv(t, "127.0.0.2")
+		sess := newExposureSession("client")
+		port := freeExposureTCPPort(t)
+		mapping := config.Mapping{ID: "m1", Type: "tcp", RemotePort: port, LocalAddr: "127.0.0.1:9001", Enabled: true}
+		registerExposureMapping(t, env.manager, sess, mapping)
+
+		ipv6, err := net.Listen("tcp6", fmt.Sprintf("[::1]:%d", port))
+		if err != nil {
+			t.Skipf("IPv6 loopback is unavailable: %v", err)
+		}
+		defer ipv6.Close()
+
+		switched, err := env.manager.SetExposure("client", "m1", view.ExposureLocal)
+		require.NoError(t, err)
+		require.Equal(t, []string{"ipv6"}, switched.UnavailableFamilies)
+		partial := snapshotExposureRuntime(t, env.manager, "client", "m1")
+
+		require.NoError(t, ipv6.Close())
+		retried, err := env.manager.SetExposure("client", "m1", view.ExposureLocal)
+		require.NoError(t, err)
+		require.Empty(t, retried.UnavailableFamilies, "a same-value retry must clear a recovered warning")
+		recovered := snapshotExposureRuntime(t, env.manager, "client", "m1")
+		require.NotSame(t, partial.listeners, recovered.listeners)
+		require.Empty(t, recovered.listeners.Warnings())
+		requireLoopbackListeners(t, recovered.listeners)
+	})
+}
+
+func TestMappingExposureStaleAcceptGeneration(t *testing.T) {
+	srv := &Server{log: slog.Default(), data: newDataStreams()}
+	sess := newExposureSession("client")
+	rt := &mappingRuntime{
+		id:      "m1",
+		mapping: config.Mapping{ID: "m1", Type: "tcp", Enabled: true},
+		status:  mappingStatusRunning,
+		data:    srv.data,
+		connSem: make(chan struct{}, 1),
+	}
+	oldGeneration := rt.acceptGen.Load()
+
+	// 1. The accept loop must drop a connection accepted before retirement.
+	// acceptGen.Add(1) models switchExposureLocked's retirement; the real
+	// switch increment is asserted in TestMappingExposureSwitchLocal/tcp.
+	client, server := net.Pipe()
+	listener := newExposureGenListener(server)
+	t.Cleanup(func() { _ = listener.Close() })
+	done := make(chan struct{})
+	go func() {
+		srv.serveTCP(nil, rt, listener, oldGeneration)
+		close(done)
+	}()
+	<-listener.accepted
+	rt.acceptGen.Add(1)
+	close(listener.release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("serveTCP did not return after a stale generation")
+	}
+	requireExposureConnClosed(t, client)
+	require.NoError(t, client.Close())
+	require.NoError(t, listener.Close())
+
+	// 2. An already-accepted connection must be rejected before tracking.
+	client2, server2 := net.Pipe()
+	srv.openPublicConn(sess, rt, server2, oldGeneration)
+	requireExposureConnClosed(t, client2)
+	require.NoError(t, client2.Close())
+	require.Zero(t, exposureActiveCount(rt))
+	require.Len(t, rt.connSem, 0)
+	require.Zero(t, exposurePendingCount(srv.data))
+
+	// 3. A tracked connection must be rejected immediately before opening the
+	// reverse data stream.
+	client3, server3 := net.Pipe()
+	active := &activeConn{Conn: server3, mapping: rt}
+	rt.trackActive(active)
+	err := srv.openDataStream(sess, rt, active, oldGeneration)
+	require.Error(t, err)
+	require.Zero(t, exposurePendingCount(srv.data))
+	require.NoError(t, active.Close())
+	require.NoError(t, client3.Close())
+
+	// 4. A pending stream added after retirement must be rejected at take time.
+	client4, server4 := net.Pipe()
+	token, err := srv.data.add(&pendingConn{
+		conn:       server4,
+		mapping:    rt,
+		owner:      sess,
+		expires:    time.Now().Add(time.Second),
+		generation: oldGeneration,
+	})
+	require.NoError(t, err)
+	_, err = srv.data.take(token)
+	require.Error(t, err)
+	requireExposureConnClosed(t, client4)
+	require.NoError(t, client4.Close())
+}
+
+type exposureGenListener struct {
+	conn     net.Conn
+	accepted chan struct{}
+	release  chan struct{}
+	closed   chan struct{}
+	once     sync.Once
+}
+
+func newExposureGenListener(conn net.Conn) *exposureGenListener {
+	return &exposureGenListener{
+		conn:     conn,
+		accepted: make(chan struct{}),
+		release:  make(chan struct{}),
+		closed:   make(chan struct{}),
+	}
+}
+
+func (l *exposureGenListener) Accept() (net.Conn, error) {
+	l.once.Do(func() { close(l.accepted) })
+	select {
+	case <-l.release:
+		return l.conn, nil
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *exposureGenListener) Close() error {
+	select {
+	case <-l.closed:
+	default:
+		close(l.closed)
+	}
+	return nil
+}
+
+func (l *exposureGenListener) Addr() net.Addr { return &net.TCPAddr{} }
+
+func requireExposureConnClosed(t *testing.T, conn net.Conn) {
+	t.Helper()
+
+	// net.Pipe returns io.ErrClosedPipe from SetReadDeadline once the peer is
+	// gone; that is itself evidence of closure.
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	_, err := conn.Read(make([]byte, 1))
+	require.Error(t, err)
+	var netErr net.Error
+	require.False(t, errors.As(err, &netErr) && netErr.Timeout(), "connection must be closed, not left open")
+}
+
+func exposureActiveCount(rt *mappingRuntime) int {
+	rt.activeMu.Lock()
+	defer rt.activeMu.Unlock()
+	return len(rt.active)
+}
+
+func exposurePendingCount(data *dataStreams) int {
+	data.mu.Lock()
+	defer data.mu.Unlock()
+	return len(data.pending)
+}
+
+func TestMappingExposurePersistReleasesManagerLock(t *testing.T) {
+	env := newExposureEnv(t, "")
+	sess := newExposureSession("client")
+	port := freeExposureTCPPort(t)
+	mapping := config.Mapping{ID: "m1", Type: "tcp", RemotePort: port, LocalAddr: "127.0.0.1:9001", Enabled: true}
+	registerExposureMapping(t, env.manager, sess, mapping)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	env.manager.persistExposureFn = func(clientID, mappingID string, exposure view.Exposure) error {
+		close(entered)
+		<-release
+		return env.store.SetExposure(clientID, mappingID, string(exposure))
+	}
+	t.Cleanup(func() { env.manager.persistExposureFn = nil })
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := env.manager.SetExposure("client", "m1", view.ExposureLocal)
+		done <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("exposure persistence was not called")
+	}
+
+	// The manager lock must be free while the state fsync is in progress.
+	acquired := make(chan struct{})
+	go func() {
+		env.manager.mu.Lock()
+		env.manager.mu.Unlock()
+		close(acquired)
+	}()
+	select {
+	case <-acquired:
+	case <-time.After(time.Second):
+		t.Fatal("m.mu was held across exposure persistence")
+	}
+
+	close(release)
+	released = true
+	require.NoError(t, <-done)
+	final := snapshotExposureRuntime(t, env.manager, "client", "m1")
+	require.Equal(t, view.ExposureLocal, final.exposure)
+	requireLoopbackListeners(t, final.listeners)
+	require.Equal(t, "local", env.store.Exposure("client", "m1"))
+}
+
+func TestMappingExposurePersistRecheckFailure(t *testing.T) {
+	env := newExposureEnv(t, "")
+	sess := newExposureSession("client")
+	port := freeExposureTCPPort(t)
+	mapping := config.Mapping{ID: "m1", Type: "tcp", RemotePort: port, LocalAddr: "127.0.0.1:9001", Enabled: true}
+	registerExposureMapping(t, env.manager, sess, mapping)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	env.manager.persistExposureFn = func(clientID, mappingID string, exposure view.Exposure) error {
+		close(entered)
+		<-release
+		return env.store.SetExposure(clientID, mappingID, string(exposure))
+	}
+	t.Cleanup(func() { env.manager.persistExposureFn = nil })
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := env.manager.SetExposure("client", "m1", view.ExposureLocal)
+		done <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("exposure persistence was not called")
+	}
+
+	// Replace/remove the session while the manager lock is released. The
+	// transaction must not serve the set it bound.
+	env.manager.detach(sess)
+	close(release)
+	released = true
+
+	err := <-done
+	require.Error(t, err)
+	var switchErr *ExposureSwitchError
+	require.ErrorAs(t, err, &switchErr)
+	require.True(t, switchErr.Closed)
+	require.False(t, switchErr.Persistence)
+	require.True(t, switchErr.ExposureConflict())
+	require.ErrorIs(t, switchErr, control.ErrClientOffline)
+	require.Equal(t, "local", env.store.Exposure("client", "m1"), "the requested value remains the offline desired state")
+
+	// The bound-but-unpublished set was closed; the port is free again.
+	listener, listenErr := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	require.NoError(t, listenErr)
+	require.NoError(t, listener.Close())
+}
+
 func TestMappingExposurePersistsAcrossReconnect(t *testing.T) {
 	env := newExposureEnv(t, "")
 	port := freeExposureTCPPort(t)
@@ -509,6 +825,12 @@ func TestMappingExposurePersistsAcrossReconnect(t *testing.T) {
 	require.Equal(t, view.ExposureLocal, offlineView.Exposure)
 	require.Equal(t, mappingStatusOffline, offlineView.Status)
 	require.Equal(t, "local", env.store.Exposure("client", "m1"))
+
+	offlineClients := env.manager.clientViews()
+	require.Len(t, offlineClients, 1)
+	require.False(t, offlineClients[0].Online)
+	require.Equal(t, view.ExposureLocal, mappingViewByID(t, offlineClients[0], "m1").Exposure)
+	require.Equal(t, mappingStatusOffline, mappingViewByID(t, offlineClients[0], "m1").Status)
 
 	reconnected := newExposureSession("client")
 	afterReconnect := registerExposureMapping(t, env.manager, reconnected, mapping)
@@ -639,6 +961,7 @@ func TestMappingExposureAllBindPaths(t *testing.T) {
 		switched, err := pair.Server.SetMappingExposure(clientID, "m1", view.ExposureLocal)
 		require.NoError(t, err)
 		require.Equal(t, view.ExposureLocal, switched.Exposure)
+		require.Equal(t, "local", pair.Server.store.Exposure(clientID, "m1"))
 
 		// A keep-path push must not reopen the mapping publicly.
 		next := []config.Mapping{{ID: "m1", Type: "tcp", RemotePort: 0, LocalAddr: "127.0.0.1:9001", Note: "pushed", Enabled: true}}
@@ -648,6 +971,7 @@ func TestMappingExposureAllBindPaths(t *testing.T) {
 		kept := snapshotTestRuntime(t, pair.Server, clientID, "m1")
 		require.Equal(t, view.ExposureLocal, kept.runtime.exposure)
 		requireLoopbackListeners(t, kept.runtime.listeners)
+		require.Equal(t, "local", pair.Server.store.Exposure(clientID, "m1"))
 
 		// A rebinding push must also apply the stored exposure.
 		newPort := freeExposureTCPPort(t)
@@ -659,6 +983,7 @@ func TestMappingExposureAllBindPaths(t *testing.T) {
 		require.Equal(t, newPort, rebound.assignedPort)
 		require.Equal(t, view.ExposureLocal, rebound.runtime.exposure)
 		requireLoopbackListeners(t, rebound.runtime.listeners)
+		require.Equal(t, "local", pair.Server.store.Exposure(clientID, "m1"))
 	})
 }
 
@@ -815,10 +1140,20 @@ func TestExposureSwitchErrorUnwrap(t *testing.T) {
 	require.Contains(t, err.Error(), "local")
 	require.Contains(t, err.Error(), "public")
 	require.True(t, err.ExposureConflict())
+	require.False(t, err.Persistence)
 	require.Equal(t, view.ExposurePublic, err.ActiveExposure())
 	require.False(t, err.MappingClosed())
 
 	closed := &ExposureSwitchError{Requested: view.ExposureLocal, Exposure: view.ExposurePublic, Closed: true, Err: cause}
 	require.Contains(t, closed.Error(), "closed")
 	require.True(t, closed.MappingClosed())
+
+	persistence := &ExposureSwitchError{
+		Requested:   view.ExposureLocal,
+		Exposure:    view.ExposurePublic,
+		Persistence: true,
+		Err:         cause,
+	}
+	require.False(t, persistence.ExposureConflict())
+	require.True(t, persistence.Persistence)
 }

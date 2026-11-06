@@ -32,6 +32,10 @@ const (
 
 type mappingManager struct {
 	mu sync.Mutex
+	// exposureMu serializes exposure transactions with registration. A live
+	// switch releases mu around the state fsync; registration must not replace
+	// the session in that window.
+	exposureMu sync.Mutex
 	// policy is swapped atomically by hot configuration updates. Existing
 	// mappings keep their listeners; only new registration and allocation read
 	// the current policy.
@@ -41,6 +45,9 @@ type mappingManager struct {
 	bindHost string
 	reserved map[int]struct{}
 	data     *dataStreams
+	// persistExposureFn is a test seam for the live switch transaction. A nil
+	// value uses persistExposure.
+	persistExposureFn func(clientID, mappingID string, exposure view.Exposure) error
 
 	sessions map[string]*clientSession
 
@@ -52,7 +59,7 @@ type mappingManager struct {
 
 	// serveTCP handles public connections for a newly bound TCP mapping. It is
 	// installed by Server.New before any mapping can be registered.
-	serveTCP func(*clientSession, *mappingRuntime, net.Listener)
+	serveTCP func(*clientSession, *mappingRuntime, net.Listener, uint64)
 }
 
 func newMappingManager(policy *ports.Policy, store *state.Store, log *slog.Logger, bindHost string, reserved map[int]struct{}, data *dataStreams) *mappingManager {
@@ -115,6 +122,11 @@ func (m *mappingManager) clientCount() int {
 
 func (m *mappingManager) register(sess *clientSession, mappings []config.Mapping) []control.Result {
 	now := time.Now()
+
+	// Registration replaces the session and must not interleave with a live
+	// exposure switch that has released mu for the state fsync.
+	m.exposureMu.Lock()
+	defer m.exposureMu.Unlock()
 
 	m.mu.Lock()
 	old := m.admitSessionLocked(sess, now)
