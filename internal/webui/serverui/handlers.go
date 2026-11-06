@@ -338,6 +338,7 @@ func (s *Server) newHandler() http.Handler {
 	mux.Handle("GET /api/clients/{id}", s.auth(http.HandlerFunc(s.handleClientJSON)))
 	mux.Handle("DELETE /api/clients/{id}", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleDeleteClient))))
 	mux.Handle("PUT /api/clients/{id}/mappings", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handlePushMappings))))
+	mux.Handle("PUT /api/clients/{id}/mappings/{mappingID}/exposure", s.auth(shared.RequireCSRF(http.HandlerFunc(s.handleMappingExposure))))
 	mux.Handle("GET /api/mappings", s.auth(http.HandlerFunc(s.handleMappingsJSON)))
 	mux.Handle("GET /api/events", s.auth(http.HandlerFunc(s.handleEvents)))
 	mux.Handle("GET /api/config/summary", s.auth(http.HandlerFunc(s.handleConfigSummaryJSON)))

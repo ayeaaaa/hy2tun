@@ -165,6 +165,59 @@ type mappingEntry struct {
 	Mapping    view.MappingView `json:"mapping"`
 }
 
+// mappingResponse is the Web API read model returned after an exposure change.
+// It mirrors the mapping fields exposed by the client console and uses the
+// snake_case names shared with the CLI. UnavailableFamilies is always present
+// (empty when both families bound) so callers can clear a previous warning.
+type mappingResponse struct {
+	ID                  string        `json:"id"`
+	Type                string        `json:"type"`
+	RemotePort          int           `json:"remote_port"`
+	LocalAddr           string        `json:"local_addr"`
+	Note                string        `json:"note"`
+	Enabled             bool          `json:"enabled"`
+	Status              string        `json:"status"`
+	Error               string        `json:"error,omitempty"`
+	AssignedPort        int           `json:"assigned_port"`
+	Exposure            view.Exposure `json:"exposure"`
+	UnavailableFamilies []string      `json:"unavailable_families"`
+	TxBytes             uint64        `json:"tx_bytes"`
+	RxBytes             uint64        `json:"rx_bytes"`
+}
+
+// exposureConflictResponse describes the state that remains active after a
+// failed live switch. Closed means the rollback bind also failed and the
+// mapping currently has no listener.
+type exposureConflictResponse struct {
+	Error               string        `json:"error"`
+	Code                string        `json:"code"`
+	ActiveExposure      view.Exposure `json:"active_exposure"`
+	UnavailableFamilies []string      `json:"unavailable_families"`
+	Closed              bool          `json:"closed"`
+}
+
+func mappingResponseFrom(mapping view.MappingView) mappingResponse {
+	families := append([]string(nil), mapping.UnavailableFamilies...)
+	if families == nil {
+		families = []string{}
+	}
+	return mappingResponse{
+		ID:                  mapping.ID,
+		Type:                mapping.Type,
+		RemotePort:          mapping.RemotePort,
+		LocalAddr:           mapping.LocalAddr,
+		Note:                mapping.Note,
+		Enabled:             mapping.Enabled,
+		Status:              mapping.Status,
+		Error:               mapping.Error,
+		AssignedPort:        mapping.AssignedPort,
+		Exposure:            mapping.Exposure,
+		UnavailableFamilies: families,
+		TxBytes:             mapping.TxBytes,
+		RxBytes:             mapping.RxBytes,
+	}
+}
+
 type overviewResponse struct {
 	OnlineClients  int    `json:"online_clients"`
 	ActiveMappings int    `json:"active_mappings"`
