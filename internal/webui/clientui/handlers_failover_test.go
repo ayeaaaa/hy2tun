@@ -2,7 +2,6 @@ package clientui
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -12,43 +11,37 @@ import (
 	"hy2tun/internal/view"
 )
 
-func clientFailoverBody(password string) string {
-	return fmt.Sprintf(`{
+func clientFailoverBody() string {
+	return `{
 		"connect_timeout":"8s",
 		"heartbeat_interval":"5s",
 		"heartbeat_timeout":"20s",
 		"probe_interval":"15s",
 		"min_tcp_hold":"30s",
-		"recovery_successes":3,
-		"current_password":%q
-	}`, password)
+		"recovery_successes":3
+	}`
 }
 
-func TestFailoverAPICSRFAndPassword(t *testing.T) {
+func TestFailoverAPICSRFWithoutPassword(t *testing.T) {
 	api := &fakeClientAPI{settings: SettingsView{}}
 	_, ts := newTestClientWeb(t, api)
 	cookie := loginClientWeb(t, ts)
 
 	resp := doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/failover",
-		clientFailoverBody("pw"), cookie, nil)
+		clientFailoverBody(), cookie, nil)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	resp.Body.Close()
 	require.Zero(t, api.failoverCalls, "CSRF failure must not invoke UpdateFailover")
 
 	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/failover",
-		clientFailoverBody("wrong"), cookie, clientModeHeaders(ts))
+		clientFailoverBody(), cookie, map[string]string{"X-Requested-With": "hy2tun"})
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	readClientBody(t, resp)
-	require.Zero(t, api.failoverCalls, "wrong password must not invoke UpdateFailover")
+	require.Zero(t, api.failoverCalls, "CSRF failure must not invoke UpdateFailover")
 
+	// A valid session plus CSRF is enough; no current password is required.
 	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/failover",
-		`{"connect_timeout":"8s"}`, cookie, clientModeHeaders(ts))
-	require.Equal(t, http.StatusForbidden, resp.StatusCode)
-	readClientBody(t, resp)
-	require.Zero(t, api.failoverCalls, "missing current password must not invoke UpdateFailover")
-
-	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/failover",
-		clientFailoverBody("pw"), cookie, clientModeHeaders(ts))
+		clientFailoverBody(), cookie, clientModeHeaders(ts))
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	state := readClientJSON[FailoverView](t, resp)
 	require.Equal(t, "8s", state.ConnectTimeout)
@@ -69,14 +62,14 @@ func TestFailoverAPIServerSelection(t *testing.T) {
 	cookie := loginClientWeb(t, ts)
 
 	resp := doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/failover?server=sg",
-		clientFailoverBody("pw"), cookie, clientModeHeaders(ts))
+		clientFailoverBody(), cookie, clientModeHeaders(ts))
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	readClientBody(t, resp)
 	require.Equal(t, 1, sg.failoverCalls)
 	require.Zero(t, us.failoverCalls, "another worker must not be updated")
 
 	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/failover?server=missing",
-		clientFailoverBody("pw"), cookie, clientModeHeaders(ts))
+		clientFailoverBody(), cookie, clientModeHeaders(ts))
 	require.Equal(t, http.StatusNotFound, resp.StatusCode)
 	resp.Body.Close()
 	require.Equal(t, 1, sg.failoverCalls)
@@ -89,14 +82,14 @@ func TestFailoverAPIInvalidAndSaveFailure(t *testing.T) {
 	cookie := loginClientWeb(t, ts)
 
 	resp := doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/failover",
-		`{"connect_timeout":"not-a-duration","current_password":"pw"}`, cookie, clientModeHeaders(ts))
+		`{"connect_timeout":"not-a-duration"}`, cookie, clientModeHeaders(ts))
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	require.Contains(t, readClientBody(t, resp), "invalid_failover")
 	require.Zero(t, api.failoverCalls)
 
 	api.failoverErr = errors.New("disk full")
 	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/failover",
-		clientFailoverBody("pw"), cookie, clientModeHeaders(ts))
+		clientFailoverBody(), cookie, clientModeHeaders(ts))
 	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 	require.Contains(t, readClientBody(t, resp), "internal")
 }
@@ -137,7 +130,7 @@ func TestFailoverAPIPageAndUnsupported(t *testing.T) {
 	require.NotContains(t, body, `id="settings-failover-form"`)
 
 	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/failover",
-		clientFailoverBody("pw"), cookie, clientModeHeaders(ts))
+		clientFailoverBody(), cookie, clientModeHeaders(ts))
 	require.Equal(t, http.StatusNotImplemented, resp.StatusCode)
 	require.True(t, strings.Contains(readClientBody(t, resp), "not_implemented"))
 }

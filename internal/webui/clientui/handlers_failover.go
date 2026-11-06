@@ -40,9 +40,6 @@ func (s *Server) handleUpdateFailover(w http.ResponseWriter, r *http.Request) {
 	if !decodeSettingsBody(w, r, &request) {
 		return
 	}
-	if !s.confirmCurrentPassword(w, r, request.secret()) {
-		return
-	}
 	connectTimeout, err := parseFailoverDuration("connect_timeout", request.ConnectTimeout)
 	if err != nil {
 		writeJSONErrorCode(w, http.StatusBadRequest, "invalid_failover", err.Error())

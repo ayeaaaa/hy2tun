@@ -387,12 +387,12 @@ func TestManualRotationViaClientWebEndToEnd(t *testing.T) {
 	require.Equal(t, int64(1), settings.Credentials.Generation)
 	require.Equal(t, int64(1), settings.Credentials.ServerGeneration)
 
-	// Submit the new generation through the real client web API.
+	// Submit the new generation through the real client web API. Session and
+	// CSRF are enough; no Web password re-authentication is required.
 	resp = doWebJSON(t, webClient, http.MethodPut, pair.ClientWebAddr, "/api/settings/credentials", cookie, map[string]any{
-		"current_password": integrationClientWebPassword,
-		"generation":       generation,
-		"auth":             newAuth,
-		"control_token":    newToken,
+		"generation":    generation,
+		"auth":          newAuth,
+		"control_token": newToken,
 	})
 	require.Equal(t, http.StatusAccepted, resp.StatusCode)
 	var accepted struct {
@@ -435,8 +435,7 @@ func TestManualRotationViaClientWebEndToEnd(t *testing.T) {
 
 	// Rename the client through its web console; the server view must follow.
 	resp = doWebJSON(t, webClient, http.MethodPut, pair.ClientWebAddr, "/api/settings/name", cookie, map[string]any{
-		"current_password": integrationClientWebPassword,
-		"name":             "renamed-through-web",
+		"name": "renamed-through-web",
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	resp.Body.Close()
@@ -449,16 +448,9 @@ func TestManualRotationViaClientWebEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "renamed-through-web", updated.Client.Name)
 
-	// Reveal is re-authenticated, never cached, and returns the new pair.
-	resp = doWebJSON(t, webClient, http.MethodPost, pair.ClientWebAddr, "/api/settings/credentials/reveal", cookie, map[string]any{
-		"password": "wrong-password",
-	})
-	require.Equal(t, http.StatusForbidden, resp.StatusCode)
-	require.NotContains(t, readWebBody(t, resp), newAuth)
-
-	resp = doWebJSON(t, webClient, http.MethodPost, pair.ClientWebAddr, "/api/settings/credentials/reveal", cookie, map[string]any{
-		"password": integrationClientWebPassword,
-	})
+	// Reveal needs only the session and CSRF; it is never cached and returns
+	// the new pair without a Web password.
+	resp = doWebJSON(t, webClient, http.MethodPost, pair.ClientWebAddr, "/api/settings/credentials/reveal", cookie, map[string]any{})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
 	var revealed struct {

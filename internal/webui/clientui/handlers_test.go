@@ -908,7 +908,7 @@ func TestClientWebRotateCredentials(t *testing.T) {
 	cookie := resp.Cookies()[0]
 	resp.Body.Close()
 
-	body := `{"current_password":"pw","generation":2,"auth":"new-auth","control_token":"new-token-0123456789abcdef"}`
+	body := `{"generation":2,"auth":"new-auth","control_token":"new-token-0123456789abcdef"}`
 	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/settings/credentials", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Requested-With", "hy2tun")
@@ -944,7 +944,7 @@ func TestClientWebRotateCredentialsRejectsShortAuth(t *testing.T) {
 	_, ts := newTestClientWeb(t, api)
 	cookie := loginClientWeb(t, ts)
 
-	body := `{"current_password":"pw","generation":2,"auth":"short","control_token":"new-token-0123456789abcdef"}`
+	body := `{"generation":2,"auth":"short","control_token":"new-token-0123456789abcdef"}`
 	resp := doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/credentials", body, cookie, map[string]string{
 		"Content-Type":     "application/json",
 		"X-Requested-With": "hy2tun",
@@ -1033,6 +1033,16 @@ func TestClientWebSettingsJSONAndPage(t *testing.T) {
 	resp = doClientRequest(t, ts.Client(), http.MethodGet, ts.URL+"/", "", cookie, map[string]string{"Accept": "text/html"})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	body := readClientBody(t, resp)
+	for _, id := range []string{
+		"mode-current-password",
+		"failover-current-password",
+		"credentials-reveal-password",
+		"credentials-current-password",
+		"name-current-password",
+	} {
+		require.NotContains(t, body, `id="`+id+`"`, "client settings must not render a current-password field")
+	}
+	require.Contains(t, body, `id="web-current-password"`)
 	require.Contains(t, body, "Web 管理员")
 	require.Contains(t, body, "已设置（只能重置，不会回显）")
 	require.Contains(t, body, "HY2 凭据")
@@ -1046,7 +1056,7 @@ func TestClientWebSettingsJSONAndPage(t *testing.T) {
 	require.NotContains(t, body, "plain-token")
 }
 
-func TestClientWebRevealRequiresPasswordAndNoStore(t *testing.T) {
+func TestClientWebRevealWithoutPasswordAndNoStore(t *testing.T) {
 	api := &fakeClientAPI{
 		settings: SettingsView{
 			Credentials: CredentialSettingsView{
@@ -1064,16 +1074,18 @@ func TestClientWebRevealRequiresPasswordAndNoStore(t *testing.T) {
 	_, ts := newTestClientWeb(t, api)
 	cookie := loginClientWeb(t, ts)
 
+	// Missing CSRF still fails and never reveals the secrets.
 	resp := doClientRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/settings/credentials/reveal",
-		`{"password":"wrong"}`, cookie, map[string]string{"X-Requested-With": "hy2tun", "Origin": ts.URL})
+		`{}`, cookie, nil)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	require.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
 	body := readClientBody(t, resp)
 	require.NotContains(t, body, "plain-auth")
 	require.NotContains(t, body, "plain-token")
 
+	// A valid session plus CSRF is enough; no current password is required.
 	resp = doClientRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/settings/credentials/reveal",
-		`{"password":"pw"}`, cookie, map[string]string{"X-Requested-With": "hy2tun", "Origin": ts.URL})
+		`{}`, cookie, map[string]string{"X-Requested-With": "hy2tun", "Origin": ts.URL})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
 	revealed := readClientJSON[revealCredentialsResponse](t, resp)
@@ -1081,6 +1093,13 @@ func TestClientWebRevealRequiresPasswordAndNoStore(t *testing.T) {
 	require.Equal(t, int64(3), revealed.Current.Generation)
 	require.Equal(t, "plain-auth", revealed.Current.Auth)
 	require.Equal(t, "plain-token", revealed.Current.ControlToken)
+
+	// A submitted password is ignored for backward compatibility.
+	resp = doClientRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/settings/credentials/reveal",
+		`{"password":"wrong"}`, cookie, map[string]string{"X-Requested-With": "hy2tun", "Origin": ts.URL})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	revealed = readClientJSON[revealCredentialsResponse](t, resp)
+	require.Equal(t, "plain-auth", revealed.Current.Auth)
 }
 
 func TestClientWebUpdateName(t *testing.T) {
@@ -1090,20 +1109,29 @@ func TestClientWebUpdateName(t *testing.T) {
 	_, ts := newTestClientWeb(t, api)
 	cookie := loginClientWeb(t, ts)
 
+	// Missing CSRF still fails.
 	resp := doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/name",
-		`{"current_password":"pw","name":"new-name"}`, cookie,
+		`{"name":"new-name"}`, cookie, nil)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	resp.Body.Close()
+	require.Empty(t, api.name)
+
+	// A valid session plus CSRF is enough; no current password is required.
+	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/name",
+		`{"name":"new-name"}`, cookie,
 		map[string]string{"X-Requested-With": "hy2tun", "Origin": ts.URL})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Equal(t, "new-name", api.name)
 	settings := readClientJSON[SettingsView](t, resp)
 	require.Equal(t, "new-name", settings.Name)
 
+	// A submitted password is ignored for backward compatibility.
 	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/name",
-		`{"current_password":"wrong","name":"ignored"}`, cookie,
+		`{"current_password":"wrong","name":"second-name"}`, cookie,
 		map[string]string{"X-Requested-With": "hy2tun", "Origin": ts.URL})
-	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "second-name", api.name)
 	readClientBody(t, resp)
-	require.Equal(t, "new-name", api.name)
 }
 
 func TestClientWebUpdateWebConfigRevokesSessions(t *testing.T) {
@@ -1145,57 +1173,122 @@ func TestClientWebUpdateWebConfigRevokesSessions(t *testing.T) {
 	require.Equal(t, "ops", web.sessions.AdminUsername())
 }
 
-func TestClientWebSettingsRequireCSRFAndCurrentPassword(t *testing.T) {
+func TestClientSettingsRequireSession(t *testing.T) {
+	api := &fakeClientAPI{settings: SettingsView{Credentials: CredentialSettingsView{Generation: 2}}}
+	_, ts := newTestClientWeb(t, api)
+	headers := clientModeHeaders(ts)
+
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{"mode", http.MethodPut, "/api/settings/mode", clientModeBody("tcp")},
+		{"failover", http.MethodPut, "/api/settings/failover", clientFailoverBody()},
+		{"name", http.MethodPut, "/api/settings/name", `{"name":"new"}`},
+		{"rotate", http.MethodPut, "/api/settings/credentials", `{"generation":3,"auth":"new-auth","control_token":"new-token-0123456789abcdef"}`},
+		{"reveal", http.MethodPost, "/api/settings/credentials/reveal", `{}`},
+		{"web", http.MethodPut, "/api/settings/web", `{"username":"ops","new_password":"newpassword","current_password":"pw"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := doClientRequest(t, ts.Client(), tc.method, ts.URL+tc.path, tc.body, nil, headers)
+			require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+			require.Contains(t, readClientBody(t, resp), "unauthorized")
+		})
+	}
+
+	require.Zero(t, api.modeCalls)
+	require.Zero(t, api.failoverCalls)
+	require.Empty(t, api.name)
+	require.Zero(t, api.rotation.Generation)
+	require.Empty(t, api.web.Username)
+}
+
+func TestClientWebSettingsRequireCSRFAndWebPassword(t *testing.T) {
 	api := &fakeClientAPI{settings: SettingsView{Credentials: CredentialSettingsView{Generation: 2}}}
 	_, ts := newTestClientWeb(t, api)
 	cookie := loginClientWeb(t, ts)
+	headers := map[string]string{"X-Requested-With": "hy2tun", "Origin": ts.URL}
 
-	// Missing CSRF header and Origin.
+	// Missing CSRF still fails for client settings.
 	resp := doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/name",
-		`{"current_password":"pw","name":"new"}`, cookie, nil)
+		`{"name":"new"}`, cookie, nil)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	resp.Body.Close()
+	require.Empty(t, api.name)
 
-	// Wrong current password.
+	// Client settings no longer require the current password.
+	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/name",
+		`{"name":"new"}`, cookie, headers)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	readClientBody(t, resp)
+	require.Equal(t, "new", api.name)
+
+	// Rotation still requires CSRF.
 	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/credentials",
-		`{"current_password":"wrong","generation":3,"auth":"a","control_token":"b"}`, cookie,
-		map[string]string{"X-Requested-With": "hy2tun", "Origin": ts.URL})
+		`{"generation":3,"auth":"new-auth","control_token":"new-token-0123456789abcdef"}`, cookie, nil)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	resp.Body.Close()
 	require.Zero(t, api.rotation.Generation)
 
-	// A stale generation is rejected without touching the client.
+	// Rotation reaches its own validation without a password.
 	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/credentials",
-		`{"current_password":"pw","generation":2,"auth":"a","control_token":"b"}`, cookie,
-		map[string]string{"X-Requested-With": "hy2tun", "Origin": ts.URL})
+		`{"generation":2,"auth":"a","control_token":"b"}`, cookie, headers)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	readClientBody(t, resp)
 	require.Zero(t, api.rotation.Generation)
 
-	// Reveal also requires the current password.
+	// Reveal succeeds without a password.
 	resp = doClientRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/settings/credentials/reveal",
-		`{"password":"wrong"}`, cookie, map[string]string{"X-Requested-With": "hy2tun", "Origin": ts.URL})
+		`{}`, cookie, headers)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	readClientBody(t, resp)
+
+	// Web administrator changes still require the current password.
+	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/web",
+		`{"username":"ops","new_password":"newpassword","confirm_password":"newpassword"}`,
+		cookie, headers)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	readClientBody(t, resp)
+	require.Empty(t, api.web.Username)
+
+	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/web",
+		`{"current_password":"wrong","username":"ops","new_password":"newpassword","confirm_password":"newpassword"}`,
+		cookie, headers)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	readClientBody(t, resp)
+	require.Empty(t, api.web.Username)
+
+	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/web",
+		`{"current_password":"pw","username":"ops","new_password":"newpassword","confirm_password":"newpassword"}`,
+		cookie, headers)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 	resp.Body.Close()
+	require.Equal(t, "ops", api.web.Username)
 }
 
 func TestClientWebSettingsPasswordFailuresAreRateLimited(t *testing.T) {
-	api := &fakeClientAPI{settings: SettingsView{Credentials: CredentialSettingsView{Generation: 1}}}
+	api := &fakeClientAPI{}
 	_, ts := newTestClientWeb(t, api)
 	cookie := loginClientWeb(t, ts)
 
 	headers := map[string]string{"X-Requested-With": "hy2tun", "Origin": ts.URL}
 	for i := 0; i < 5; i++ {
-		resp := doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/name",
-			`{"current_password":"wrong","name":"new"}`, cookie, headers)
+		resp := doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/web",
+			`{"current_password":"wrong","username":"ops","new_password":"newpassword","confirm_password":"newpassword"}`,
+			cookie, headers)
 		require.Equal(t, http.StatusForbidden, resp.StatusCode)
 		resp.Body.Close()
 	}
-	resp := doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/name",
-		`{"current_password":"pw","name":"new"}`, cookie, headers)
+	resp := doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/web",
+		`{"current_password":"pw","username":"ops","new_password":"newpassword","confirm_password":"newpassword"}`,
+		cookie, headers)
 	require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
 	require.Equal(t, "60", resp.Header.Get("Retry-After"))
 	resp.Body.Close()
+	require.Empty(t, api.web.Username)
 }
 
 func TestClientWebStatusIncludesCredentialState(t *testing.T) {

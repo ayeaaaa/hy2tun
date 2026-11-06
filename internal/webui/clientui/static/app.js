@@ -837,27 +837,15 @@
     document.addEventListener("click", async (event) => {
       const revealButton = event.target.closest("[data-reveal-credentials]");
       if (revealButton) {
-        const passwordInput = $("#credentials-reveal-password");
-        const password = passwordInput ? passwordInput.value : "";
-        if (!password) {
-          showToast("请输入当前 Web 密码", "bad");
-          if (passwordInput) {
-            passwordInput.focus();
-          }
-          return;
-        }
         revealButton.disabled = true;
         try {
-          const data = await settingsRequest(serverURL("/api/settings/credentials/reveal"), "POST", { password });
+          const data = await settingsRequest(serverURL("/api/settings/credentials/reveal"), "POST", {});
           showSecrets(data);
           showToast("已显示凭据，30 秒后自动隐藏");
         } catch (error) {
           showToast(error.message, "bad");
         } finally {
           revealButton.disabled = false;
-          if (passwordInput) {
-            passwordInput.value = "";
-          }
         }
         return;
       }
@@ -914,17 +902,9 @@
       modeForm.addEventListener("submit", async (event) => {
         event.preventDefault();
         const select = $("#transport-mode");
-        const passwordInput = $("#mode-current-password");
         const mode = select ? select.value : "";
         if (!mode) {
           showToast("请选择传输模式", "bad");
-          return;
-        }
-        if (!passwordInput || !passwordInput.value) {
-          showToast("请输入当前 Web 密码", "bad");
-          if (passwordInput) {
-            passwordInput.focus();
-          }
           return;
         }
         const button = $("button[type='submit']", modeForm);
@@ -934,10 +914,8 @@
         try {
           const state = await settingsRequest(serverURL("/api/settings/mode"), "PUT", {
             mode,
-            current_password: passwordInput.value,
           });
           applyTransportState(state);
-          passwordInput.value = "";
           showToast("传输模式已更新");
           await refreshStatus();
           await refreshSettings();
@@ -955,14 +933,6 @@
     if (failoverForm) {
       failoverForm.addEventListener("submit", async (event) => {
         event.preventDefault();
-        const passwordInput = $("#failover-current-password");
-        if (!passwordInput || !passwordInput.value) {
-          showToast("请输入当前 Web 密码", "bad");
-          if (passwordInput) {
-            passwordInput.focus();
-          }
-          return;
-        }
         const button = $("button[type='submit']", failoverForm);
         if (button) {
           button.disabled = true;
@@ -975,9 +945,7 @@
             probe_interval: $("#failover-probe-interval").value.trim(),
             min_tcp_hold: $("#failover-min-tcp-hold").value.trim(),
             recovery_successes: Number($("#failover-recovery-successes").value),
-            current_password: passwordInput.value,
           });
-          passwordInput.value = "";
           showToast("回退时序已更新");
           await refreshSettings();
         } catch (error) {
@@ -1020,8 +988,6 @@
     nameForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const name = $("#client-name").value.trim();
-      const passwordInput = $("#name-current-password");
-      const currentPassword = passwordInput.value;
       if (!name) {
         showToast("客户端名称不能为空", "bad");
         return;
@@ -1033,10 +999,8 @@
       try {
         const settings = await settingsRequest(serverURL("/api/settings/name"), "PUT", {
           name,
-          current_password: currentPassword,
         });
         applySettings(settings);
-        passwordInput.value = "";
         showToast("客户端名称已更新");
       } catch (error) {
         showToast(error.message, "bad");
@@ -1053,8 +1017,6 @@
       const generation = Number($("#credentials-generation").value);
       const auth = $("#credentials-auth").value;
       const token = $("#credentials-token").value;
-      const passwordInput = $("#credentials-current-password");
-      const currentPassword = passwordInput.value;
       const localGeneration = Number(($("[data-settings-generation]") || {}).textContent || 0);
       const serverText = (($("[data-server-generation]") || {}).textContent || "").trim();
       const serverGeneration = Number(serverText) || 0;
@@ -1093,11 +1055,9 @@
           generation,
           auth,
           control_token: token,
-          current_password: currentPassword,
         });
         $("#credentials-auth").value = "";
         $("#credentials-token").value = "";
-        passwordInput.value = "";
         maskSecrets();
         showToast(`凭据已保存到代际 ${generation}，客户端正在重连`);
         await refreshSettings();

@@ -137,7 +137,7 @@
   <div class="panel-head">
     <div>
       <h2>设置</h2>
-      <span class="muted small">热更新：保存后立即生效，敏感操作需要当前 Web 密码确认</span>
+      <span class="muted small">热更新：保存后立即生效；修改 Web 管理员需要当前密码确认</span>
     </div>
     <span class="badge badge-ok">可在线编辑</span>
   </div>
@@ -158,10 +158,6 @@
             <option value="hy2+tcp" {{if eq .Settings.Transport.Mode "hy2+tcp"}}selected{{end}}>HY2 + TCP（自动回退）</option>
           </select>
           <span class="field-hint">自动模式优先 HY2，网络失败时切换到 TCP 并在后台探测恢复。</span>
-        </div>
-        <div class="field">
-          <label class="field-label" for="mode-current-password">当前密码</label>
-          <input class="input" id="mode-current-password" type="password" autocomplete="current-password" required>
         </div>
       </div>
       <div class="notice">切换会断开现有连接；TCP 模式将 UDP 映射封装为 UDP over TCP，可能丢失 UDP 数据包。不保证无缝切换或零丢包。</div>
@@ -215,10 +211,6 @@
           <label class="field-label" for="failover-recovery-successes">连续成功次数</label>
           <input class="input mono" id="failover-recovery-successes" type="number" min="1" max="10" step="1" value="{{.Settings.Failover.RecoverySuccesses}}" required>
         </div>
-      </div>
-      <div class="field">
-        <label class="field-label" for="failover-current-password">当前密码</label>
-        <input class="input" id="failover-current-password" type="password" autocomplete="current-password" required>
       </div>
       <p class="field-hint">保存后立即用于后续判断，无需重启。时间越短切得越快，也越容易把短暂抖动当成故障；每次切换都会断开现有连接并可能丢失 UDP 包。</p>
       <div class="form-actions">
@@ -282,10 +274,6 @@
     </dl>
 
     <div class="settings-inline">
-      <div class="field">
-        <label class="field-label" for="credentials-reveal-password">当前密码（显示凭据）</label>
-        <input class="input" id="credentials-reveal-password" type="password" autocomplete="current-password">
-      </div>
       <button type="button" class="btn btn-quiet" data-reveal-credentials>显示凭据</button>
       <button type="button" class="btn btn-quiet" data-hide-secrets hidden>隐藏凭据</button>
     </div>
@@ -297,10 +285,6 @@
           <label class="field-label" for="credentials-generation">新代际</label>
           <input class="input mono" id="credentials-generation" type="number" min="1" step="1" inputmode="numeric" placeholder="{{if .Settings.Credentials.ServerGeneration}}例如 {{.Settings.Credentials.ServerGeneration}}{{else}}例如 2{{end}}" required>
           <span class="field-hint">必须大于本地代际。建议填写服务端当前代际。</span>
-        </div>
-        <div class="field">
-          <label class="field-label" for="credentials-current-password">当前密码</label>
-          <input class="input" id="credentials-current-password" type="password" autocomplete="current-password" required>
         </div>
       </div>
       <div class="grid-2">
@@ -355,10 +339,6 @@
         <div class="field">
           <label class="field-label" for="client-name">名称</label>
           <input class="input" id="client-name" type="text" value="{{.Settings.Name}}" maxlength="128" autocomplete="off" required>
-        </div>
-        <div class="field">
-          <label class="field-label" for="name-current-password">当前密码</label>
-          <input class="input" id="name-current-password" type="password" autocomplete="current-password" required>
         </div>
       </div>
       <p class="field-hint">名称会立即同步到服务端，并写入客户端配置文件。</p>

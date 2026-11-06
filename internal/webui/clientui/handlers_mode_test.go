@@ -23,22 +23,22 @@ type modeUnsupportedAPI struct {
 	API
 }
 
-func clientModeBody(mode, password string) string {
-	return `{"mode":"` + mode + `","current_password":"` + password + `"}`
+func clientModeBody(mode string) string {
+	return `{"mode":"` + mode + `"}`
 }
 
 func clientModeHeaders(ts *httptest.Server) map[string]string {
 	return map[string]string{"X-Requested-With": "hy2tun", "Origin": ts.URL}
 }
 
-func TestModeAPICSRFAndPassword(t *testing.T) {
+func TestModeAPICSRFWithoutPassword(t *testing.T) {
 	api := &fakeClientAPI{
 		settings: SettingsView{Transport: view.TransportState{Mode: config.ModeHY2}},
 	}
 	_, ts := newTestClientWeb(t, api)
 	cookie := loginClientWeb(t, ts)
 
-	body := clientModeBody("tcp", "pw")
+	body := clientModeBody("tcp")
 	resp := doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/mode", body, cookie, nil)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	resp.Body.Close()
@@ -49,24 +49,21 @@ func TestModeAPICSRFAndPassword(t *testing.T) {
 	readClientBody(t, resp)
 	require.Zero(t, api.modeCalls, "CSRF failure must not invoke UpdateMode")
 
-	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/mode",
-		clientModeBody("tcp", "wrong"), cookie, clientModeHeaders(ts))
-	require.Equal(t, http.StatusForbidden, resp.StatusCode)
-	readClientBody(t, resp)
-	require.Zero(t, api.modeCalls, "wrong password must not invoke UpdateMode")
-
-	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/mode",
-		`{"mode":"tcp"}`, cookie, clientModeHeaders(ts))
-	require.Equal(t, http.StatusForbidden, resp.StatusCode)
-	readClientBody(t, resp)
-	require.Zero(t, api.modeCalls, "missing current password must not invoke UpdateMode")
-
+	// A valid session plus CSRF is enough; no current password is required.
 	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/mode", body, cookie, clientModeHeaders(ts))
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	state := readClientJSON[view.TransportState](t, resp)
 	require.Equal(t, config.ModeTCP, state.Mode)
 	require.Equal(t, 1, api.modeCalls)
 	require.Equal(t, []config.TransportMode{config.ModeTCP}, api.modeValues)
+
+	// A submitted password is ignored for backward compatibility.
+	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/mode",
+		`{"mode":"hy2","current_password":"wrong"}`, cookie, clientModeHeaders(ts))
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	readClientBody(t, resp)
+	require.Equal(t, 2, api.modeCalls)
+	require.Equal(t, config.ModeHY2, api.modeValues[1])
 }
 
 func TestModeAPIServerSelection(t *testing.T) {
@@ -86,7 +83,7 @@ func TestModeAPIServerSelection(t *testing.T) {
 	cookie := loginClientWeb(t, ts)
 
 	resp := doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/mode?server=sg",
-		clientModeBody("tcp", "pw"), cookie, clientModeHeaders(ts))
+		clientModeBody("tcp"), cookie, clientModeHeaders(ts))
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	state := readClientJSON[view.TransportState](t, resp)
 	require.Equal(t, config.ModeTCP, state.Mode)
@@ -96,7 +93,7 @@ func TestModeAPIServerSelection(t *testing.T) {
 	require.Equal(t, config.ModeHY2, us.status.Transport.Mode)
 
 	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/mode?server=missing",
-		clientModeBody("tcp", "pw"), cookie, clientModeHeaders(ts))
+		clientModeBody("tcp"), cookie, clientModeHeaders(ts))
 	require.Equal(t, http.StatusNotFound, resp.StatusCode)
 	resp.Body.Close()
 	require.Equal(t, 1, sg.modeCalls)
@@ -112,14 +109,14 @@ func TestModeAPIInvalidAndSaveFailure(t *testing.T) {
 	cookie := loginClientWeb(t, ts)
 
 	resp := doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/mode",
-		clientModeBody("bogus", "pw"), cookie, clientModeHeaders(ts))
+		clientModeBody("bogus"), cookie, clientModeHeaders(ts))
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	require.Contains(t, readClientBody(t, resp), "invalid_mode")
 	require.Zero(t, api.modeCalls)
 
 	api.modeErr = errors.New("disk full")
 	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/mode",
-		clientModeBody("tcp", "pw"), cookie, clientModeHeaders(ts))
+		clientModeBody("tcp"), cookie, clientModeHeaders(ts))
 	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 	readClientBody(t, resp)
 	require.Equal(t, 1, api.modeCalls)
@@ -356,7 +353,7 @@ func TestModeAPIPageUnsupported(t *testing.T) {
 	require.NotContains(t, body, `id="transport-mode"`)
 
 	resp = doClientRequest(t, ts.Client(), http.MethodPut, ts.URL+"/api/settings/mode",
-		clientModeBody("tcp", "pw"), cookie, clientModeHeaders(ts))
+		clientModeBody("tcp"), cookie, clientModeHeaders(ts))
 	require.Equal(t, http.StatusNotImplemented, resp.StatusCode)
 	require.Contains(t, readClientBody(t, resp), "not_implemented")
 }

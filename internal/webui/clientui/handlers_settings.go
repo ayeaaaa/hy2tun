@@ -42,9 +42,9 @@ func decodeSettingsBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return true
 }
 
-// confirmCurrentPassword implements the re-authentication required by every
-// sensitive settings mutation. Failed attempts are rate-limited per client IP.
-// The submitted value is never logged.
+// confirmCurrentPassword implements the re-authentication required when
+// changing the Web administrator username or password. Failed attempts are
+// rate-limited per client IP. The submitted value is never logged.
 func (s *Server) confirmCurrentPassword(w http.ResponseWriter, r *http.Request, password string) bool {
 	ip := shared.ClientIPWithProxy(r, s.cfg.TrustProxy)
 	if !s.settingsLimiter.Allow(ip) {
@@ -147,9 +147,6 @@ func (s *Server) handleUpdateName(w http.ResponseWriter, r *http.Request) {
 	if !decodeSettingsBody(w, r, &request) {
 		return
 	}
-	if !s.confirmCurrentPassword(w, r, request.secret()) {
-		return
-	}
 	name := strings.TrimSpace(request.Name)
 	if name == "" {
 		writeJSONErrorCode(w, http.StatusBadRequest, "name_required", "客户端名称不能为空")
@@ -175,9 +172,6 @@ func (s *Server) handleRotateCredentials(w http.ResponseWriter, r *http.Request)
 		ControlToken string `json:"control_token"`
 	}
 	if !decodeSettingsBody(w, r, &request) {
-		return
-	}
-	if !s.confirmCurrentPassword(w, r, request.secret()) {
 		return
 	}
 	if request.Generation < 1 {
@@ -236,9 +230,6 @@ func (s *Server) handleRevealCredentials(w http.ResponseWriter, r *http.Request)
 	}
 	var request passwordRequest
 	if !decodeSettingsBody(w, r, &request) {
-		return
-	}
-	if !s.confirmCurrentPassword(w, r, request.secret()) {
 		return
 	}
 	set := api.CredentialsSnapshot()
