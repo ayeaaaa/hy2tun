@@ -4,6 +4,38 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Added
+
+- Per-mapping server-side exposure control: `public` (default) or `local`
+  (`127.0.0.1` and `::1` only). Exposure is stored in the server state file,
+  survives restart and client reconnect, and is cleared when the mapping is
+  deleted; recreating the same ID starts `public`.
+- `PUT /api/clients/{clientID}/mappings/{mappingID}/exposure` and the
+  `hy2tund exposure --client <id> --mapping <id> --mode public|local` CLI.
+- Server console `公网` / `仅本机` controls, and a read-only client console
+  badge with `IPv4`/`IPv6` unavailable-family warnings.
+- `Exposure` and `UnavailableFamilies` in mapping read models, plus an opt-in
+  `exposure_v1` control capability and `exposure_update` message. Old clients
+  never receive the new message; old servers omit the fields and new clients
+  show `—`.
+
+### Changed
+
+- Mapping listeners now bind IPv4 and IPv6 independently. One unavailable
+  family keeps the other serving and is reported; both failing is an error.
+- A live exposure switch closes existing TCP connections, replaces the public
+  UDP sockets, and rebuilds the listeners. A failed switch rolls back to the
+  previous active exposure and reports it; if rollback also fails the mapping
+  stays closed.
+- Reverse UDP sessions now survive a listener switch instead of requiring a
+  client reconnect.
+- Current-password re-entry was removed from transport mode, failover timing,
+  client name, trust-proxy, credential rotation, revoke, and reveal. Only
+  changing the Web administrator username/password still requires it. Session
+  authentication and CSRF remain mandatory.
+
 ## v1.6.4 - 2026-11-06
 
 ### Changed

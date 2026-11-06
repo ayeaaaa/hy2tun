@@ -30,10 +30,12 @@ type publicUDPConn struct {
 	runtime     *mappingRuntime
 	log         *slog.Logger
 
-	mu       sync.Mutex
-	closed   bool
-	readDone chan struct{}
-	bridge   transport.DatagramConn
+	mu         sync.Mutex
+	closed     bool
+	readDone   chan struct{}
+	switching  bool
+	switchDone chan struct{}
+	bridge     transport.DatagramConn
 }
 
 // ReadFrom reads one public datagram and reports the public peer address, which
@@ -68,17 +70,42 @@ func (c *publicUDPConn) ReadFrom(b []byte) (int, string, error) {
 			c.mu.Unlock()
 			return 0, "", net.ErrClosed
 		}
-		_ = c.UDPConn.SetReadDeadline(time.Time{})
+		conn := c.UDPConn
+		switching := c.switching
+		switchDone := c.switchDone
+		if !switching {
+			_ = conn.SetReadDeadline(time.Time{})
+		}
 		c.mu.Unlock()
 
-		n, addr, err := c.UDPConn.ReadFrom(b)
+		if switching {
+			// A live exposure switch is replacing the public socket. Pause the
+			// transport session instead of closing it, then resume on the new
+			// listener set.
+			<-switchDone
+			continue
+		}
+
+		n, addr, err := conn.ReadFrom(b)
 		c.mu.Lock()
 		closed := c.closed
+		current := c.UDPConn
+		switching = c.switching
+		switchDone = c.switchDone
 		c.mu.Unlock()
 		if closed {
 			return 0, "", net.ErrClosed
 		}
 		if err != nil {
+			if current != conn {
+				// The switch completed while this read was blocked on the old
+				// socket; retry on the replacement.
+				continue
+			}
+			if switching {
+				<-switchDone
+				continue
+			}
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
 				// Another session wrapper was closed and poked the shared
@@ -124,11 +151,44 @@ func (c *publicUDPConn) WriteTo(b []byte, addr string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	n, err := c.UDPConn.WriteToUDPAddrPort(b, udpAddr)
-	if n > 0 && c.runtime != nil {
-		c.runtime.txBytes.Add(uint64(n))
+	for {
+		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			return 0, net.ErrClosed
+		}
+		if c.switching {
+			done := c.switchDone
+			c.mu.Unlock()
+			<-done
+			continue
+		}
+		conn := c.UDPConn
+		c.mu.Unlock()
+
+		n, err := conn.WriteToUDPAddrPort(b, udpAddr)
+		if err != nil {
+			c.mu.Lock()
+			closed := c.closed
+			switched := c.UDPConn != conn
+			switching := c.switching
+			done := c.switchDone
+			c.mu.Unlock()
+			if closed {
+				return 0, net.ErrClosed
+			}
+			if switched || switching {
+				if switching {
+					<-done
+				}
+				continue
+			}
+		}
+		if n > 0 && c.runtime != nil {
+			c.runtime.txBytes.Add(uint64(n))
+		}
+		return n, err
 	}
-	return n, err
 }
 
 // Close detaches this HY2 UDP session from the mapping's public socket. The
@@ -149,9 +209,15 @@ func (c *publicUDPConn) Close() error {
 	}
 	c.closed = true
 	done := c.readDone
+	conn := c.UDPConn
+	if c.switchDone != nil {
+		close(c.switchDone)
+		c.switchDone = nil
+	}
+	c.switching = false
 	c.mu.Unlock()
 
-	err := c.UDPConn.SetReadDeadline(time.Now())
+	err := conn.SetReadDeadline(time.Now())
 	if c.bridge != nil {
 		_ = c.bridge.Close()
 	}
@@ -159,6 +225,49 @@ func (c *publicUDPConn) Close() error {
 		<-done
 	}
 	return err
+}
+
+// beginSwitch pauses the wrapper while its public socket is replaced. The
+// transport session stays open, so a live exposure switch does not force the
+// client to reconnect before reverse UDP can resume.
+func (c *publicUDPConn) beginSwitch() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.switching {
+		return
+	}
+	c.switching = true
+	c.switchDone = make(chan struct{})
+}
+
+// endSwitch resumes the wrapper on the replacement socket. A nil conn keeps the
+// old socket; callers must only do that when it is still valid.
+func (c *publicUDPConn) endSwitch(conn udpPacketConn) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	if conn != nil {
+		c.UDPConn = conn
+	}
+	c.switching = false
+	if c.switchDone != nil {
+		close(c.switchDone)
+		c.switchDone = nil
+	}
+}
+
+// abortSwitch resumes the wrapper without changing its socket. The caller must
+// close the wrapper when the old socket is no longer valid.
+func (c *publicUDPConn) abortSwitch() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.switching = false
+	if c.switchDone != nil {
+		close(c.switchDone)
+		c.switchDone = nil
+	}
 }
 
 func (c *publicUDPConn) logger() *slog.Logger {

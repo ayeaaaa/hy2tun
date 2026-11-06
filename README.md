@@ -34,6 +34,11 @@ do not need a database, Node.js, a CDN, or any runtime dependency.
   for each server, including hot editing from the client Web console.
 - FRP-style reverse TCP mappings: a server public port forwards to a TCP
   service reachable from the client.
+- Per-mapping server-side exposure control: mappings are `public` by default;
+  the server operator can switch one to `local` so it listens only on
+  `127.0.0.1` and `::1` for a same-host reverse proxy. Switching closes
+  existing connections, and an unavailable IPv4 or IPv6 family is reported
+  instead of silently serving only one family.
 - Reverse UDP mappings using native HY2 datagrams when HY2 is active, not a
   reliable stream, so real-time UDP is not head-of-line blocked. The TCP
   fallback instead frames UDP over TCP and accepts its latency cost.
@@ -276,11 +281,12 @@ punching.
 ### Controls and diagnostics
 
 - **Server Web console → Settings → 传输模式** changes the server mode. It
-  requires the current Web administrator password, pre-binds any new listener,
+  requires a valid Web session and CSRF header, pre-binds any new listener,
   persists the mode, then publishes the new listener and retires the old one.
 - **Client Web console → Settings → 传输模式** changes the selected server's
   mode. In a multi-server configuration each server has its own independent
-  mode; the shared Web console and other servers are untouched.
+  mode; the shared Web console and other servers are untouched. No current
+  password is required.
 - **LuCI → Services → hy2tun** has the same mode field for a single-server
   configuration. Saving requires the service to be stopped; stop, save, then
   start. A multi-server configuration stays read-only in LuCI.
@@ -866,7 +872,7 @@ Rules:
 | --- | --- |
 | `mode` | `hy2` (default when omitted), `tcp`, or `hy2+tcp`. `tcp` requires a single `listen` port; `hy2+tcp` binds UDP HY2 and TCP on the same first numeric port as separate sockets. See [Transport modes and TCP fallback](#transport-modes-and-tcp-fallback). |
 | `listen` | HY2 UDP listen address, for example `:443`, or a range such as `:30000-40000`. For a range, the first port is bound and the remaining ports are redirected automatically on Linux; see [Port hopping](#port-hopping). In `hy2+tcp`, TCP uses the first port item. |
-| `listen_host` | Optional address for public mapping listeners; empty binds all interfaces. |
+| `listen_host` | Optional address for public mapping listeners; empty binds all interfaces. Ignored by mappings whose server-side exposure is `local`; see [Mapping exposure](#mapping-exposure-publiclocal). |
 | `auth.type` | `password` or `userpass`. |
 | `auth.password` | HY2 password for `password` auth. |
 | `auth.users` | Map of username to password for `userpass` auth. |
@@ -954,6 +960,81 @@ mappings use native HY2 datagrams in `hy2` mode and framed UDP over TCP while
 the TCP transport is active; the latter adds reliability, latency, and
 head-of-line cost.
 
+`exposure` is not a client YAML field. It is server-side state, controlled from
+the server console, HTTP API, or `hy2tund exposure` CLI. See
+[Mapping exposure](#mapping-exposure-publiclocal).
+
+### Mapping exposure (public/local)
+
+Every mapping has a server-side exposure value:
+
+- `public` (default) — bind the public mapping listeners. With an empty
+  `listen_host`, that is the IPv4 wildcard and the IPv6 wildcard (explicitly
+  v6-only) on the assigned port. A specific `listen_host` binds only that
+  address or resolved host.
+- `local` — ignore `listen_host` and bind `127.0.0.1` and `::1` on the same
+  assigned port. The port stays reserved; another mapping cannot claim it.
+
+The client remains authoritative for the mapping definition. Exposure is
+stored per client ID and mapping ID in `state_file`, survives a server restart
+and client reconnect, and is removed when the mapping is deleted. Recreating
+the same mapping ID starts at `public`. The client console shows the current
+value and any family warning read-only; the client never writes exposure to
+`client.yaml` and does not increment its mapping revision for an exposure
+update.
+
+A change rebuilds the mapping listeners and closes existing TCP connections
+for that mapping. The public UDP sockets are replaced; the reverse UDP session
+is kept and reattached, so datagrams may drop briefly but no client reconnect
+is required. A healthy same-value request is a no-op, except that it retries a
+mapping that still has an unavailable-family warning. If one address family
+cannot bind, the other keeps serving and the warning lists `ipv4` or `ipv6`.
+If neither family binds, a live switch rolls back to the
+previous active exposure and reports it; if the rollback bind also fails, the
+mapping stays closed. Offline, disabled, or already-closed mappings store the
+requested value for the next bind instead of rolling back.
+
+Server console: each mapping row has a `公网` / `仅本机` button. It asks for
+confirmation because connections close, and requires only the Web session and
+CSRF header, not the current password.
+
+HTTP API:
+
+```text
+PUT /api/clients/{clientID}/mappings/{mappingID}/exposure
+Content-Type: application/json
+X-Requested-With: hy2tun
+
+{"exposure":"local"}
+```
+
+A `200` response is the same mapping read model as the GET APIs, including
+`Exposure` and `UnavailableFamilies` (`null` or an empty array means no
+warning). `400 invalid_exposure` or `invalid_body` means the request was
+rejected; `404 client_not_found` or `mapping_not_found` means the target does
+not exist; `409 exposure_conflict` reports the state that remains active with
+`active_exposure`, `unavailable_families`, and `closed`; `500 internal` covers
+unexpected persistence or internal failures.
+
+CLI:
+
+```bash
+sudo hy2tund exposure --client home --mapping ssh --mode local \
+  -c /etc/hy2tun/server.yaml
+```
+
+The command reads `web.listen` from the server config, prompts for the Web
+administrator password on the terminal (never in argv or the environment),
+calls the same API, and prints the result plus any family warning. A wildcard
+`web.listen` is reached through `127.0.0.1` first and `::1` second. Use
+`--insecure` only for a self-signed Web TLS certificate. The command does not
+start or stop the server.
+
+Old clients do not advertise the `exposure_v1` capability. They keep receiving
+only the additive mapping result fields they already ignore, and the server
+never sends them an `exposure_update` message. A new client talking to an old
+server shows `—` for an unknown exposure instead of guessing `public`.
+
 ### Port whitelist syntax
 
 `ports.allow` and `ports.deny` are YAML string lists. Each item is one of:
@@ -1021,14 +1102,14 @@ to the YAML file atomically with mode `0600` (the previous file is kept as
 running configuration is unchanged and the API returns an error. No restart is
 needed for the settings marked online below.
 
-Changing the web administrator credentials, the trust-proxy setting, and
-revealing/rotating/revoking HY2 credentials require the current web
-administrator password. Routine port policy changes require only a valid
-session and the CSRF header/Origin; they do not ask for the password again.
-Pushing or deleting a mapping from a client detail page also requires no
-password re-entry. Failed password confirmations are rate-limited to five per
-minute per client IP. All mutations require the CSRF header and same-origin
-`Origin` described in [Security model](#security-model).
+Only changing the Web administrator username/password asks for the current Web
+administrator password. Every other settings action — transport mode,
+failover timing, client name, trust-proxy, port policy, credential
+rotation/revoke/reveal, and mapping push/delete/exposure — requires a valid Web
+session and the CSRF header/Origin but no password re-entry. Failed
+Web-administrator password confirmations are rate-limited to five per minute
+per client IP. All mutations require the CSRF header and same-origin `Origin`
+described in [Security model](#security-model).
 
 ### Which settings are online-editable
 
@@ -1037,11 +1118,11 @@ minute per client IP. All mutations require the CSRF header and same-origin
 | Setting | Online editing |
 | --- | --- |
 | `web.username`, `web.password_hash` | Yes. The password can only be reset, never shown. Saving revokes every web session. |
-| `mode` | Yes, with the current Web administrator password. Binds or retires listeners and can disconnect clients using the retired transport. |
+| `mode` | Yes. Binds or retires listeners and can disconnect clients using the retired transport. No password re-entry. |
 | `auth.password`, `control.token` | Yes, when `auth.type: password`. Rotation only; see below. |
 | `ports.allow`, `ports.deny`, `ports.auto_range`, `ports.offline_reserve` | Yes. Mappings already running are not closed when a new allow list no longer covers them. `offline_reserve` must be at least `1s`. |
-| `web.trust_proxy` | Yes. Applies immediately to login and settings-confirmation rate limiting. |
-| Mappings of online clients | Yes. Push an authoritative list or delete a mapping. Offline clients stay read-only. |
+| `web.trust_proxy` | Yes. Applies immediately to login and settings-confirmation rate limiting. No password re-entry. |
+| Mappings of online clients | Yes. Push an authoritative list, delete a mapping, or change one mapping's `public`/`local` exposure. Offline clients stay read-only. |
 | Offline clients | Yes. Delete from the client detail page; removes the persisted client, mappings, and soft port reservations. Online clients must disconnect first. |
 | `credentials.generation`, `credentials.previous_*` | Managed by rotation and revoke. Not edited directly in the console. |
 | `listen`, `listen_host` | No. Edit the file and restart. |
@@ -1055,7 +1136,7 @@ minute per client IP. All mutations require the CSRF header and same-origin
 | Setting | Online editing |
 | --- | --- |
 | `web.username`, `web.password_hash` | Yes. Password reset only; saving revokes every web session. |
-| `mode` | Yes, per server, with the current Web administrator password. A mode that still allows the active transport keeps its session; otherwise the client reconnects. |
+| `mode` | Yes, per server. A mode that still allows the active transport keeps its session; otherwise the client reconnects. No password re-entry. |
 | `client.name` | Yes. Written to `client.yaml`, revision bumped, and sent to the server immediately. |
 | `auth`, `control.token` | Yes, through manual credential sync only. The new generation must be greater than the local one; the client reconnects. |
 | `mappings` | Yes. Add, update, and delete; the server can also push a list. |
@@ -1114,10 +1195,11 @@ it is never pushed to clients.
      its acknowledgement, and returns a result per client.
    - **手动同步 / manual** sends no push. Every online client stays `pending`
      until it is updated from its own console.
-4. Confirm with the current web administrator password.
 
-The server writes the new generation to `server.yaml` before swapping the live
-credentials, so a failed write leaves the old pair active. A rotation with both
+Saving requires only the Web session and CSRF header; the current Web password
+is not asked again. The server writes the new generation to `server.yaml`
+before swapping the live credentials, so a failed write leaves the old pair
+active. A rotation with both
 fields blank, or with values identical to the current pair, is rejected as
 `no_change`. Rotating only one field is allowed; the retained previous pair is
 the old current pair.
@@ -1152,9 +1234,9 @@ console:
    reveal the current pair).
 2. On the client **Settings → HY2 凭据**, enter a new generation greater than
    the local generation, plus the new HY2 password and control token.
-3. Confirm with the client's current web administrator password. The client
-   writes `client.yaml` atomically, closes the current connection, and
-   reconnects with the new pair.
+3. Save. The client writes `client.yaml` atomically, closes the current
+   connection, and reconnects with the new pair. Only the Web session and CSRF
+   header are required; the current Web password is not asked again.
 
 The client page shows the server generation from the last `hello_ack` as a
 hint. A value that does not match is allowed, but the sync badge may stay
@@ -1185,17 +1267,13 @@ The settings pages show only a fixed mask (`********` on the server and
 `••••••••` on the client); the mask does not reveal the secret's length.
 `GET /api/settings` never contains plaintext passwords or tokens.
 
-To show the plaintext:
-
-1. Enter the current web administrator password in the reveal field.
-2. Click **显示凭据 / Show credentials**.
+To show the plaintext, click **显示凭据 / Show credentials**. No current
+password is required; a valid Web session and the CSRF header are enough.
 
 The server returns its current pair and, when present, the previous pair; the
-client returns only its current pair. Reveal requires a valid web session and
-the current password, returns `Cache-Control: no-store`, is never written to
-logs or URLs, and is rate-limited after five failed password confirmations per
-minute per client IP. The page automatically re-masks after 30 seconds, and
-plaintext is not kept after a refresh.
+client returns only its current pair. Reveal returns `Cache-Control: no-store`,
+is never written to logs or URLs, and the page automatically re-masks after 30
+seconds. Plaintext is not kept after a refresh.
 
 The web administrator password is not part of this endpoint and can never be
 shown.
@@ -1630,9 +1708,10 @@ the password and session cookie in transit.
 - Web administrator passwords are reset-only and never returned by any API.
   A reset requires the current password and revokes every web session.
 - HY2 credentials are masked in `GET /api/settings`. The reveal endpoint
-  requires the current web administrator password, returns `Cache-Control:
-  no-store`, never writes plaintext to logs or URLs, and rate-limits failed
-  confirmations.
+  requires a valid Web session and CSRF header (not the current password),
+  returns `Cache-Control: no-store`, and never writes plaintext to logs or
+  URLs. Only Web administrator password changes still require the current
+  password; those failures are rate-limited.
 - Hot settings are persisted before they take effect. A failed validation or
   file write leaves the running credential set, port policy, and web login
   unchanged.

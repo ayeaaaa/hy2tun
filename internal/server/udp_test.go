@@ -362,6 +362,72 @@ func TestPublicUDPConnCloseKeepsSharedSocketOpen(t *testing.T) {
 	require.Equal(t, "still-open", string(buf[:n]))
 }
 
+// TestPublicUDPConnSurvivesSocketSwitch proves that a live exposure switch can
+// replace the public socket without ending the client's reverse UDP session.
+func TestPublicUDPConnSurvivesSocketSwitch(t *testing.T) {
+	first, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(t, err)
+	defer first.Close()
+	second, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(t, err)
+	defer second.Close()
+
+	peer, err := net.DialUDP("udp", nil, second.LocalAddr().(*net.UDPAddr))
+	require.NoError(t, err)
+	defer peer.Close()
+
+	signaled := &signalingUDPConn{UDPConn: first, started: make(chan struct{})}
+	wrapper := &publicUDPConn{UDPConn: signaled, virtualAddr: "_hy2tun_udp_probe:0", mappingID: "udp1"}
+	defer wrapper.Close()
+
+	type readResult struct {
+		payload string
+		from    string
+		err     error
+	}
+	reads := make(chan readResult, 1)
+	go func() {
+		buf := make([]byte, 64)
+		n, from, err := wrapper.ReadFrom(buf)
+		reads <- readResult{payload: string(buf[:n]), from: from, err: err}
+	}()
+	<-signaled.started
+
+	wrapper.beginSwitch()
+	require.NoError(t, first.Close())
+	wrapper.endSwitch(second)
+
+	_, err = peer.Write([]byte("after-switch"))
+	require.NoError(t, err)
+	select {
+	case result := <-reads:
+		require.NoError(t, result.err)
+		require.Equal(t, "after-switch", result.payload)
+		require.Equal(t, peer.LocalAddr().String(), result.from)
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReadFrom did not resume on the replacement socket")
+	}
+
+	_, err = wrapper.WriteTo([]byte("reply"), peer.LocalAddr().String())
+	require.NoError(t, err)
+	require.NoError(t, peer.SetReadDeadline(time.Now().Add(2*time.Second)))
+	buf := make([]byte, 16)
+	n, err := peer.Read(buf)
+	require.NoError(t, err)
+	require.Equal(t, "reply", string(buf[:n]))
+}
+
+type signalingUDPConn struct {
+	*net.UDPConn
+	once    sync.Once
+	started chan struct{}
+}
+
+func (c *signalingUDPConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	c.once.Do(func() { close(c.started) })
+	return c.UDPConn.ReadFrom(b)
+}
+
 // TestReverseUDPSessionCloseKeepsPublicPort closes the wrapper used by the
 // live HY2 UDP session and verifies that the mapping's public socket remains
 // open and can serve a replacement session.

@@ -413,12 +413,11 @@ func (m *mappingManager) switchExposureLocked(sess *clientSession, rt *mappingRu
 	rt.udpMu.Lock()
 
 	oldPublic := rt.udpSession
-	rt.udpSession = nil
 	if oldPublic != nil {
-		// Detach and drain the old HY2 UDP wrapper without waiting for its
-		// bridge while the manager lock is held; closing the old listeners
-		// below already wakes its blocked read.
-		go func() { _ = oldPublic.Close() }()
+		// Pause the transport session while its public socket is replaced.
+		// Closing the wrapper here would tear down the client's reverse UDP
+		// session and leave the mapping deaf until a full reconnect.
+		oldPublic.beginSwitch()
 	}
 	if oldListeners != nil {
 		_ = oldListeners.Close()
@@ -437,6 +436,7 @@ func (m *mappingManager) switchExposureLocked(sess *clientSession, rt *mappingRu
 	newListeners, bindErr := bindMappingListeners(requested, m.bindHost, rt.mapping.Type, oldPort)
 	if bindErr != nil {
 		result, err := m.rollbackExposureLocked(sess, rt, oldExposure, oldPort, requested, bindErr, false)
+		finishUDPWrapperSwitch(oldPublic, rt)
 		rt.udpMu.Unlock()
 		return result, err
 	}
@@ -459,6 +459,7 @@ func (m *mappingManager) switchExposureLocked(sess *clientSession, rt *mappingRu
 		rt.status = mappingStatusFailed
 		rt.errCode = string(control.CodeInternal)
 		rt.exposure = oldExposure
+		finishUDPWrapperSwitch(oldPublic, rt)
 		rt.udpMu.Unlock()
 		result := mappingViewForRuntime(rt)
 		if persistErr != nil {
@@ -485,6 +486,7 @@ func (m *mappingManager) switchExposureLocked(sess *clientSession, rt *mappingRu
 		_ = newListeners.Close()
 		rt.udpMu.Lock()
 		result, err := m.rollbackExposureLocked(sess, rt, oldExposure, oldPort, requested, persistErr, true)
+		finishUDPWrapperSwitch(oldPublic, rt)
 		rt.udpMu.Unlock()
 		return result, err
 	}
@@ -496,11 +498,33 @@ func (m *mappingManager) switchExposureLocked(sess *clientSession, rt *mappingRu
 	rt.exposure = requested
 	rt.status = mappingStatusRunning
 	rt.errCode = ""
+	if oldPublic != nil && rt.udpSession == oldPublic {
+		oldPublic.endSwitch(newListeners.UDP)
+	}
 	rt.udpMu.Unlock()
 	if rt.mapping.Type == "tcp" {
 		m.startTCPListenersLocked(sess, rt, newListeners)
 	}
 	return mappingViewForRuntime(rt), nil
+}
+
+// finishUDPWrapperSwitch resumes a paused reverse UDP session on the listener
+// set that is actually active after a switch or rollback. If no UDP listener
+// remains, the wrapper is closed so the client's session fails instead of
+// waiting forever. The caller must hold rt.udpMu.
+func finishUDPWrapperSwitch(public *publicUDPConn, rt *mappingRuntime) {
+	if public == nil {
+		return
+	}
+	if rt.listeners != nil && rt.listeners.UDP != nil {
+		public.endSwitch(rt.listeners.UDP)
+		return
+	}
+	public.abortSwitch()
+	_ = public.Close()
+	if rt.udpSession == public {
+		rt.udpSession = nil
+	}
 }
 
 // rollbackExposureLocked restores the previous exposure after a failed switch.

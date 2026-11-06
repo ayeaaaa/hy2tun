@@ -27,7 +27,9 @@ listen: ":443"
 # mode: "hy2+tcp"
 
 # Optional address used for the public reverse-mapping listeners. An empty
-# value binds them on every interface.
+# value binds them on every interface. Per-mapping exposure is controlled from
+# the server console, HTTP API, or `hy2tund exposure`; a mapping set to `local`
+# ignores this value and binds only 127.0.0.1 and ::1.
 listen_host: ""
 
 auth:
