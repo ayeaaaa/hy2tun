@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -426,6 +427,174 @@ type signalingUDPConn struct {
 func (c *signalingUDPConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	c.once.Do(func() { close(c.started) })
 	return c.UDPConn.ReadFrom(b)
+}
+
+// TestFinishUDPWrapperSwitchRestoresListener covers the rollback path: the
+// wrapper is paused, the old listener is closed, and a restored listener set is
+// published. The blocked reader must resume on the restored socket.
+func TestFinishUDPWrapperSwitchRestoresListener(t *testing.T) {
+	first, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(t, err)
+	second, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(t, err)
+	defer second.Close()
+
+	peer, err := net.DialUDP("udp", nil, second.LocalAddr().(*net.UDPAddr))
+	require.NoError(t, err)
+	defer peer.Close()
+
+	oldSet := newMultiUDPConn(first)
+	defer oldSet.Close()
+	newSet := newMultiUDPConn(second)
+	defer newSet.Close()
+	rt := &mappingRuntime{listeners: &mappingListenerSet{UDP: newSet}}
+	signaled := &signalingPacketConn{udpPacketConn: oldSet, started: make(chan struct{})}
+	wrapper := &publicUDPConn{
+		UDPConn:     signaled,
+		virtualAddr: "_hy2tun_udp_probe:0",
+		mappingID:   "udp1",
+		runtime:     rt,
+	}
+	rt.udpSession = wrapper
+	defer wrapper.Close()
+
+	reads := make(chan error, 1)
+	go func() {
+		_, _, err := wrapper.ReadFrom(make([]byte, 64))
+		reads <- err
+	}()
+	<-signaled.started
+
+	wrapper.beginSwitch()
+	require.NoError(t, oldSet.Close())
+	finishUDPWrapperSwitch(wrapper, rt)
+	require.Same(t, wrapper, rt.udpSession)
+
+	_, err = peer.Write([]byte("after-rollback"))
+	require.NoError(t, err)
+	select {
+	case err := <-reads:
+		require.NoError(t, err, "the reader must resume on the restored listener")
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReadFrom did not resume after rollback")
+	}
+}
+
+// TestFinishUDPWrapperSwitchClosesWithoutListener covers the closed path: no
+// listener remains, so a paused reader must unblock with an error and the
+// wrapper must be closed and detached.
+func TestFinishUDPWrapperSwitchClosesWithoutListener(t *testing.T) {
+	first, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(t, err)
+	oldSet := newMultiUDPConn(first)
+	defer oldSet.Close()
+
+	rt := &mappingRuntime{}
+	signaled := &signalingPacketConn{udpPacketConn: oldSet, started: make(chan struct{})}
+	wrapper := &publicUDPConn{
+		UDPConn:     signaled,
+		virtualAddr: "_hy2tun_udp_probe:0",
+		mappingID:   "udp1",
+		runtime:     rt,
+	}
+	rt.udpSession = wrapper
+
+	reads := make(chan error, 1)
+	go func() {
+		_, _, err := wrapper.ReadFrom(make([]byte, 64))
+		reads <- err
+	}()
+	<-signaled.started
+
+	wrapper.beginSwitch()
+	require.NoError(t, oldSet.Close())
+	finishUDPWrapperSwitch(wrapper, rt)
+
+	select {
+	case err := <-reads:
+		require.ErrorIs(t, err, net.ErrClosed)
+	case <-time.After(2 * time.Second):
+		t.Fatal("paused ReadFrom did not unblock after the wrapper was closed")
+	}
+	require.Nil(t, rt.udpSession)
+	_, err = wrapper.WriteTo([]byte("closed"), "127.0.0.1:9")
+	require.Error(t, err)
+}
+
+// TestPublicUDPConnWriteDuringSwitch proves that concurrent WriteTo calls do
+// not panic or hang while the public socket is replaced.
+func TestPublicUDPConnWriteDuringSwitch(t *testing.T) {
+	first, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(t, err)
+	second, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(t, err)
+	defer second.Close()
+
+	peer, err := net.DialUDP("udp", nil, second.LocalAddr().(*net.UDPAddr))
+	require.NoError(t, err)
+	defer peer.Close()
+
+	oldSet := newMultiUDPConn(first)
+	defer oldSet.Close()
+	newSet := newMultiUDPConn(second)
+	defer newSet.Close()
+	wrapper := &publicUDPConn{
+		UDPConn:     oldSet,
+		virtualAddr: "_hy2tun_udp_probe:0",
+		mappingID:   "udp1",
+	}
+	defer wrapper.Close()
+
+	var writes atomic.Int64
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if _, err := wrapper.WriteTo([]byte("during-switch"), peer.LocalAddr().String()); err == nil {
+					writes.Add(1)
+				}
+			}
+		}()
+	}
+	require.Eventually(t, func() bool { return writes.Load() > 0 }, time.Second, time.Millisecond)
+
+	wrapper.beginSwitch()
+	require.NoError(t, oldSet.Close())
+	before := writes.Load()
+	wrapper.endSwitch(newSet)
+	require.Eventually(t, func() bool { return writes.Load() > before }, time.Second, time.Millisecond,
+		"writes must resume on the replacement socket")
+
+	close(stop)
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("WriteTo hung during the socket switch")
+	}
+}
+
+type signalingPacketConn struct {
+	udpPacketConn
+	once    sync.Once
+	started chan struct{}
+}
+
+func (c *signalingPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	c.once.Do(func() { close(c.started) })
+	return c.udpPacketConn.ReadFrom(b)
 }
 
 // TestReverseUDPSessionCloseKeepsPublicPort closes the wrapper used by the

@@ -3,7 +3,6 @@ package e2e
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -72,7 +70,9 @@ func TestMappingExposureE2E(t *testing.T) {
 		!containsFamily(tcpView.UnavailableFamilies, "ipv6"), "at least one family must bind")
 
 	public4 := firstNonLoopbackIP(t, false)
-	require.NotEmpty(t, public4, "this E2E requires a non-loopback IPv4 address")
+	if public4 == "" {
+		t.Skipf("TestMappingExposureE2E requires a non-loopback IPv4 address; none is available on this host")
+	}
 	publicTCP4 := net.JoinHostPort(public4, strconv.Itoa(tcpPort))
 	publicUDP4 := net.JoinHostPort(public4, strconv.Itoa(udpPort))
 
@@ -90,6 +90,9 @@ func TestMappingExposureE2E(t *testing.T) {
 		require.Eventually(t, func() bool {
 			return udpEcho(net.JoinHostPort(public6, strconv.Itoa(udpPort)), "public-udp-v6") == nil
 		}, 5*time.Second, 20*time.Millisecond, "public UDP mapping must be reachable on IPv6")
+	} else if containsFamily(tcpView.UnavailableFamilies, "ipv6") {
+		t.Logf("IPv6 is unavailable in the public bind (%v); public IPv6 reachability not asserted",
+			tcpView.UnavailableFamilies)
 	} else {
 		t.Logf("no reachable non-loopback IPv6 address; public IPv6 reachability not asserted")
 	}
@@ -146,6 +149,9 @@ func TestMappingExposureE2E(t *testing.T) {
 			!containsFamily(tcpView.UnavailableFamilies, "ipv6") {
 			requireTCPRefused(t, net.JoinHostPort(public6, strconv.Itoa(tcpPort)))
 			requireUDPNoEcho(t, net.JoinHostPort(public6, strconv.Itoa(udpPort)))
+		} else if containsFamily(tcpView.UnavailableFamilies, "ipv6") {
+			t.Logf("IPv6 is unavailable in the public bind (%v); public IPv6 refusal not asserted",
+				tcpView.UnavailableFamilies)
 		} else {
 			t.Logf("no reachable non-loopback IPv6 address; public IPv6 refusal not asserted")
 		}
@@ -168,6 +174,8 @@ func TestMappingExposureE2E(t *testing.T) {
 		5*time.Second, 20*time.Millisecond, "public TCP mapping must serve after switching back")
 	require.Eventually(t, func() bool { return udpEcho(publicUDP4, "public-again-udp-v4") == nil },
 		5*time.Second, 20*time.Millisecond, "public UDP mapping must serve after switching back")
+	require.NoError(t, tcpEcho(loopbackTCP(tcpPort), "public-loopback-again"))
+	require.NoError(t, udpEcho(loopbackUDP(udpPort), "public-loopback-again-udp"))
 	waitServerMapping(t, h.srv, exposureTestClientID, "tcp", 5*time.Second,
 		func(m view.MappingView) bool { return m.Status == "running" && m.Exposure == view.ExposurePublic })
 	waitClientMapping(t, ec.cl, "tcp", 5*time.Second,
@@ -314,12 +322,18 @@ func requireLocalMappingOnly(t *testing.T, port int, mapping view.MappingView) {
 		!containsFamily(mapping.UnavailableFamilies, "ipv4") {
 		requireTCPRefused(t, net.JoinHostPort(public4, strconv.Itoa(port)))
 	}
-	if err := ipv6LoopbackUnavailable(); err == nil {
-		require.NoError(t, tcpEcho(net.JoinHostPort("::1", strconv.Itoa(port)), "local-loopback-v6"))
-		if public6 := firstNonLoopbackIP(t, true); public6 != "" &&
-			!containsFamily(mapping.UnavailableFamilies, "ipv6") {
-			requireTCPRefused(t, net.JoinHostPort(public6, strconv.Itoa(port)))
-		}
+	if err := ipv6LoopbackUnavailable(); err != nil {
+		require.True(t, containsFamily(mapping.UnavailableFamilies, "ipv6"),
+			"IPv6 loopback is unavailable, so the public bind must report the ipv6 warning")
+		t.Logf("IPv6 loopback unavailable (%v); IPv6 local assertions skipped after asserting the warning", err)
+		return
+	}
+	require.NoError(t, tcpEcho(net.JoinHostPort("::1", strconv.Itoa(port)), "local-loopback-v6"))
+	if public6 := firstNonLoopbackIP(t, true); public6 != "" &&
+		!containsFamily(mapping.UnavailableFamilies, "ipv6") {
+		requireTCPRefused(t, net.JoinHostPort(public6, strconv.Itoa(port)))
+	} else if public6 == "" {
+		t.Logf("no reachable non-loopback IPv6 address; public IPv6 refusal not asserted")
 	}
 }
 
@@ -362,13 +376,19 @@ func requireConnClosed(t *testing.T, conn net.Conn, timeout time.Duration) {
 	require.Error(t, err, "an exposure switch must close the existing connection")
 }
 
+// isConnectionRefused uses the platform error text so the E2E helper does not
+// depend on a Unix-only syscall constant. Windows reports "actively refused".
+func isConnectionRefused(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "refused")
+}
+
 func requireTCPRefused(t *testing.T, addr string) {
 	t.Helper()
 
 	require.Eventually(t, func() bool {
 		conn, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
 		if err != nil {
-			return errors.Is(err, syscall.ECONNREFUSED)
+			return isConnectionRefused(err)
 		}
 		_ = conn.Close()
 		return false

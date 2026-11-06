@@ -506,6 +506,90 @@ func TestMappingExposureRollback(t *testing.T) {
 	})
 }
 
+// TestMappingExposureUDPRollbackKeepsSession forces a total local bind failure
+// for a UDP mapping with an active public wrapper. The rollback must reattach
+// that wrapper to the restored public listener instead of ending the client's
+// reverse UDP session.
+func TestMappingExposureUDPRollbackKeepsSession(t *testing.T) {
+	env := newExposureEnv(t, "127.0.0.2")
+	sess := newExposureSession("client")
+	port := freeExposureUDPPort(t)
+	mapping := config.Mapping{ID: "m1", Type: "udp", RemotePort: port, LocalAddr: "127.0.0.1:9001", Enabled: true}
+
+	before := registerExposureMapping(t, env.manager, sess, mapping)
+	rt := before.runtime
+	signaled := &signalingPacketConn{udpPacketConn: before.listeners.UDP, started: make(chan struct{})}
+	public := &publicUDPConn{
+		UDPConn:     signaled,
+		virtualAddr: udpVirtualAddress(rt.udpToken),
+		mappingID:   rt.id,
+		runtime:     rt,
+		log:         slog.Default(),
+	}
+	rt.udpMu.Lock()
+	rt.udpSession = public
+	rt.udpMu.Unlock()
+	defer public.Close()
+
+	reads := make(chan struct {
+		payload string
+		err     error
+	}, 1)
+	go func() {
+		buf := make([]byte, 64)
+		n, _, err := public.ReadFrom(buf)
+		reads <- struct {
+			payload string
+			err     error
+		}{payload: string(buf[:n]), err: err}
+	}()
+	<-signaled.started
+
+	// Occupy both loopback families so the local bind fails completely.
+	ipv4, err := net.ListenPacket("udp4", fmt.Sprintf("127.0.0.1:%d", port))
+	require.NoError(t, err)
+	defer ipv4.Close()
+	if ipv6, err := net.ListenPacket("udp6", fmt.Sprintf("[::1]:%d", port)); err == nil {
+		defer ipv6.Close()
+	}
+
+	switched, err := env.manager.SetExposure("client", "m1", view.ExposureLocal)
+	require.Error(t, err)
+	var switchErr *ExposureSwitchError
+	require.ErrorAs(t, err, &switchErr)
+	require.Equal(t, view.ExposureLocal, switchErr.Requested)
+	require.Equal(t, view.ExposurePublic, switchErr.Exposure)
+	require.False(t, switchErr.Closed)
+	require.False(t, switchErr.Persistence)
+	require.Equal(t, view.ExposurePublic, switched.Exposure)
+
+	restored := snapshotExposureRuntime(t, env.manager, "client", "m1")
+	require.Equal(t, view.ExposurePublic, restored.exposure)
+	require.Equal(t, "running", restored.status)
+	require.NotNil(t, restored.listeners)
+	require.NotNil(t, restored.listeners.UDP)
+	require.Len(t, restored.listeners.UDP.conns, 1)
+	host, _, err := net.SplitHostPort(restored.listeners.UDP.conns[0].conn.LocalAddr().String())
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.2", host)
+	rt.udpMu.Lock()
+	require.Same(t, public, rt.udpSession, "rollback must keep the active UDP wrapper")
+	rt.udpMu.Unlock()
+
+	peer, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.2"), Port: port})
+	require.NoError(t, err)
+	defer peer.Close()
+	_, err = peer.Write([]byte("after-rollback"))
+	require.NoError(t, err)
+	select {
+	case result := <-reads:
+		require.NoError(t, result.err)
+		require.Equal(t, "after-rollback", result.payload)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the UDP reader did not resume after rollback")
+	}
+}
+
 func TestMappingExposureSameValue(t *testing.T) {
 	t.Run("healthy mapping does not rebuild", func(t *testing.T) {
 		env := newExposureEnv(t, "")
