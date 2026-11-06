@@ -15,8 +15,8 @@ require (
 )
 
 require (
-	github.com/andybalholm/brotli v1.1.0 // indirect
-	github.com/klauspost/compress v1.17.9 // indirect
+	github.com/andybalholm/brotli v1.2.7 // indirect
+	github.com/klauspost/compress v1.20.2 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/refraction-networking/utls v1.8.2 // indirect
 	github.com/stretchr/objx v0.5.3 // indirect

@@ -16,6 +16,10 @@ All notable changes to this project are documented here.
 - The `tx_bytes` / `rx_bytes` JSON fields keep their names and values:
   `tx_bytes` is client-to-server payload, `rx_bytes` is server-to-client
   payload.
+- Updated `github.com/andybalholm/brotli` to v1.2.7 and
+  `github.com/klauspost/compress` to v1.20.2 for GO-2026-6888 and
+  GO-2026-6865. GO-2026-5288 remains allowlisted because hy2tun does not
+  enable Hysteria sniffing and upstream has no fixed release.
 
 ## v1.6.3 - 2026-11-05
 

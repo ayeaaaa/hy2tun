@@ -13,6 +13,10 @@
 - 服务端 metrics 的 HELP 文案改为实际转发方向；指标名称和数值不变。
 - `tx_bytes` / `rx_bytes` JSON 字段名称和数值不变：`tx_bytes` 表示客户端到
   服务端的载荷字节，`rx_bytes` 表示服务端到客户端的载荷字节。
+- 升级 `github.com/andybalholm/brotli` 到 v1.2.7、
+  `github.com/klauspost/compress` 到 v1.20.2，修复 GO-2026-6888 和
+  GO-2026-6865。GO-2026-5288 仍按“未启用 Hysteria sniff 且上游无修复版本”
+  允许。
 
 ## v1.6.3 - 2026-11-05
 
