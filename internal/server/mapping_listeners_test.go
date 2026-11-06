@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net"
 	"net/netip"
 	"strconv"
@@ -13,22 +14,31 @@ import (
 	"hy2tun/internal/view"
 )
 
-// requireIPv6Loopback skips a test only when the host cannot bind either an
-// IPv6 TCP or UDP loopback socket. The reason is recorded in the skip message.
-func requireIPv6Loopback(t *testing.T) {
-	t.Helper()
-
+// ipv6LoopbackSupport returns nil when the host can bind both TCP and UDP
+// IPv6 loopback sockets. Tests that require IPv6 skip only on a non-nil result.
+func ipv6LoopbackSupport() error {
 	listener, err := net.Listen("tcp6", "[::1]:0")
 	if err != nil {
-		t.Skipf("host lacks IPv6 TCP loopback support: %v", err)
+		return err
 	}
 	_ = listener.Close()
 
 	conn, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback})
 	if err != nil {
-		t.Skipf("host lacks IPv6 UDP loopback support: %v", err)
+		return err
 	}
 	_ = conn.Close()
+	return nil
+}
+
+// requireIPv6Loopback skips a test only when the host cannot bind either an
+// IPv6 TCP or UDP loopback socket. The reason is recorded in the skip message.
+func requireIPv6Loopback(t *testing.T) {
+	t.Helper()
+
+	if err := ipv6LoopbackSupport(); err != nil {
+		t.Skipf("host lacks IPv6 TCP/UDP loopback support: %v", err)
+	}
 }
 
 // nonLoopbackIPv4 returns an address that is not served by a loopback-only
@@ -114,6 +124,20 @@ func listenerHost(t *testing.T, listener net.Listener) netip.Addr {
 	addr, ok := netip.AddrFromSlice(tcpAddr.IP)
 	require.True(t, ok)
 	return addr.Unmap()
+}
+
+func listenerFamilies(t *testing.T, set *mappingListenerSet) map[string]bool {
+	t.Helper()
+
+	families := make(map[string]bool, len(set.TCP))
+	for _, listener := range set.TCP {
+		if listenerHost(t, listener).Is4() {
+			families[addressFamilyIPv4] = true
+			continue
+		}
+		families[addressFamilyIPv6] = true
+	}
+	return families
 }
 
 func TestLocalTCPListeners(t *testing.T) {
@@ -260,6 +284,58 @@ func TestSpecificListenHostBindsOneFamily(t *testing.T) {
 	dialAndAccept(t, set.TCP[0], "tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(set.Port())))
 }
 
+func TestHostnameListenHostDualStack(t *testing.T) {
+	addrs, err := net.DefaultResolver.LookupNetIP(context.Background(), "ip", "localhost")
+	require.NoError(t, err, "localhost must resolve")
+	hasIPv4, hasIPv6 := false, false
+	for _, addr := range addrs {
+		addr = addr.Unmap()
+		if addr.Is4() {
+			hasIPv4 = true
+		}
+		if addr.Is6() {
+			hasIPv6 = true
+		}
+	}
+	require.True(t, hasIPv4 || hasIPv6, "localhost must resolve to at least one address")
+
+	set, err := bindMappingListeners(view.ExposurePublic, "localhost", "tcp", 0)
+	require.NoError(t, err)
+	require.NotNil(t, set)
+	defer set.Close()
+	require.Positive(t, set.Port())
+
+	families := listenerFamilies(t, set)
+	warnings := set.Warnings()
+	if hasIPv4 {
+		require.True(t, families[addressFamilyIPv4], "hostname with an IPv4 address must bind IPv4")
+		require.NotContains(t, warnings, addressFamilyIPv4)
+	} else {
+		require.Contains(t, warnings, addressFamilyIPv4)
+	}
+	if hasIPv6 && ipv6LoopbackSupport() == nil {
+		require.True(t, families[addressFamilyIPv6], "hostname with an IPv6 address must bind IPv6 when the host supports it")
+		require.NotContains(t, warnings, addressFamilyIPv6)
+	} else {
+		require.Contains(t, warnings, addressFamilyIPv6, "a hostname must report a family it cannot bind")
+	}
+}
+
+func TestBindMappingListenersRejectsInvalidExposure(t *testing.T) {
+	for _, exposure := range []view.Exposure{"Local", "local ", "PUBLIC", "bogus"} {
+		set, err := bindMappingListeners(exposure, "", "tcp", 0)
+		require.Error(t, err, "exposure %q must fail closed", exposure)
+		require.Nil(t, set)
+		require.Contains(t, err.Error(), "invalid exposure")
+	}
+
+	// Empty remains the legacy public default.
+	set, err := bindMappingListeners("", "", "tcp", 0)
+	require.NoError(t, err)
+	require.NotNil(t, set)
+	require.NoError(t, set.Close())
+}
+
 func TestUDPDualStack(t *testing.T) {
 	requireIPv6Loopback(t)
 
@@ -364,4 +440,27 @@ func TestBindMappingListenersRejectsUnknownType(t *testing.T) {
 	set, err := bindMappingListeners(view.ExposurePublic, "", "sctp", 0)
 	require.Error(t, err)
 	require.Nil(t, set)
+}
+
+func BenchmarkMultiUDPConnReadFrom(b *testing.B) {
+	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(b, err)
+	client, err := net.DialUDP("udp4", nil, server.LocalAddr().(*net.UDPAddr))
+	require.NoError(b, err)
+	conn := newMultiUDPConn(server)
+	defer conn.Close()
+	defer client.Close()
+
+	payload := []byte("benchmark")
+	buf := make([]byte, 64)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := client.Write(payload); err != nil {
+			b.Fatal(err)
+		}
+		if _, _, err := conn.ReadFrom(buf); err != nil {
+			b.Fatal(err)
+		}
+	}
 }

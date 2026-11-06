@@ -18,6 +18,10 @@ import (
 const (
 	addressFamilyIPv4 = "ipv4"
 	addressFamilyIPv6 = "ipv6"
+
+	// multiUDPReadBufferSize matches the largest UDP payload so a caller with a
+	// large buffer never sees a datagram truncated by the fan-in.
+	multiUDPReadBufferSize = 65535
 )
 
 // mappingListenerSet owns every public socket for one mapping. TCP and UDP
@@ -88,52 +92,86 @@ func (s *mappingListenerSet) Warnings() []string {
 	return append([]string(nil), s.UnavailableFamilies...)
 }
 
-type mappingBindFamily struct {
-	family string
-	host   string
-	v6only bool
+type mappingBindGroup struct {
+	family      string
+	hosts       []string
+	v6only      bool
+	warnMissing bool
 }
 
-// mappingBindFamilies selects the addresses for an exposure. Local always uses
+// mappingBindGroups selects the addresses for an exposure. Local always uses
 // both loopback addresses and ignores listen_host. Public uses both wildcards
-// when listen_host is empty or an explicit wildcard, and exactly one address
-// when the operator selected a specific address.
-func mappingBindFamilies(exposure view.Exposure, bindHost string) []mappingBindFamily {
+// when listen_host is empty or an explicit wildcard, exactly one address when
+// the operator selected a specific address, and one bindable address per
+// resolved family for a hostname. Empty exposure is the legacy public default;
+// any other invalid exposure fails closed.
+func mappingBindGroups(exposure view.Exposure, bindHost string) ([]mappingBindGroup, error) {
+	if exposure != "" && !exposure.Valid() {
+		return nil, fmt.Errorf("invalid exposure %q", exposure)
+	}
 	if exposure == view.ExposureLocal {
-		return []mappingBindFamily{
-			{family: addressFamilyIPv4, host: "127.0.0.1"},
-			{family: addressFamilyIPv6, host: "::1"},
-		}
+		return []mappingBindGroup{
+			{family: addressFamilyIPv4, hosts: []string{"127.0.0.1"}, warnMissing: true},
+			{family: addressFamilyIPv6, hosts: []string{"::1"}, warnMissing: true},
+		}, nil
 	}
 
 	host := strings.TrimSpace(bindHost)
 	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
 		host = host[1 : len(host)-1]
 	}
-	wildcard := []mappingBindFamily{
-		{family: addressFamilyIPv4, host: "0.0.0.0"},
-		{family: addressFamilyIPv6, host: "::", v6only: true},
+	wildcard := []mappingBindGroup{
+		{family: addressFamilyIPv4, hosts: []string{"0.0.0.0"}, warnMissing: true},
+		{family: addressFamilyIPv6, hosts: []string{"::"}, v6only: true, warnMissing: true},
 	}
 	if host == "" {
-		return wildcard
+		return wildcard, nil
 	}
 	if addr, err := netip.ParseAddr(host); err == nil {
 		addr = addr.Unmap()
 		if addr.IsUnspecified() {
 			// Explicit 0.0.0.0/:: is the operator asking for the wildcard,
 			// not a request for single-family service.
-			return wildcard
+			return wildcard, nil
 		}
 		if addr.Is4() {
-			return []mappingBindFamily{{family: addressFamilyIPv4, host: addr.String()}}
+			return []mappingBindGroup{{family: addressFamilyIPv4, hosts: []string{addr.String()}}}, nil
 		}
-		return []mappingBindFamily{{family: addressFamilyIPv6, host: addr.String(), v6only: true}}
+		return []mappingBindGroup{{family: addressFamilyIPv6, hosts: []string{addr.String()}, v6only: true}}, nil
 	}
 
-	// A hostname is an explicit single-address choice. Resolution and family
-	// selection are left to the standard library; there is no second family to
-	// warn about.
-	return []mappingBindFamily{{host: host}}
+	// A hostname is not an explicit single-address choice. Resolve it and try
+	// every address of each family until one binds; a family with no address
+	// or no bindable address is reported as unavailable, never silently
+	// dropped.
+	addrs, err := net.DefaultResolver.LookupNetIP(context.Background(), "ip", host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve listen host %q: %w", host, err)
+	}
+	var ipv4Hosts, ipv6Hosts []string
+	seen := make(map[netip.Addr]struct{}, len(addrs))
+	for _, addr := range addrs {
+		addr = addr.Unmap()
+		if !addr.IsValid() {
+			continue
+		}
+		if _, duplicate := seen[addr]; duplicate {
+			continue
+		}
+		seen[addr] = struct{}{}
+		if addr.Is4() {
+			ipv4Hosts = append(ipv4Hosts, addr.String())
+			continue
+		}
+		ipv6Hosts = append(ipv6Hosts, addr.String())
+	}
+	if len(ipv4Hosts) == 0 && len(ipv6Hosts) == 0 {
+		return nil, fmt.Errorf("resolve listen host %q: no addresses", host)
+	}
+	return []mappingBindGroup{
+		{family: addressFamilyIPv4, hosts: ipv4Hosts, warnMissing: true},
+		{family: addressFamilyIPv6, hosts: ipv6Hosts, v6only: true, warnMissing: true},
+	}, nil
 }
 
 // bindMappingListeners binds the family-aware socket set for one mapping type
@@ -145,39 +183,58 @@ func bindMappingListeners(exposure view.Exposure, bindHost, mappingType string, 
 		return nil, fmt.Errorf("bind mapping listeners: unsupported mapping type %q", mappingType)
 	}
 
-	families := mappingBindFamilies(exposure, bindHost)
+	families, err := mappingBindGroups(exposure, bindHost)
+	if err != nil {
+		return nil, err
+	}
 	set := &mappingListenerSet{familyErrors: make(map[string]error)}
 	assigned := port
 	var udpConns []*net.UDPConn
 	var errs []error
 
 	for _, family := range families {
-		listenPort := assigned
-		addr := net.JoinHostPort(family.host, strconv.Itoa(listenPort))
-		if mappingType == "tcp" {
-			listener, err := listenTCPFamily(family, addr)
-			if err != nil {
-				set.familyErrors[family.family] = err
-				errs = append(errs, fmt.Errorf("%s %s: %w", familyLabel(family), addr, err))
-				continue
-			}
-			set.TCP = append(set.TCP, listener)
-			if assigned == 0 {
-				assigned = addrPort(listener.Addr())
-			}
+		if len(family.hosts) == 0 {
+			set.familyErrors[family.family] = fmt.Errorf("no %s address", family.family)
+			errs = append(errs, fmt.Errorf("%s: no address for listen host", family.family))
 			continue
 		}
 
-		conn, err := listenUDPFamily(family, addr)
-		if err != nil {
-			set.familyErrors[family.family] = err
-			errs = append(errs, fmt.Errorf("%s %s: %w", familyLabel(family), addr, err))
+		bound := false
+		var lastErr error
+		for _, host := range family.hosts {
+			listenPort := assigned
+			addr := net.JoinHostPort(host, strconv.Itoa(listenPort))
+			if mappingType == "tcp" {
+				listener, err := listenTCPFamily(family.family, family.v6only, addr)
+				if err != nil {
+					lastErr = err
+					continue
+				}
+				set.TCP = append(set.TCP, listener)
+				if assigned == 0 {
+					assigned = addrPort(listener.Addr())
+				}
+				bound = true
+				break
+			}
+
+			conn, err := listenUDPFamily(family.family, family.v6only, addr)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			udpConns = append(udpConns, conn)
+			if assigned == 0 {
+				assigned = addrPort(conn.LocalAddr())
+			}
+			bound = true
+			break
+		}
+		if bound {
 			continue
 		}
-		udpConns = append(udpConns, conn)
-		if assigned == 0 {
-			assigned = addrPort(conn.LocalAddr())
-		}
+		set.familyErrors[family.family] = lastErr
+		errs = append(errs, fmt.Errorf("%s %s: %w", familyLabel(family.family), family.hosts[0], lastErr))
 	}
 
 	if mappingType == "udp" && len(udpConns) > 0 {
@@ -187,30 +244,31 @@ func bindMappingListeners(exposure view.Exposure, bindHost, mappingType string, 
 		return nil, fmt.Errorf("bind %s mapping on port %d: %w", mappingType, port, errors.Join(errs...))
 	}
 
-	if len(families) > 1 {
-		for _, family := range families {
-			if _, failed := set.familyErrors[family.family]; failed {
-				set.UnavailableFamilies = append(set.UnavailableFamilies, family.family)
-			}
+	for _, family := range families {
+		if !family.warnMissing {
+			continue
+		}
+		if _, failed := set.familyErrors[family.family]; failed {
+			set.UnavailableFamilies = append(set.UnavailableFamilies, family.family)
 		}
 	}
 	return set, nil
 }
 
-func familyLabel(family mappingBindFamily) string {
-	if family.family == "" {
+func familyLabel(family string) string {
+	if family == "" {
 		return "address"
 	}
-	return family.family
+	return family
 }
 
-func listenTCPFamily(family mappingBindFamily, addr string) (net.Listener, error) {
+func listenTCPFamily(family string, v6only bool, addr string) (net.Listener, error) {
 	var config net.ListenConfig
-	if family.v6only {
+	if v6only {
 		config.Control = setIPv6Only
 	}
 	network := "tcp"
-	switch family.family {
+	switch family {
 	case addressFamilyIPv4:
 		network = "tcp4"
 	case addressFamilyIPv6:
@@ -219,13 +277,13 @@ func listenTCPFamily(family mappingBindFamily, addr string) (net.Listener, error
 	return config.Listen(context.Background(), network, addr)
 }
 
-func listenUDPFamily(family mappingBindFamily, addr string) (*net.UDPConn, error) {
+func listenUDPFamily(family string, v6only bool, addr string) (*net.UDPConn, error) {
 	var config net.ListenConfig
-	if family.v6only {
+	if v6only {
 		config.Control = setIPv6Only
 	}
 	network := "udp"
-	switch family.family {
+	switch family {
 	case addressFamilyIPv4:
 		network = "udp4"
 	case addressFamilyIPv6:
@@ -271,9 +329,10 @@ type familyUDPConn struct {
 }
 
 type udpReadResult struct {
-	data []byte
-	addr net.Addr
-	err  error
+	data    []byte
+	addr    net.Addr
+	err     error
+	release chan<- []byte
 }
 
 // multiUDPConn fans datagrams from the IPv4 and IPv6 sockets into one
@@ -314,7 +373,8 @@ func newMultiUDPConn(conns ...*net.UDPConn) *multiUDPConn {
 func (c *multiUDPConn) readLoop(conn *net.UDPConn) {
 	defer c.wg.Done()
 
-	buf := make([]byte, 65535)
+	buf := make([]byte, multiUDPReadBufferSize)
+	returned := make(chan []byte, 1)
 	for {
 		n, addr, err := conn.ReadFrom(buf)
 		if err != nil {
@@ -328,10 +388,16 @@ func (c *multiUDPConn) readLoop(conn *net.UDPConn) {
 			}
 			continue
 		}
-		data := make([]byte, n)
-		copy(data, buf[:n])
 		select {
-		case c.reads <- udpReadResult{data: data, addr: addr}:
+		case c.reads <- udpReadResult{data: buf[:n], addr: addr, release: returned}:
+			// Wait for the consumer to copy the datagram before reusing the
+			// per-socket buffer. This keeps one buffer per socket and removes
+			// the per-datagram allocation/copy on the read path.
+			select {
+			case buf = <-returned:
+			case <-c.done:
+				return
+			}
 		case <-c.done:
 			return
 		}
@@ -349,7 +415,11 @@ func (c *multiUDPConn) ReadFrom(b []byte) (int, net.Addr, error) {
 		if result.err != nil {
 			return 0, nil, result.err
 		}
-		return copy(b, result.data), result.addr, nil
+		n := copy(b, result.data)
+		if result.release != nil {
+			result.release <- result.data[:cap(result.data)]
+		}
+		return n, result.addr, nil
 	}
 }
 
