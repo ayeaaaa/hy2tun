@@ -256,7 +256,7 @@ git commit -m "feat(server): apply and switch mapping exposure"
 
 **Interfaces:**
 - `const CapabilityExposure = "exposure_v1"`.
-- `control.Result` adds `Exposure string` and `UnavailableFamilies []string`.
+- `control.Result` adds `Exposure string`; `UnavailableFamilies []string` already exists from Task 2 and must not be duplicated.
 - New message:
   ```go
   const TypeExposureUpdate = "exposure_update"
