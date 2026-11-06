@@ -1360,21 +1360,35 @@ func fixtureGoToolchain(t *testing.T) (goBin, goroot string) {
 // fixtureBuildEnv isolates the historical build from ambient GOROOT,
 // GOTOOLCHAIN, GOPROXY, GOFLAGS, CGO and workspace settings. Direct test-binary
 // runs therefore need a selected Go >= 1.26 toolchain (see fixtureGoToolchain).
-func fixtureBuildEnv(goroot string) []string {
+func fixtureBuildEnv(goroot, goproxy string) []string {
 	return envWith(os.Environ(),
 		"GOROOT="+goroot,
 		"GOTOOLCHAIN=local",
-		"GOPROXY=off",
+		"GOPROXY="+goproxy,
 		"GOFLAGS=-mod=mod",
 		"CGO_ENABLED=0",
 		"GOWORK=off",
 	)
 }
 
+// compatGoProxy returns the proxy used only when the historical modules are
+// not already cached. Set HY2TUN_COMPAT_OFFLINE=1 to forbid the fallback.
+func compatGoProxy() string {
+	if os.Getenv("HY2TUN_COMPAT_OFFLINE") == "1" {
+		return "off"
+	}
+	if proxy := strings.TrimSpace(os.Getenv("GOPROXY")); proxy != "" && proxy != "off" {
+		return proxy
+	}
+	return "https://proxy.golang.org,direct"
+}
+
 // buildV154Fixtures extracts the local v1.5.4 tag into a temporary directory
-// and builds both binaries offline. If the tag or cached modules are missing,
-// the compatibility matrix is skipped with an explicit reason rather than
-// silently omitted; CI sets HY2TUN_REQUIRE_COMPAT to turn that into a failure.
+// and builds both binaries. It tries the local module cache first; if historical
+// dependencies are missing, it retries with the configured Go proxy unless
+// HY2TUN_COMPAT_OFFLINE=1. If the tag or modules remain unavailable, the
+// compatibility matrix is skipped with an explicit reason rather than silently
+// omitted; CI sets HY2TUN_REQUIRE_COMPAT to turn that into a failure.
 func buildV154Fixtures(t *testing.T) (clientBin, serverBin string) {
 	t.Helper()
 	if testing.Short() && !compatRequired() {
@@ -1416,11 +1430,27 @@ func buildV154Fixtures(t *testing.T) (clientBin, serverBin string) {
 
 	build := func(name, pkg string) string {
 		out := filepath.Join(dir, name)
-		cmd := exec.Command(goBin, "build", "-trimpath", "-o", out, pkg)
-		cmd.Dir = dir
-		cmd.Env = fixtureBuildEnv(goroot)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			compatUnavailable(t, "cannot build v1.5.4 %s offline: %v\n%s", name, err, tail(output, 2048))
+		run := func(proxy string) ([]byte, error) {
+			cmd := exec.Command(goBin, "build", "-trimpath", "-o", out, pkg)
+			cmd.Dir = dir
+			cmd.Env = fixtureBuildEnv(goroot, proxy)
+			return cmd.CombinedOutput()
+		}
+		output, err := run("off")
+		if err != nil {
+			proxy := compatGoProxy()
+			if proxy != "off" {
+				retryOutput, retryErr := run(proxy)
+				if retryErr == nil {
+					output, err = retryOutput, nil
+				} else {
+					output = append(output, retryOutput...)
+					err = retryErr
+				}
+			}
+		}
+		if err != nil {
+			compatUnavailable(t, "cannot build v1.5.4 %s: %v\n%s", name, err, tail(output, 2048))
 		}
 		sum, err := fileSHA256(out)
 		require.NoError(t, err)
