@@ -195,35 +195,53 @@ func (m *mappingManager) SetExposure(clientID, mappingID string, exposure view.E
 	if m == nil {
 		return view.MappingView{}, control.ErrClientNotFound
 	}
-	// Registration replaces the session without taking controlMu. Hold the
-	// exposure transaction lock for the whole operation so a switch that
-	// releases mu around its state fsync cannot have its session replaced.
-	m.exposureMu.Lock()
-	defer m.exposureMu.Unlock()
-
 	// A session can be replaced between looking it up and locking its control
 	// queue. Retry a few times, then report the churn instead of silently
 	// updating only half of the state.
 	for attempt := 0; attempt < 4; attempt++ {
 		m.mu.Lock()
 		sess := m.sessions[clientID]
-		if sess == nil {
-			result, err := m.setStoredExposureLocked(clientID, mappingID, exposure)
-			m.mu.Unlock()
-			return result, err
-		}
 		m.mu.Unlock()
 
+		if sess == nil {
+			// Offline state-only path: exposureMu excludes registration while
+			// m.mu protects the snapshot/persist transaction. No controlMu is
+			// involved because there is no session.
+			m.exposureMu.Lock()
+			m.mu.Lock()
+			if m.sessions[clientID] != nil {
+				// A session appeared while waiting; retry on the live path.
+				m.mu.Unlock()
+				m.exposureMu.Unlock()
+				continue
+			}
+			result, err := m.setStoredExposureLocked(clientID, mappingID, exposure)
+			m.mu.Unlock()
+			m.exposureMu.Unlock()
+			return result, err
+		}
+
+		// Live path: take the session's control queue before exposureMu. A push
+		// can hold controlMu for the ack timeout; waiting for it without
+		// exposureMu keeps unrelated registrations from stalling. Registration
+		// still takes exposureMu -> m.mu, so it cannot replace this session
+		// while the switch releases m.mu around the state fsync.
+		if m.setExposureBeforeControlMu != nil {
+			m.setExposureBeforeControlMu()
+		}
 		sess.controlMu.Lock()
+		m.exposureMu.Lock()
 		m.mu.Lock()
 		if m.sessions[clientID] != sess {
 			m.mu.Unlock()
+			m.exposureMu.Unlock()
 			sess.controlMu.Unlock()
 			continue
 		}
 		rt := sess.mappings[mappingID]
 		if rt == nil {
 			m.mu.Unlock()
+			m.exposureMu.Unlock()
 			sess.controlMu.Unlock()
 			return view.MappingView{}, &MappingNotFoundError{ClientID: clientID, MappingID: mappingID}
 		}
@@ -233,6 +251,7 @@ func (m *mappingManager) SetExposure(clientID, mappingID string, exposure view.E
 		if rt.closed.Load() || rt.status != mappingStatusRunning || rt.listeners == nil {
 			result, err := m.setStoredExposureForRuntimeLocked(sess, rt, exposure)
 			m.mu.Unlock()
+			m.exposureMu.Unlock()
 			sess.controlMu.Unlock()
 			return result, err
 		}
@@ -243,12 +262,14 @@ func (m *mappingManager) SetExposure(clientID, mappingID string, exposure view.E
 		if exposureOrDefault(rt.exposure) == exposure && len(rt.listeners.Warnings()) == 0 {
 			result := mappingViewForRuntime(rt)
 			m.mu.Unlock()
+			m.exposureMu.Unlock()
 			sess.controlMu.Unlock()
 			return result, nil
 		}
 
 		result, err := m.switchExposureLocked(sess, rt, exposure)
 		m.mu.Unlock()
+		m.exposureMu.Unlock()
 		sess.controlMu.Unlock()
 		return result, err
 	}

@@ -809,6 +809,68 @@ func TestMappingExposurePersistRecheckFailure(t *testing.T) {
 	require.NoError(t, listener.Close())
 }
 
+func TestMappingExposureDoesNotBlockRegistrationWhileControlMuHeld(t *testing.T) {
+	env := newExposureEnv(t, "")
+	sessA := newExposureSession("a")
+	portA := freeExposureTCPPort(t)
+	mappingA := config.Mapping{ID: "m1", Type: "tcp", RemotePort: portA, LocalAddr: "127.0.0.1:9001", Enabled: true}
+	registerExposureMapping(t, env.manager, sessA, mappingA)
+
+	sessB := newExposureSession("b")
+	portB := freeExposureTCPPort(t)
+	mappingB := config.Mapping{ID: "m1", Type: "tcp", RemotePort: portB, LocalAddr: "127.0.0.1:9002", Enabled: true}
+
+	entered := make(chan struct{})
+	var once sync.Once
+	env.manager.setExposureBeforeControlMu = func() { once.Do(func() { close(entered) }) }
+	t.Cleanup(func() { env.manager.setExposureBeforeControlMu = nil })
+
+	// Simulate a slow push/update holding client A's control queue.
+	sessA.controlMu.Lock()
+	unlocked := false
+	defer func() {
+		if !unlocked {
+			sessA.controlMu.Unlock()
+		}
+	}()
+
+	exposureDone := make(chan error, 1)
+	go func() {
+		_, err := env.manager.SetExposure("a", "m1", view.ExposureLocal)
+		exposureDone <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SetExposure did not reach the controlMu wait")
+	}
+
+	// SetExposure is now blocked on A's controlMu. An unrelated registration
+	// must complete because exposureMu is not held while waiting for controlMu.
+	registrationDone := make(chan struct{})
+	go func() {
+		env.manager.register(sessB, []config.Mapping{mappingB})
+		close(registrationDone)
+	}()
+	select {
+	case <-registrationDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("unrelated registration blocked behind SetExposure waiting on controlMu")
+	}
+	env.manager.mu.Lock()
+	_, registered := env.manager.sessions["b"]
+	env.manager.mu.Unlock()
+	require.True(t, registered)
+
+	// Release the simulated push; the switch can now take controlMu and finish.
+	sessA.controlMu.Unlock()
+	unlocked = true
+	require.NoError(t, <-exposureDone)
+	final := snapshotExposureRuntime(t, env.manager, "a", "m1")
+	require.Equal(t, view.ExposureLocal, final.exposure)
+	requireLoopbackListeners(t, final.listeners)
+}
+
 func TestMappingExposurePersistsAcrossReconnect(t *testing.T) {
 	env := newExposureEnv(t, "")
 	port := freeExposureTCPPort(t)

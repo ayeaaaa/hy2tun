@@ -48,6 +48,9 @@ type mappingManager struct {
 	// persistExposureFn is a test seam for the live switch transaction. A nil
 	// value uses persistExposure.
 	persistExposureFn func(clientID, mappingID string, exposure view.Exposure) error
+	// setExposureBeforeControlMu is a test seam for the lock-order test. It
+	// runs immediately before the live path takes the session's controlMu.
+	setExposureBeforeControlMu func()
 
 	sessions map[string]*clientSession
 
