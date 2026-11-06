@@ -63,7 +63,9 @@ func (s *Server) handleMappingExposure(w http.ResponseWriter, r *http.Request) {
 		s.writeExposureError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, mappingResponseFrom(mapping))
+	// Return the raw view.MappingView so the PUT success body has exactly the
+	// same field names as the existing GET mapping read models.
+	writeJSON(w, http.StatusOK, mapping)
 }
 
 // writeExposureError maps the server's typed failures onto the stable Web API
@@ -84,13 +86,8 @@ func (s *Server) writeExposureError(w http.ResponseWriter, err error) {
 		return
 	}
 
-	switch {
-	case errors.Is(err, control.ErrClientNotFound):
+	if errors.Is(err, control.ErrClientNotFound) {
 		writeJSONErrorCode(w, http.StatusNotFound, "client_not_found", "客户端不存在")
-		return
-	case errors.Is(err, control.ErrClientOffline):
-		writeJSONErrorCode(w, http.StatusConflict, "client_offline",
-			"客户端离线，无法修改映射暴露范围")
 		return
 	}
 
@@ -100,13 +97,24 @@ func (s *Server) writeExposureError(w http.ResponseWriter, err error) {
 		if families == nil {
 			families = []string{}
 		}
+		closed := conflict.MappingClosed()
+		message := "映射暴露范围切换失败，已保留当前状态"
+		if closed {
+			message = "映射暴露范围切换失败，映射已关闭"
+		}
 		writeJSON(w, http.StatusConflict, exposureConflictResponse{
-			Error:               "映射暴露范围切换失败，已保留当前状态",
+			Error:               message,
 			Code:                "exposure_conflict",
 			ActiveExposure:      conflict.ActiveExposure(),
 			UnavailableFamilies: families,
-			Closed:              conflict.MappingClosed(),
+			Closed:              closed,
 		})
+		return
+	}
+
+	if errors.Is(err, control.ErrClientOffline) {
+		writeJSONErrorCode(w, http.StatusConflict, "client_offline",
+			"客户端离线，无法修改映射暴露范围")
 		return
 	}
 
