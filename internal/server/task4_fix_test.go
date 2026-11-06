@@ -154,7 +154,7 @@ func TestTCPPeerInvalidatedHelloPreservesHealthyOwner(t *testing.T) {
 			}
 			require.NoError(t, healthyControl.SetDeadline(time.Now().Add(time.Second)))
 			require.NoError(t, controlPingForTest(healthyControl), "healthy control must remain usable")
-			require.Same(t, rt.tcpListener, owner.mappings["tcp"].tcpListener)
+			require.Same(t, rt.listeners.TCP[0], owner.mappings["tcp"].listeners.TCP[0])
 		})
 	}
 }

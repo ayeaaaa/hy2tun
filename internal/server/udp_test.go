@@ -437,7 +437,11 @@ func TestMappingRuntimeCloseClosesUDPPortOnce(t *testing.T) {
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	require.NoError(t, err)
 	port := conn.LocalAddr().(*net.UDPAddr).Port
-	rt := &mappingRuntime{id: "udp1", udpConn: conn, status: mappingStatusRunning}
+	rt := &mappingRuntime{
+		id:        "udp1",
+		listeners: &mappingListenerSet{UDP: newMultiUDPConn(conn)},
+		status:    mappingStatusRunning,
+	}
 
 	rt.close()
 	rt.close()

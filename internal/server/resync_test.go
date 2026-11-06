@@ -166,7 +166,7 @@ func TestRejectedUpdateClosesStreamAndResyncs(t *testing.T) {
 		return len(views) == 1 && len(views[0].Mappings) == 1 && views[0].Mappings[0].Status == "running"
 	}))
 
-	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	occupied, err := net.Listen("tcp", ":0")
 	require.NoError(t, err)
 	defer occupied.Close()
 	occupiedPort := occupied.Addr().(*net.TCPAddr).Port

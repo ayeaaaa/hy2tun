@@ -484,7 +484,7 @@ func TestDetachTransportClosesOnlyOwnedMappings(t *testing.T) {
 	_ = b.SetReadDeadline(time.Now().Add(time.Second))
 	_, err = b.Read(make([]byte, 1))
 	require.ErrorIs(t, err, io.EOF)
-	c, err := net.DialTimeout("tcp", other.tcpListener.Addr().String(), time.Second)
+	c, err := net.DialTimeout("tcp", other.listeners.TCP[0].Addr().String(), time.Second)
 	require.NoError(t, err)
 	_ = c.Close()
 	s.mappings.detachTransport(transport.TCP) // Repeat must not touch HY2.

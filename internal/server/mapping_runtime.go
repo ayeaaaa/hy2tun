@@ -7,6 +7,7 @@ import (
 
 	"hy2tun/internal/config"
 	"hy2tun/internal/transport"
+	"hy2tun/internal/view"
 )
 
 // mappingRuntime is the server-side state of one registered mapping. Traffic
@@ -24,12 +25,12 @@ type mappingRuntime struct {
 	errCode      string
 	assignedPort int
 	udpToken     string
+	exposure     view.Exposure
 
-	tcpListener net.Listener
-	udpConn     *net.UDPConn
-	data        *dataStreams
-	closed      atomic.Bool
-	closeOnce   sync.Once
+	listeners *mappingListenerSet
+	data      *dataStreams
+	closed    atomic.Bool
+	closeOnce sync.Once
 
 	// udpMu serializes publicUDPConn creation with the eviction of the
 	// previous HY2 UDP session wrapper. udpSession is the wrapper whose read
@@ -112,29 +113,28 @@ func (m *mappingRuntime) closeActive() {
 	}
 }
 
-// close releases the listener, UDP socket, pending data streams, and active
-// connections owned by the runtime. The public UDP socket is owned by the
-// runtime and is closed here exactly once.
+// close releases the listener set, pending data streams, and active
+// connections owned by the runtime. The public UDP sockets are owned by the
+// runtime and are closed here exactly once.
 func (m *mappingRuntime) close() {
 	m.closeOnce.Do(func() {
 		m.closed.Store(true)
-		if m.tcpListener != nil {
-			_ = m.tcpListener.Close()
-		}
-		if m.udpConn != nil {
-			_ = m.udpConn.Close()
-			// Closing the owned socket releases the public port immediately. The
-			// child reader/bridge drain, including a concurrent attachment, is
-			// completed outside the shared manager lock.
-			go func() {
-				m.udpMu.Lock()
-				public := m.udpSession
-				m.udpSession = nil
-				m.udpMu.Unlock()
-				if public != nil {
-					_ = public.Close()
-				}
-			}()
+		if m.listeners != nil {
+			_ = m.listeners.Close()
+			if m.listeners.UDP != nil {
+				// Closing the owned sockets releases the public port immediately.
+				// The child reader/bridge drain, including a concurrent attachment,
+				// is completed outside the shared manager lock.
+				go func() {
+					m.udpMu.Lock()
+					public := m.udpSession
+					m.udpSession = nil
+					m.udpMu.Unlock()
+					if public != nil {
+						_ = public.Close()
+					}
+				}()
+			}
 		}
 		m.closeActive()
 		if m.data != nil {

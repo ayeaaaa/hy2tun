@@ -40,7 +40,7 @@ func TestProbeDoesNotRegisterOrPersist(t *testing.T) {
 	stateBefore, err := os.ReadFile(s.currentConfig().StateFile)
 	require.NoError(t, err)
 	s.mappings.mu.Lock()
-	listener := owner.mappings["tcp"].tcpListener
+	listener := owner.mappings["tcp"].listeners.TCP[0]
 	s.mappings.mu.Unlock()
 	for i := 0; i < 3; i++ {
 		probe, err := (&outbound{server: s}).TCP("_hy2tun_probe_:0")
@@ -59,7 +59,7 @@ func TestProbeDoesNotRegisterOrPersist(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, bytes.Equal(stateBefore, stateAfter))
 	s.mappings.mu.Lock()
-	require.Same(t, listener, owner.mappings["tcp"].tcpListener)
+	require.Same(t, listener, owner.mappings["tcp"].listeners.TCP[0])
 	s.mappings.mu.Unlock()
 	require.NoError(t, c.SetDeadline(time.Now().Add(time.Second)))
 	require.NoError(t, controlPingForTest(c))

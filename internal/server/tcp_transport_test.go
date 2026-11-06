@@ -487,7 +487,11 @@ func TestTCPUDPBridgeQueueDropsWithoutClosingMapping(t *testing.T) {
 	s, _ := tcpTestServer(t)
 	udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
 	require.NoError(t, err)
-	rt := &mappingRuntime{id: "udp", udpConn: udp, udpToken: "0123456789abcdef0123456789abcdef"}
+	rt := &mappingRuntime{
+		id:        "udp",
+		listeners: &mappingListenerSet{UDP: newMultiUDPConn(udp)},
+		udpToken:  "0123456789abcdef0123456789abcdef",
+	}
 	defer rt.close()
 	a, b := net.Pipe()
 	defer b.Close()

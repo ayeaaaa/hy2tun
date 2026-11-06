@@ -62,6 +62,9 @@ type Result struct {
 	AssignedPort int    `json:"assigned_port"`
 	UDPToken     string `json:"udp_token"`
 	Error        string `json:"error"`
+	// UnavailableFamilies lists address families ("ipv4"/"ipv6") that could
+	// not be bound while the mapping still serves on the other family.
+	UnavailableFamilies []string `json:"unavailable_families,omitempty"`
 }
 
 // Update is sent by the client after a local configuration change. It carries

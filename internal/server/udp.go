@@ -24,7 +24,7 @@ func udpVirtualAddress(token string) string {
 // is owned by the mapping runtime and shared by every session that maps to it.
 // Closing a wrapper only detaches that session; it must never close the socket.
 type publicUDPConn struct {
-	*net.UDPConn
+	UDPConn     udpPacketConn
 	virtualAddr string
 	mappingID   string
 	runtime     *mappingRuntime
@@ -177,11 +177,11 @@ func (s *Server) publicUDPConn(m *mappingRuntime) *publicUDPConn {
 }
 
 func (s *Server) attachPublicUDPConn(m *mappingRuntime, bridge transport.DatagramConn) *publicUDPConn {
-	if m == nil || m.udpConn == nil {
+	if m == nil || m.listeners == nil || m.listeners.UDP == nil {
 		return nil
 	}
 	c := &publicUDPConn{
-		UDPConn:     m.udpConn,
+		UDPConn:     m.listeners.UDP,
 		virtualAddr: udpVirtualAddress(m.udpToken),
 		mappingID:   m.id,
 		runtime:     m,
@@ -204,7 +204,7 @@ func (s *Server) attachPublicUDPConn(m *mappingRuntime, bridge transport.Datagra
 	m.udpSession = c
 	// Clear the wake deadline set by the old session before the new session
 	// starts reading.
-	_ = m.udpConn.SetReadDeadline(time.Time{})
+	_ = m.listeners.UDP.SetReadDeadline(time.Time{})
 	return c
 }
 

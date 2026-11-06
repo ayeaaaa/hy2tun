@@ -2,8 +2,6 @@ package server
 
 import (
 	"errors"
-	"net"
-	"strconv"
 
 	"hy2tun/internal/control"
 	"hy2tun/internal/ports"
@@ -56,55 +54,58 @@ func (m *mappingManager) bindLocked(sess *clientSession, rt *mappingRuntime, ign
 			}
 		}
 
-		if mapping.Type == "tcp" {
-			listener, err := net.Listen("tcp", net.JoinHostPort(m.bindHost, strconv.Itoa(port)))
-			if err != nil {
-				if requested > 0 {
-					return m.fail(rt, control.CodePortInUse)
-				}
-				// An auto-allocated candidate may be held by a process
-				// outside hy2tun; try the next one.
-				excluded[port] = struct{}{}
-				continue
-			}
-			rt.tcpListener = listener
-			rt.connSem = make(chan struct{}, maxConnectionsPerMapping)
-			rt.assignedPort = addrPort(listener.Addr())
-			rt.status = mappingStatusRunning
-			if m.serveTCP != nil {
-				go m.serveTCP(sess, rt, listener)
-			} else {
-				go acceptAndCloseTCP(listener)
-			}
-			return control.Result{ID: mapping.ID, OK: true, AssignedPort: rt.assignedPort}
-		}
-
-		udpAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(m.bindHost, strconv.Itoa(port)))
-		if err != nil {
-			return m.fail(rt, control.CodeInternal)
-		}
-		conn, err := net.ListenUDP("udp", udpAddr)
+		listeners, err := bindMappingListeners(rt.exposure, m.bindHost, mapping.Type, port)
 		if err != nil {
 			if requested > 0 {
 				return m.fail(rt, control.CodePortInUse)
 			}
+			// An auto-allocated candidate may be held by a process outside
+			// hy2tun; try the next one.
 			excluded[port] = struct{}{}
 			continue
 		}
+
+		for _, family := range listeners.Warnings() {
+			m.log.Warn("mapping address family unavailable",
+				"mapping", rt.id,
+				"family", family,
+				"error", listeners.familyErrors[family],
+			)
+		}
+
+		rt.listeners = listeners
+		rt.assignedPort = listeners.Port()
+		if mapping.Type == "tcp" {
+			rt.connSem = make(chan struct{}, maxConnectionsPerMapping)
+			rt.status = mappingStatusRunning
+			for _, listener := range listeners.TCP {
+				if m.serveTCP != nil {
+					go m.serveTCP(sess, rt, listener)
+				} else {
+					go acceptAndCloseTCP(listener)
+				}
+			}
+			return control.Result{
+				ID:                  mapping.ID,
+				OK:                  true,
+				AssignedPort:        rt.assignedPort,
+				UnavailableFamilies: listeners.Warnings(),
+			}
+		}
+
 		token, err := newUDPToken()
 		if err != nil {
-			_ = conn.Close()
+			_ = listeners.Close()
 			return m.fail(rt, control.CodeInternal)
 		}
-		rt.udpConn = conn
-		rt.assignedPort = addrPort(conn.LocalAddr())
 		rt.udpToken = token
 		rt.status = mappingStatusRunning
 		return control.Result{
-			ID:           mapping.ID,
-			OK:           true,
-			AssignedPort: rt.assignedPort,
-			UDPToken:     rt.udpToken,
+			ID:                  mapping.ID,
+			OK:                  true,
+			AssignedPort:        rt.assignedPort,
+			UDPToken:            rt.udpToken,
+			UnavailableFamilies: listeners.Warnings(),
 		}
 	}
 }

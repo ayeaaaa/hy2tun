@@ -57,7 +57,7 @@ func TestCredentialStateConcurrentAccess(t *testing.T) {
 type testRuntimeSnapshot struct {
 	runtime      *mappingRuntime
 	listener     net.Listener
-	udpConn      *net.UDPConn
+	udpConn      *multiUDPConn
 	udpToken     string
 	status       string
 	mapping      config.Mapping
@@ -74,10 +74,18 @@ func snapshotTestRuntime(t *testing.T, srv *Server, clientID, mappingID string) 
 	require.NotNil(t, sess)
 	rt := sess.mappings[mappingID]
 	require.NotNil(t, rt)
+	var listener net.Listener
+	if rt.listeners != nil && len(rt.listeners.TCP) > 0 {
+		listener = rt.listeners.TCP[0]
+	}
+	var udpConn *multiUDPConn
+	if rt.listeners != nil {
+		udpConn = rt.listeners.UDP
+	}
 	return testRuntimeSnapshot{
 		runtime:      rt,
-		listener:     rt.tcpListener,
-		udpConn:      rt.udpConn,
+		listener:     listener,
+		udpConn:      udpConn,
 		udpToken:     rt.udpToken,
 		status:       rt.status,
 		mapping:      rt.mapping,
