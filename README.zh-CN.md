@@ -884,12 +884,14 @@ HTTP API：
 PUT /api/clients/{clientID}/mappings/{mappingID}/exposure
 Content-Type: application/json
 X-Requested-With: hy2tun
+Origin: http://127.0.0.1:7500
 
 {"exposure":"local"}
 ```
 
-`200` 返回与 GET API 相同的映射读模型，包含 `Exposure` 和
-`UnavailableFamilies`（`null` 或空数组都表示没有警告）。
+`200` 返回该映射的原始映射对象（`view.MappingView`），包含 `Exposure` 和
+`UnavailableFamilies`（`null` 或空数组都表示没有警告）。GET 映射列表会把
+同一个对象包在 `mapping` 条目中，嵌套字段名相同。
 `400 invalid_exposure` / `invalid_body` 表示请求被拒绝；
 `404 client_not_found` / `mapping_not_found` 表示目标不存在；
 `409 exposure_conflict` 会带
@@ -1508,7 +1510,7 @@ CSRF 防护，但 TLS 保护传输中的密码和会话 cookie。
   所有 Web 会话。
 - HY2 凭据在 `GET /api/settings` 中掩码显示。显示端点需要有效 Web 会话和
   CSRF 头（不需要当前密码），返回 `Cache-Control: no-store`，从不把明文写入
-  日志或 URL。只有修改 Web 管理员密码仍需要当前密码，并对失败确认限流。
+  日志或 URL。只有修改 Web 管理员用户名/密码仍需要当前密码，并对失败确认限流。
 - 热设置先持久化再生效。校验或文件写入失败会保持运行中的凭据集、端口策略
   和 Web 登录不变。
 - 轮换会保持上一代 HY2 凭据对有效，直到显式撤销或后续轮换替换它；撤销会
@@ -1747,6 +1749,10 @@ Go 测试只在 Linux 上运行。OpenWrt 和 Windows 真机执行属于外部�
     （或停止 HY2 监听），确认客户端控制台显示实际传输 `tcp`；恢复 UDP 后，
     确认只有连续三次成功探测且在 TCP 上保持至少 60 秒后才恢复。切换到
     `tcp`，确认范围或端口跳跃配置被拒绝。最后恢复原模式和原配置。
+13. 在服务端控制台（或运行 `hy2tund exposure --client <id> --mapping <id>
+    --mode local`）把一条映射切换为仅本机。确认公网端口被拒绝，而服务端
+    主机上的 `127.0.0.1`/`::1` 仍可访问；切回公网并确认公网访问恢复。重启
+    服务端和客户端，确认设置仍然保留。
 
 ### Windows
 
@@ -1766,6 +1772,8 @@ Go 测试只在 Linux 上运行。OpenWrt 和 Windows 真机执行属于外部�
    启动计划任务，确认控制台显示实际传输为 `hy2` 或 `tcp`，并在强制网络变化
    后更新。确认允许到同一服务端端口的出站 TCP 和 UDP。最后恢复原模式和原
    配置。
+8. 在服务端控制台或 `hy2tund exposure` 中把一条映射切换为仅本机，再切回
+   公网。确认公网拒绝/恢复、回环访问，以及服务端/客户端重启后的持久化。
 
 ## 开发
 

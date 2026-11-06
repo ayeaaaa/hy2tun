@@ -20,7 +20,7 @@
 - **端口跳跃**：HY2 支持 UDP 端口范围跳跃，Linux 服务端可自动配置防火墙重定向。
 - **两端 Web 控制台**：查看状态、映射、传输模式、实际传输、切换原因和探测错误；服务端可切换每条映射的 `public`/`local` 暴露范围，客户端只读显示。客户端控制台还内置最近日志视图；服务端日志通过 systemd journal 或配置的日志文件查看。
 - **LuCI 与 CLI**：OpenWrt 可在 LuCI 中配置单服务端模式；命令行支持 `hy2tun config get|set` 和 `hy2tund exposure --client ... --mapping ... --mode public|local`。
-- **安全与运维**：TLS 1.3、CA/SNI/证书 pin、认证密码与 control token、凭据轮换、当前/上一代凭据、CSRF、登录限流、metrics Bearer token。除修改 Web 管理员密码外，设置和凭据操作不再重复要求当前密码。
+- **安全与运维**：TLS 1.3、CA/SNI/证书 pin、认证密码与 control token、凭据轮换、当前/上一代凭据、CSRF、登录限流、metrics Bearer token。除修改 Web 管理员用户名/密码外，设置和凭据操作不再重复要求当前密码。
 - **多平台**：Linux amd64/arm64/arm/mips/mipsle、Windows amd64 交叉构建、OpenWrt IPK、Docker、systemd。
 
 ## 适合用在哪

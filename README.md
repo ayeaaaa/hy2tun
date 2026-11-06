@@ -1004,13 +1004,16 @@ HTTP API:
 PUT /api/clients/{clientID}/mappings/{mappingID}/exposure
 Content-Type: application/json
 X-Requested-With: hy2tun
+Origin: http://127.0.0.1:7500
 
 {"exposure":"local"}
 ```
 
-A `200` response is the same mapping read model as the GET APIs, including
-`Exposure` and `UnavailableFamilies` (`null` or an empty array means no
-warning). `400 invalid_exposure` or `invalid_body` means the request was
+A `200` response is the raw mapping object (`view.MappingView`) for that
+mapping, including `Exposure` and `UnavailableFamilies` (`null` or an empty
+array means no warning). The GET mapping list wraps the same object in a
+`mapping` entry, with identical nested field names. `400 invalid_exposure` or
+`invalid_body` means the request was
 rejected; `404 client_not_found` or `mapping_not_found` means the target does
 not exist; `409 exposure_conflict` reports the state that remains active with
 `active_exposure`, `unavailable_families`, and `closed`; `500 internal` covers
@@ -1710,8 +1713,8 @@ the password and session cookie in transit.
 - HY2 credentials are masked in `GET /api/settings`. The reveal endpoint
   requires a valid Web session and CSRF header (not the current password),
   returns `Cache-Control: no-store`, and never writes plaintext to logs or
-  URLs. Only Web administrator password changes still require the current
-  password; those failures are rate-limited.
+  URLs. Only Web administrator username/password changes still require the
+  current password; those failures are rate-limited.
 - Hot settings are persisted before they take effect. A failed validation or
   file write leaves the running credential set, port policy, and web login
   unchanged.
@@ -2008,6 +2011,11 @@ version, and date with the result.
     confirm recovery only after three successful probes and at least 60
     seconds on TCP. Switch to `tcp` and confirm a range or port-hopping
     configuration is rejected. Restore the original mode and configuration.
+13. From the server console (or `hy2tund exposure --client <id> --mapping <id>
+    --mode local`), switch a mapping to 仅本机. Confirm the public port is
+    refused while `127.0.0.1`/`::1` still serve on the server host; switch back
+    to 公网 and confirm public access returns. Restart the server and client and
+    confirm the setting persists.
 
 ### Windows
 
@@ -2030,6 +2038,9 @@ version, and date with the result.
    `hy2` or `tcp` and updates after a forced network change. Confirm outbound
    TCP and UDP to the same server port are allowed. Restore the original mode
    and configuration.
+8. From the server console or `hy2tund exposure`, switch a mapping to 仅本机
+   and back to 公网. Confirm public refusal/return, loopback service, and
+   persistence across a server/client restart.
 
 ## Development
 

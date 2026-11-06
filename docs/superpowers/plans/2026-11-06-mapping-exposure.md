@@ -552,6 +552,13 @@ git commit -m "feat(web): remove redundant server password confirmation"
 - E2E: public mapping reachable on available families; local mapping refused on public addresses but reachable via `127.0.0.1` and `::1`; one-family failure reports warning; switch closes existing public connections; restart/reconnect retains local; client read-only view updates; old client/server compatibility.
 - Docs: default public, per-mapping server control, Web/API/CLI, no re-auth except Web admin, partial-family warning, rollback behavior.
 
+**Acceptance amendment (2026-11-06):** E2E acceptance may include a necessary
+production fix when a real integration defect is found during acceptance. Any
+such fix must be recorded and reviewed in the Task 10 report with its rationale,
+files, and tests; it must not add a new product feature or expand the approved
+behavior. Task 10 used this exception for the reverse-UDP session teardown found
+by `TestMappingExposureE2E` during a live exposure switch.
+
 - [ ] **Step 1: Write failing E2E tests**
 
 Add `TestMappingExposureE2E`, `TestMappingExposurePartialFamily`, and `TestMappingExposureReconnect` using the existing real server/client helpers:
