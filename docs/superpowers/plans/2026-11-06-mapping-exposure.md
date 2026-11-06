@@ -76,7 +76,7 @@ In `internal/state/store_test.go`, add `TestExposureStatePersists`, `TestExposur
 - assert absent exposure is empty/public;
 - delete the client and assert exposure is gone;
 - `DeleteExposure` clears local;
-- a save failure (inject `syncDirFn`) leaves the in-memory value unchanged and returns an error.
+- a pre-rename save failure leaves the in-memory value unchanged and returns an error; a post-rename `syncDirFn` failure returns `state.ErrCommitted` and keeps the committed value, matching `DeleteAndSave`.
 
 Use a temp state path and the existing store test helpers.
 
