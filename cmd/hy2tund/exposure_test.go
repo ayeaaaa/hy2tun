@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -214,6 +215,52 @@ func assertExposureNoPassword(t *testing.T, password string, args []string, stdo
 	require.NotContains(t, stderr, password)
 }
 
+func TestExposureCLIArgumentErrorsDoNotEchoValues(t *testing.T) {
+	const mistyped = "mistyped-secret-value"
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "positional_argument",
+			args: []string{
+				"--client", "c1",
+				"--mapping", "m1",
+				"--mode", "local",
+				mistyped,
+			},
+		},
+		{
+			name: "unknown_flag",
+			args: []string{
+				"--client", "c1",
+				"--mapping", "m1",
+				"--mode", "local",
+				"--" + mistyped,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr strings.Builder
+			err := runExposure(tc.args, strings.NewReader(""), &stdout, &stderr)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "参数")
+			require.NotContains(t, err.Error(), mistyped)
+			require.NotContains(t, stdout.String(), mistyped)
+			require.NotContains(t, stderr.String(), mistyped)
+		})
+	}
+}
+
+func TestExposureCLIHelp(t *testing.T) {
+	var stdout, stderr strings.Builder
+	err := runExposure([]string{"--help"}, strings.NewReader(""), &stdout, &stderr)
+	require.NoError(t, err)
+	require.Contains(t, stderr.String(), "Usage of exposure")
+}
+
 func TestExposureCLIParsesAndSends(t *testing.T) {
 	fake, server := newExposureFake(t, false)
 	fake.setAPIResponse(http.StatusOK, `{
@@ -275,6 +322,58 @@ func TestExposureCLIPublicNoWarning(t *testing.T) {
 	require.Contains(t, stdout.String(), "public")
 	require.NotContains(t, stderr.String(), "警告")
 	assertExposureNoPassword(t, exposureTestPassword, args, stdout.String(), stderr.String())
+}
+
+func TestExposureCLITrimsArguments(t *testing.T) {
+	fake, server := newExposureFake(t, false)
+	fake.setAPIResponse(http.StatusOK, `{
+		"id":"m1","type":"tcp","remote_port":2222,
+		"local_addr":"127.0.0.1:22","note":"ssh","enabled":true,
+		"Status":"running","Error":"","AssignedPort":2222,
+		"Exposure":"public","UnavailableFamilies":null,
+		"TxBytes":0,"RxBytes":0
+	}`)
+	configPath := writeExposureConfig(t, server.Listener.Addr().String(), false)
+	args := []string{
+		"--client", " c1 ",
+		"--mapping", " m1 ",
+		"--mode", " public ",
+		"-c", " " + configPath + " ",
+	}
+
+	var stdout, stderr strings.Builder
+	err := runExposure(args, strings.NewReader(exposureTestPassword+"\n"), &stdout, &stderr)
+	require.NoError(t, err)
+
+	state := fake.snapshot()
+	require.Equal(t, 1, state.LoginCalls)
+	require.Equal(t, 1, state.APICalls)
+	require.Equal(t, "/api/clients/c1/mappings/m1/exposure", state.APIPath)
+	require.JSONEq(t, `{"exposure":"public"}`, state.APIBody)
+	require.Contains(t, stdout.String(), "public")
+	assertExposureNoPassword(t, exposureTestPassword, args, stdout.String(), stderr.String())
+}
+
+func TestExposureCLIPasswordLineEndings(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "lf", input: "secret\n", want: "secret"},
+		{name: "crlf", input: "secret\r\n", want: "secret"},
+		{name: "literal_trailing_cr", input: "secret\r", want: "secret\r"},
+		{name: "double_cr", input: "secret\r\r\n", want: "secret\r"},
+		{name: "no_terminator", input: "secret", want: "secret"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := readExposurePassword(strings.NewReader(tc.input), io.Discard)
+			require.NoError(t, err)
+			require.Equal(t, []byte(tc.want), got)
+			clear(got)
+		})
+	}
 }
 
 func TestExposureCLIRejectsMissingPassword(t *testing.T) {
@@ -501,6 +600,36 @@ func TestExposureCLIResolveWebTargets(t *testing.T) {
 			require.Equal(t, tc.want, got)
 		})
 	}
+}
+
+func TestExposureCLIDoesNotUseEnvironmentProxy(t *testing.T) {
+	var proxyCalls atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		proxyCalls.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(proxy.Close)
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("http_proxy", proxy.URL)
+	t.Setenv("HTTPS_PROXY", proxy.URL)
+	t.Setenv("https_proxy", proxy.URL)
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+
+	configPath := writeExposureConfig(t, "exposure-proxy.invalid:7501", false)
+	args := exposureArgs(configPath, "c1", "m1", "local")
+	var stdout, stderr strings.Builder
+	err := runExposure(args, strings.NewReader(exposureTestPassword+"\n"), &stdout, &stderr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "连接 Web 控制台失败")
+	require.Zero(t, proxyCalls.Load())
+	assertExposureNoPassword(t, exposureTestPassword, args, stdout.String(), stderr.String())
+
+	client, err := newExposureHTTPClient(false)
+	require.NoError(t, err)
+	transport, ok := client.Transport.(*http.Transport)
+	require.True(t, ok)
+	require.Nil(t, transport.Proxy)
 }
 
 func TestExposureCLIHTTPSInsecure(t *testing.T) {

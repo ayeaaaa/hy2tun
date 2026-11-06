@@ -107,26 +107,38 @@ func parseExposureArgs(args []string, stderr io.Writer) (exposureOptions, error)
 		mode string
 	)
 	fs := flag.NewFlagSet("exposure", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	// Buffer flag output so a mistyped flag or value cannot be echoed to the
+	// terminal. Only the help text is copied to stderr.
+	var parseOutput bytes.Buffer
+	fs.SetOutput(&parseOutput)
 	fs.StringVar(&opts.clientID, "client", "", "客户端 ID")
 	fs.StringVar(&opts.mappingID, "mapping", "", "映射 ID")
 	fs.StringVar(&mode, "mode", "", "暴露范围：public 或 local")
 	fs.StringVar(&opts.configPath, "c", exposureDefaultConfig, "服务端配置文件路径")
 	fs.BoolVar(&opts.insecure, "insecure", false, "跳过 Web 控制台 TLS 证书校验（仅用于自签名证书）")
 	if err := fs.Parse(args); err != nil {
-		return exposureOptions{}, err
+		if errors.Is(err, flag.ErrHelp) {
+			_, _ = stderr.Write(parseOutput.Bytes())
+			return exposureOptions{}, flag.ErrHelp
+		}
+		return exposureOptions{}, errors.New("exposure: 命令行参数无效；请使用 --help 查看用法")
 	}
 	if fs.NArg() > 0 {
-		return exposureOptions{}, fmt.Errorf("exposure: 未识别的参数：%s", strings.Join(fs.Args(), " "))
+		// Never echo positional values: an operator may have pasted a password
+		// into the wrong position.
+		return exposureOptions{}, errors.New("exposure: 存在未识别的参数；请使用 --help 查看用法")
 	}
 
-	if strings.TrimSpace(opts.clientID) == "" {
+	opts.clientID = strings.TrimSpace(opts.clientID)
+	opts.mappingID = strings.TrimSpace(opts.mappingID)
+	opts.configPath = strings.TrimSpace(opts.configPath)
+	if opts.clientID == "" {
 		return exposureOptions{}, errors.New("exposure: 必须指定 --client")
 	}
-	if strings.TrimSpace(opts.mappingID) == "" {
+	if opts.mappingID == "" {
 		return exposureOptions{}, errors.New("exposure: 必须指定 --mapping")
 	}
-	if strings.TrimSpace(opts.configPath) == "" {
+	if opts.configPath == "" {
 		return exposureOptions{}, errors.New("exposure: 配置文件路径不能为空")
 	}
 	opts.mode = view.Exposure(strings.ToLower(strings.TrimSpace(mode)))
@@ -183,9 +195,13 @@ func newExposureHTTPClient(insecure bool) (*http.Client, error) {
 
 	base, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
-		base = &http.Transport{Proxy: http.ProxyFromEnvironment}
+		base = &http.Transport{}
 	}
 	transport := base.Clone()
+	// This admin CLI carries the Web password in the login body. Never route
+	// that request through an HTTP proxy selected from the environment: a
+	// plaintext target would expose the password to the proxy operator.
+	transport.Proxy = nil
 	if insecure {
 		if transport.TLSClientConfig == nil {
 			transport.TLSClientConfig = &tls.Config{}
@@ -235,7 +251,15 @@ func readExposurePassword(stdin io.Reader, stderr io.Writer) ([]byte, error) {
 		clear(line)
 		return nil, fmt.Errorf("读取 Web 管理员密码失败：%w", err)
 	}
-	password := bytes.TrimRight(line, "\r\n")
+	password := line
+	// Strip only the line terminator. A literal trailing CR in a piped
+	// password is part of the password, not a terminator.
+	if len(password) > 0 && password[len(password)-1] == '\n' {
+		password = password[:len(password)-1]
+		if len(password) > 0 && password[len(password)-1] == '\r' {
+			password = password[:len(password)-1]
+		}
+	}
 	if len(password) == 0 {
 		clear(line)
 		return nil, errors.New("未输入 Web 管理员密码")
