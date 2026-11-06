@@ -287,6 +287,19 @@ func (m *mappingManager) notifyExposureUpdate(sess *clientSession, result view.M
 	if sess == nil || !sess.exposureCapability() {
 		return
 	}
+	// Registration publishes the session before hello_ack is written. A switch
+	// that wins the race for controlMu must not put exposure_update on the wire
+	// first: the client handshake accepts only hello_ack. The ack writer does
+	// not need controlMu, so waiting here cannot deadlock. A timed-out wait is
+	// safe because the committed exposure is carried by the next HelloAck.
+	if err := sess.waitReady(pushReadyTimeout); err != nil {
+		m.log.Warn("skip exposure update: control session not ready",
+			"client", sess.id,
+			"mapping", result.ID,
+			"error", err,
+		)
+		return
+	}
 	update := &control.ExposureUpdate{
 		Type:                control.TypeExposureUpdate,
 		ID:                  result.ID,

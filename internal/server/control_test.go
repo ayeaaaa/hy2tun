@@ -319,12 +319,136 @@ func TestExposureCapability(t *testing.T) {
 	require.True(t, ok, "capable client must receive exposure_update, got %T", msg)
 	require.Equal(t, "m1", update.ID)
 	require.Equal(t, "local", update.Exposure)
-	require.Empty(t, update.UnavailableFamilies)
+	// Local exposure binds both loopbacks. A host without IPv6 loopback
+	// legitimately reports the ipv6 warning, so only reject IPv4 warnings.
+	for _, family := range update.UnavailableFamilies {
+		require.Equal(t, "ipv6", family)
+	}
 
 	client, ok := srv.Client("exposure-client")
 	require.True(t, ok)
 	require.Len(t, client.Mappings, 1)
 	require.Equal(t, view.ExposureLocal, client.Mappings[0].Exposure)
+}
+
+// TestExposureUpdateWaitsForHelloAck holds a published session before its
+// HelloAck is written and proves the exposure update cannot overtake the
+// handshake frame.
+func TestExposureUpdateWaitsForHelloAck(t *testing.T) {
+	srv, stop := startTestServer(t)
+	defer stop()
+
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	sess := &clientSession{
+		id:     "ready-client",
+		online: true,
+		conn:   serverConn,
+		ready:  make(chan struct{}),
+		done:   make(chan struct{}),
+	}
+	sess.setExposureCapability(true)
+	results := srv.mappings.register(sess, []config.Mapping{
+		{ID: "m1", Type: "tcp", RemotePort: 0, LocalAddr: "127.0.0.1:9001", Enabled: true},
+	})
+	require.Len(t, results, 1)
+	require.True(t, results[0].OK)
+	defer sess.markDone()
+
+	switchDone := make(chan error, 1)
+	go func() {
+		_, err := srv.SetMappingExposure("ready-client", "m1", view.ExposureLocal)
+		switchDone <- err
+	}()
+
+	// Wait until the switch has committed, so the notifier is at (or past) the
+	// readiness gate before the absence check below.
+	require.NoError(t, waitFor(t, 2*time.Second, func() bool {
+		client, ok := srv.Client("ready-client")
+		return ok && len(client.Mappings) == 1 && client.Mappings[0].Exposure == view.ExposureLocal
+	}))
+
+	// The session is published but not ready. No frame may be written yet.
+	require.NoError(t, clientConn.SetReadDeadline(time.Now().Add(250*time.Millisecond)))
+	msg, err := control.ReadMessage(clientConn)
+	require.Error(t, err, "exposure_update was written before hello_ack: %T", msg)
+	require.NoError(t, clientConn.SetReadDeadline(time.Time{}))
+
+	// Simulate the real handshake writer: HelloAck first, then markReady.
+	ackDone := make(chan error, 1)
+	go func() {
+		err := control.WriteMessage(serverConn, &control.HelloAck{
+			Type: control.TypeHelloAck,
+			OK:   true,
+			Results: []control.Result{{
+				ID:       "m1",
+				OK:       true,
+				Exposure: "local",
+			}},
+		})
+		if err == nil {
+			close(sess.ready)
+		}
+		ackDone <- err
+	}()
+
+	msg, err = control.ReadMessage(clientConn)
+	require.NoError(t, err)
+	ack, ok := msg.(*control.HelloAck)
+	require.True(t, ok, "first frame must be hello_ack, got %T", msg)
+	require.True(t, ack.OK)
+	require.NoError(t, <-ackDone)
+
+	msg, err = control.ReadMessage(clientConn)
+	require.NoError(t, err)
+	update, ok := msg.(*control.ExposureUpdate)
+	require.True(t, ok, "second frame must be exposure_update, got %T", msg)
+	require.Equal(t, "m1", update.ID)
+	require.Equal(t, "local", update.Exposure)
+	require.NoError(t, <-switchDone)
+}
+
+// TestExposureUpdateCarriesWarnings covers the server-side frame for a mapping
+// that serves on one family while the other is unavailable.
+func TestExposureUpdateCarriesWarnings(t *testing.T) {
+	srv, stop := startTestServer(t)
+	defer stop()
+
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	ready := make(chan struct{})
+	close(ready)
+	sess := &clientSession{
+		id:     "warning-client",
+		online: true,
+		conn:   serverConn,
+		ready:  ready,
+		done:   make(chan struct{}),
+	}
+	sess.setExposureCapability(true)
+
+	go func() {
+		sess.controlMu.Lock()
+		defer sess.controlMu.Unlock()
+		srv.mappings.notifyExposureUpdate(sess, view.MappingView{
+			Mapping:             config.Mapping{ID: "m1"},
+			Exposure:            view.ExposureLocal,
+			UnavailableFamilies: []string{"ipv6"},
+		})
+	}()
+
+	require.NoError(t, clientConn.SetReadDeadline(time.Now().Add(2*time.Second)))
+	msg, err := control.ReadMessage(clientConn)
+	require.NoError(t, err)
+	update, ok := msg.(*control.ExposureUpdate)
+	require.True(t, ok, "expected exposure_update, got %T", msg)
+	require.Equal(t, "m1", update.ID)
+	require.Equal(t, "local", update.Exposure)
+	require.Equal(t, []string{"ipv6"}, update.UnavailableFamilies)
 }
 
 func TestExposureUpdateOldClient(t *testing.T) {
