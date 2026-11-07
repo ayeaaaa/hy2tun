@@ -818,14 +818,17 @@ func TestMappingExposurePersistReleasesManagerLock(t *testing.T) {
 	}
 
 	// The manager lock must be free while the state fsync is in progress.
-	acquired := make(chan struct{})
+	acquired := make(chan bool, 1)
 	go func() {
-		env.manager.mu.Lock()
-		env.manager.mu.Unlock()
-		close(acquired)
+		ok := env.manager.mu.TryLock()
+		if ok {
+			env.manager.mu.Unlock()
+		}
+		acquired <- ok
 	}()
 	select {
-	case <-acquired:
+	case ok := <-acquired:
+		require.True(t, ok, "m.mu was held across exposure persistence")
 	case <-time.After(time.Second):
 		t.Fatal("m.mu was held across exposure persistence")
 	}
@@ -1124,7 +1127,7 @@ func TestMappingExposureAllBindPaths(t *testing.T) {
 		newPort := freeExposureTCPPort(t)
 		next[0].RemotePort = newPort
 		next[0].Note = "pushed-rebind"
-		revision, err = pair.Server.PushMappings(clientID, revision, next)
+		_, err = pair.Server.PushMappings(clientID, revision, next)
 		require.NoError(t, err)
 		rebound := snapshotTestRuntime(t, pair.Server, clientID, "m1")
 		require.Equal(t, newPort, rebound.assignedPort)

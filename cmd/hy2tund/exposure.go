@@ -64,7 +64,7 @@ func runExposure(args []string, stdin io.Reader, stdout, stderr io.Writer) error
 		return err
 	}
 	if strings.TrimSpace(cfg.Web.Listen) == "" {
-		return fmt.Errorf("Web 控制台未启用：%s 中 web.listen 为空", opts.configPath)
+		return fmt.Errorf("web 控制台未启用：%s 中 web.listen 为空", opts.configPath)
 	}
 
 	useTLS := cfg.Web.TLS.Cert != "" && cfg.Web.TLS.Key != ""
@@ -154,7 +154,7 @@ func parseExposureArgs(args []string, stderr io.Writer) (exposureOptions, error)
 func resolveWebTargets(listen string, useTLS bool) ([]string, error) {
 	listen = strings.TrimSpace(listen)
 	if listen == "" {
-		return nil, errors.New("Web 控制台未启用：web.listen 为空")
+		return nil, errors.New("web 控制台未启用：web.listen 为空")
 	}
 	host, port, err := net.SplitHostPort(listen)
 	if err != nil {
@@ -279,7 +279,7 @@ func loginExposureTargets(client *http.Client, targets []string, username string
 		if errors.As(err, &httpErr) {
 			// The host answered. Trying another loopback address would hide a
 			// real authentication or server error.
-			return "", fmt.Errorf("Web 登录失败：%w", err)
+			return "", fmt.Errorf("web 登录失败：%w", err)
 		}
 		failures = append(failures, fmt.Sprintf("%s：%v", baseURL, err))
 	}
@@ -344,7 +344,7 @@ func loginExposure(client *http.Client, baseURL, username string, password []byt
 		return fmt.Errorf("解析 Web 控制台地址失败：%w", err)
 	}
 	if client.Jar == nil || len(client.Jar.Cookies(parsed)) == 0 {
-		return errors.New("Web 登录成功但未收到会话 Cookie")
+		return errors.New("web 登录成功但未收到会话 Cookie")
 	}
 	return nil
 }

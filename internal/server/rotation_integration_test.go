@@ -313,15 +313,6 @@ func doWebJSON(t *testing.T, client *http.Client, method, webAddr, path string, 
 	return resp
 }
 
-// readWebBody reads and closes a response body.
-func readWebBody(t *testing.T, resp *http.Response) string {
-	t.Helper()
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	return string(data)
-}
-
 // TestManualRotationViaClientWebEndToEnd proves the manual path: the server
 // rotates without pushing, the client keeps its old config until an operator
 // submits the new generation through the client web API, then reconnects and
