@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"hy2tun/internal/view"
@@ -299,18 +298,6 @@ func listenUDPFamily(family string, v6only bool, addr string) (*net.UDPConn, err
 		return nil, fmt.Errorf("unexpected %s packet connection %T", network, packetConn)
 	}
 	return conn, nil
-}
-
-// setIPv6Only prevents an IPv6 wildcard socket from also claiming the IPv4
-// wildcard port, so the two family sockets can coexist on one assigned port.
-func setIPv6Only(_, _ string, raw syscall.RawConn) error {
-	var sockErr error
-	if err := raw.Control(func(fd uintptr) {
-		sockErr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1)
-	}); err != nil {
-		return err
-	}
-	return sockErr
 }
 
 // udpPacketConn is the subset of *net.UDPConn used by publicUDPConn and the
