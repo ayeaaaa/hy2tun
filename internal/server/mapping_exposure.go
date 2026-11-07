@@ -66,8 +66,10 @@ func (e *ExposureInvalidError) InvalidExposure() bool { return true }
 // ExposureSwitchError reports a live exposure switch that could not be applied.
 // Exposure is the exposure still active after rollback (or the previous
 // exposure when the mapping is left closed), and Closed reports that no
-// listener remains. Persistence distinguishes a state-save failure (500) from
-// a bind/rollback conflict (409). It never contains secret material.
+// listener remains. Persistence records whether the original failure was a
+// state save rather than a bind/rollback error; both are reported as 409 with
+// the retained active state because the API must never hide what remains
+// exposed. It never contains secret material.
 type ExposureSwitchError struct {
 	Requested           view.Exposure
 	Exposure            view.Exposure
@@ -100,11 +102,12 @@ func (e *ExposureSwitchError) Unwrap() error {
 	return e.Err
 }
 
-// ExposureConflict marks a bind/rollback conflict for cross-package
-// classification. Persistence failures return false so the API can map them to
-// 500 rather than 409.
+// ExposureConflict marks a failed switch for cross-package classification.
+// Persistence failures also carry the active state that remains in effect, so
+// they are conflicts too; only errors without a known exposure/listener state
+// fall through to 500.
 func (e *ExposureSwitchError) ExposureConflict() bool {
-	return e != nil && !e.Persistence
+	return e != nil
 }
 
 // ActiveExposure returns the exposure that remains active after rollback.
@@ -127,6 +130,68 @@ func (e *ExposureSwitchError) ActiveUnavailableFamilies() []string {
 // MappingClosed reports whether the rollback also failed and left the mapping
 // without listeners.
 func (e *ExposureSwitchError) MappingClosed() bool {
+	return e != nil && e.Closed
+}
+
+// ExposurePersistError reports a desired-exposure save failure for a mapping
+// that has no live listener to switch (offline client, disabled mapping, or
+// already-closed runtime). Exposure is the previously stored value that
+// remains in effect, and Closed reports that no listener is active. It is a
+// conflict for the Web API because the caller must be able to report what
+// stayed in effect instead of a generic 500.
+type ExposurePersistError struct {
+	Requested           view.Exposure
+	Exposure            view.Exposure
+	UnavailableFamilies []string
+	Closed              bool
+	Err                 error
+}
+
+func (e *ExposurePersistError) Error() string {
+	if e == nil {
+		return "persist mapping exposure failed"
+	}
+	requested := exposureOrDefault(e.Requested)
+	stateText := fmt.Sprintf("mapping remains %s", exposureOrDefault(e.Exposure))
+	if e.Closed {
+		stateText = "mapping has no listener"
+	}
+	if e.Err != nil {
+		return fmt.Sprintf("persist mapping exposure %s: %s: %v", requested, stateText, e.Err)
+	}
+	return fmt.Sprintf("persist mapping exposure %s: %s", requested, stateText)
+}
+
+// Unwrap returns the persistence failure.
+func (e *ExposurePersistError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// ExposureConflict marks the failure for cross-package 409 classification.
+func (e *ExposurePersistError) ExposureConflict() bool { return e != nil }
+
+// ActiveExposure returns the exposure that remains in effect.
+func (e *ExposurePersistError) ActiveExposure() view.Exposure {
+	if e == nil {
+		return ""
+	}
+	return exposureOrDefault(e.Exposure)
+}
+
+// ActiveUnavailableFamilies returns a copy of the families that remain
+// unavailable.
+func (e *ExposurePersistError) ActiveUnavailableFamilies() []string {
+	if e == nil {
+		return nil
+	}
+	return append([]string(nil), e.UnavailableFamilies...)
+}
+
+// MappingClosed reports whether the mapping currently has no listener.
+func (e *ExposurePersistError) MappingClosed() bool {
 	return e != nil && e.Closed
 }
 
@@ -339,28 +404,42 @@ func (m *mappingManager) setStoredExposureLocked(clientID, mappingID string, exp
 	if !found {
 		return view.MappingView{}, &MappingNotFoundError{ClientID: clientID, MappingID: mappingID}
 	}
-	if err := m.persistExposure(clientID, mappingID, exposure); err != nil {
-		return view.MappingView{}, fmt.Errorf("persist mapping exposure: %w", err)
-	}
-
+	previous := exposureOrDefault(view.Exposure(client.Exposures[mappingID]))
 	status := mappingStatusOffline
 	if !mapping.Enabled {
 		status = mappingStatusDisabled
 	}
-	return view.MappingView{
+	result := view.MappingView{
 		Mapping:      mapping,
 		Status:       status,
 		AssignedPort: mapping.RemotePort,
-		Exposure:     exposure,
-	}, nil
+		Exposure:     previous,
+	}
+	if err := m.persistExposure(clientID, mappingID, exposure); err != nil {
+		return result, &ExposurePersistError{
+			Requested: exposure,
+			Exposure:  previous,
+			Closed:    true,
+			Err:       err,
+		}
+	}
+	result.Exposure = exposure
+	return result, nil
 }
 
 // setStoredExposureForRuntimeLocked stores the desired exposure for a live
 // mapping that currently has no listener. The caller must hold m.mu and the
 // session's controlMu.
 func (m *mappingManager) setStoredExposureForRuntimeLocked(sess *clientSession, rt *mappingRuntime, exposure view.Exposure) (view.MappingView, error) {
+	previous := exposureOrDefault(rt.exposure)
 	if err := m.persistExposure(sess.id, rt.id, exposure); err != nil {
-		return mappingViewForRuntime(rt), fmt.Errorf("persist mapping exposure: %w", err)
+		return mappingViewForRuntime(rt), &ExposurePersistError{
+			Requested:           exposure,
+			Exposure:            previous,
+			UnavailableFamilies: mappingWarnings(rt),
+			Closed:              rt.listeners == nil,
+			Err:                 err,
+		}
 	}
 	rt.exposure = exposure
 	return mappingViewForRuntime(rt), nil

@@ -486,6 +486,18 @@ func TestExposureCLIConflict(t *testing.T) {
 			wantOutput: []string{"已关闭", "local"},
 			wantNoWarn: true,
 		},
+		{
+			name: "persistence_failure_retained",
+			body: `{
+				"error":"映射暴露范围切换失败，已保留当前状态",
+				"code":"exposure_conflict",
+				"active_exposure":"public",
+				"unavailable_families":[],
+				"closed":false
+			}`,
+			wantOutput: []string{"public"},
+			wantNoWarn: true,
+		},
 	}
 
 	for _, tc := range cases {

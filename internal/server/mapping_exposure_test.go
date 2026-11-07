@@ -485,7 +485,8 @@ func TestMappingExposureRollback(t *testing.T) {
 		require.Equal(t, view.ExposurePublic, switchErr.Exposure)
 		require.False(t, switchErr.Closed)
 		require.True(t, switchErr.Persistence)
-		require.False(t, switchErr.ExposureConflict())
+		require.True(t, switchErr.ExposureConflict(),
+			"a persistence failure must still report the retained active state as a conflict")
 		require.Equal(t, view.ExposurePublic, switched.Exposure)
 		require.True(t, active.closed.Load())
 
@@ -1300,6 +1301,66 @@ func TestExposureSwitchErrorUnwrap(t *testing.T) {
 		Persistence: true,
 		Err:         cause,
 	}
-	require.False(t, persistence.ExposureConflict())
+	require.True(t, persistence.ExposureConflict(),
+		"persistence failures are reported as 409 with the retained state")
 	require.True(t, persistence.Persistence)
+}
+
+func TestMappingExposureStoredPersistenceFailure(t *testing.T) {
+	t.Run("offline client", func(t *testing.T) {
+		env := newExposureEnv(t, "")
+		sess := newExposureSession("client")
+		port := freeExposureTCPPort(t)
+		mapping := config.Mapping{ID: "m1", Type: "tcp", RemotePort: port, LocalAddr: "127.0.0.1:9001", Enabled: true}
+
+		registerExposureMapping(t, env.manager, sess, mapping)
+		_, err := env.manager.SetExposure("client", "m1", view.ExposureLocal)
+		require.NoError(t, err)
+		env.manager.detach(sess)
+
+		// Removing the state directory makes the desired-exposure save fail
+		// before the rename. The offline mapping must keep its previous value.
+		require.NoError(t, os.RemoveAll(filepath.Dir(env.path)))
+		result, err := env.manager.SetExposure("client", "m1", view.ExposurePublic)
+		require.Error(t, err)
+		var persistErr *ExposurePersistError
+		require.ErrorAs(t, err, &persistErr)
+		require.Equal(t, view.ExposurePublic, persistErr.Requested)
+		require.Equal(t, view.ExposureLocal, persistErr.Exposure)
+		require.True(t, persistErr.Closed, "an offline mapping has no listener")
+		require.True(t, persistErr.ExposureConflict())
+		require.Equal(t, view.ExposureLocal, persistErr.ActiveExposure())
+		require.Empty(t, persistErr.ActiveUnavailableFamilies())
+		require.True(t, persistErr.MappingClosed())
+		require.Equal(t, view.ExposureLocal, result.Exposure)
+		require.Equal(t, "local", env.store.Exposure("client", "m1"),
+			"the failed save must leave the previous desired exposure in effect")
+	})
+
+	t.Run("disabled mapping", func(t *testing.T) {
+		env := newExposureEnv(t, "")
+		sess := newExposureSession("client")
+		port := freeExposureTCPPort(t)
+		mapping := config.Mapping{ID: "m1", Type: "tcp", RemotePort: port, LocalAddr: "127.0.0.1:9001", Enabled: true}
+
+		registerExposureMapping(t, env.manager, sess, mapping)
+		_, err := env.manager.SetExposure("client", "m1", view.ExposureLocal)
+		require.NoError(t, err)
+		disabled := mapping
+		disabled.Enabled = false
+		updateExposureMapping(t, env.manager, sess, 1, disabled)
+
+		require.NoError(t, os.RemoveAll(filepath.Dir(env.path)))
+		result, err := env.manager.SetExposure("client", "m1", view.ExposurePublic)
+		require.Error(t, err)
+		var persistErr *ExposurePersistError
+		require.ErrorAs(t, err, &persistErr)
+		require.Equal(t, view.ExposurePublic, persistErr.Requested)
+		require.Equal(t, view.ExposureLocal, persistErr.Exposure)
+		require.True(t, persistErr.Closed, "a disabled mapping has no listener")
+		require.True(t, persistErr.ExposureConflict())
+		require.Equal(t, mappingStatusDisabled, result.Status)
+		require.Equal(t, view.ExposureLocal, result.Exposure)
+		require.Equal(t, "local", env.store.Exposure("client", "m1"))
+	})
 }

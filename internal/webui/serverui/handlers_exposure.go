@@ -69,9 +69,9 @@ func (s *Server) handleMappingExposure(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeExposureError maps the server's typed failures onto the stable Web API
-// contract. A persistence failure carries the conflict marker but must be
-// reported as 500: the exposure change was not committed, and retrying the
-// request cannot resolve a storage error the way a bind conflict can.
+// contract. Bind/rollback conflicts and persistence failures both carry the
+// active exposure/listener state, so both are reported as 409
+// exposure_conflict; 500 is reserved for errors without that known state.
 func (s *Server) writeExposureError(w http.ResponseWriter, err error) {
 	var mappingNotFound mappingNotFoundMarker
 	if errors.As(err, &mappingNotFound) && mappingNotFound.MappingNotFound() {

@@ -87,15 +87,13 @@ func (e *fakeInvalidExposureError) Error() string {
 
 func (e *fakeInvalidExposureError) InvalidExposure() bool { return true }
 
-// fakeExposureSwitchError mirrors server.ExposureSwitchError, including the
-// persistence flag that must be classified as 500 rather than 409 and the
-// churn case that wraps control.ErrClientOffline but still knows the active
-// state.
+// fakeExposureSwitchError mirrors server.ExposureSwitchError. Every instance
+// carries the active state that must be reported as a 409 conflict, including
+// persistence failures and the churn case that wraps control.ErrClientOffline.
 type fakeExposureSwitchError struct {
 	active      view.Exposure
 	unavailable []string
 	closed      bool
-	persistence bool
 	err         error
 }
 
@@ -105,7 +103,7 @@ func (e *fakeExposureSwitchError) Error() string {
 
 func (e *fakeExposureSwitchError) Unwrap() error { return e.err }
 
-func (e *fakeExposureSwitchError) ExposureConflict() bool { return !e.persistence }
+func (e *fakeExposureSwitchError) ExposureConflict() bool { return true }
 
 func (e *fakeExposureSwitchError) ActiveExposure() view.Exposure {
 	if e.active == "" {
@@ -407,13 +405,12 @@ func TestExposureAPIInvalidAndConflict(t *testing.T) {
 		require.JSONEq(t, `true`, string(raw["closed"]))
 	})
 
-	t.Run("persistence failure is internal, not a conflict", func(t *testing.T) {
+	t.Run("persistence failure reports the retained active state as a conflict", func(t *testing.T) {
 		api := &fakeExposureAPI{
 			fakeServerAPI: &fakeServerAPI{},
 			err: &fakeExposureSwitchError{
 				active:      view.ExposureLocal,
 				unavailable: []string{"ipv6"},
-				persistence: true,
 				err:         errors.New("disk full"),
 			},
 		}
@@ -422,10 +419,16 @@ func TestExposureAPIInvalidAndConflict(t *testing.T) {
 
 		resp := doRequest(t, ts.Client(), http.MethodPut, exposureURL(ts, "c1", "m1"),
 			`{"exposure":"public"}`, cookie, csrfHeaders(ts.URL))
-		require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
-		payload := readJSON[map[string]string](t, resp)
-		require.Equal(t, "internal", payload["code"])
-		require.NotContains(t, payload["error"], "disk full")
+		require.Equal(t, http.StatusConflict, resp.StatusCode)
+		payload, raw := readExposureError(t, resp)
+		require.Equal(t, "exposure_conflict", payload.Code)
+		require.Equal(t, view.ExposureLocal, payload.ActiveExposure)
+		require.Equal(t, []string{"ipv6"}, payload.UnavailableFamilies)
+		require.NotNil(t, payload.Closed)
+		require.False(t, *payload.Closed)
+		require.JSONEq(t, `"local"`, string(raw["active_exposure"]))
+		require.JSONEq(t, `["ipv6"]`, string(raw["unavailable_families"]))
+		require.JSONEq(t, `false`, string(raw["closed"]))
 		require.Equal(t, 1, api.callCount())
 	})
 

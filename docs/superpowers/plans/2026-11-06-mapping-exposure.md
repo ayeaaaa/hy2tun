@@ -322,7 +322,7 @@ git commit -m "feat(control): propagate mapping exposure to capable clients"
   ```
 - Body: `{"exposure":"public"|"local"}`
 - Success: `200` with the updated `view.MappingView` (including `Exposure` and `UnavailableFamilies`).
-- Errors: `400 invalid_exposure`, `404 client/mapping not found`, `409 exposure_conflict` with the active exposure, `500 internal`.
+- Errors: `400 invalid_exposure`, `404 client/mapping not found`, `409 exposure_conflict` with the active exposure/listener state for bind, rollback, and persistence failures, and `500 internal` only for unexpected errors without a known active state.
 - Session + CSRF required; no current password.
 
 - [ ] **Step 1: Write failing API tests**
