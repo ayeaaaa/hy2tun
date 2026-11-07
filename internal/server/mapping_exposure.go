@@ -609,7 +609,8 @@ func finishUDPWrapperSwitch(public *publicUDPConn, rt *mappingRuntime) {
 // rollbackExposureLocked restores the previous exposure after a failed switch.
 // If the restore also fails the mapping stays closed and the error reports the
 // actual state instead of pretending the old listeners are active. persistence
-// classifies the original failure for the Web API (409 vs 500).
+// records the original cause for logs and tests; both bind and persistence
+// failures are reported as 409 with the retained state.
 func (m *mappingManager) rollbackExposureLocked(sess *clientSession, rt *mappingRuntime, oldExposure view.Exposure, port int, requested view.Exposure, cause error, persistence bool) (view.MappingView, error) {
 	restored, restoreErr := bindMappingListeners(oldExposure, m.bindHost, rt.mapping.Type, port)
 	if restoreErr != nil {
