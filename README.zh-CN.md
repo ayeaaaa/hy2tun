@@ -867,13 +867,16 @@ HTTP API 或 `hy2tund exposure` CLI 修改。见
 创建同一 ID 时从 `public` 开始。客户端控制台只读显示当前值和地址族警告；
 客户端不会把暴露范围写入 `client.yaml`，暴露范围更新也不会改变映射 revision。
 
-切换会重建该映射的监听并关闭现有 TCP 连接；公网 UDP socket 会被替换，反向
-UDP 会话会保留并重新挂接，因此可能短暂丢包，但不需要客户端重连。健康的同值
-请求不会重建；但如果映射仍有地址族警告，同值请求会重试并尝试清除警告。
+切换会重建该映射的监听并关闭现有 TCP 连接；公网 UDP socket 会被替换。HY2
+原生反向 UDP 会话会暂停并重新挂接，因此可能短暂丢包。在 `tcp` 模式或
+`hy2+tcp` 正在使用 TCP 时，UDP over TCP 会话可能被关闭并重新建立，因此
+客户端可能短暂重连/重新同步。健康的同值请求不会重建；但如果映射仍有地址族
+警告，同值请求会重试并尝试清除警告。
 某一地址族无法绑定时，另一族继续服务，警告中列出 `ipv4` 或 `ipv6`。
 两族都无法绑定时，在线切换会回滚到之前的有效暴露范围并报告；如果回滚绑定也
 失败，映射保持关闭。
-离线、禁用或已经关闭的映射只保存目标值，等下一次绑定生效，不做在线回滚。
+离线、禁用或已经关闭的映射只保存目标值，等下一次绑定生效，不做在线回滚；
+如果保存失败，API 返回 `409`，带上之前的值和 `closed: true`（当前没有监听）。
 
 服务端控制台：每条映射行有 `公网` / `仅本机` 按钮。切换前会确认，因为现有
 连接会关闭；只需要有效 Web 会话和 CSRF 头，不需要再次输入当前密码。
@@ -884,19 +887,21 @@ HTTP API：
 PUT /api/clients/{clientID}/mappings/{mappingID}/exposure
 Content-Type: application/json
 X-Requested-With: hy2tun
-Origin: http://127.0.0.1:7500
+Origin: https://console.example.com
 
 {"exposure":"local"}
 ```
 
+请把 `Origin` 替换为你实际打开控制台使用的 scheme 和 host；CSRF 要求它与
+请求完全匹配，CLI 会自动设置为目标 URL。
 `200` 返回该映射的原始映射对象（`view.MappingView`），包含 `Exposure` 和
 `UnavailableFamilies`（`null` 或空数组都表示没有警告）。GET 映射列表会把
 同一个对象包在 `mapping` 条目中，嵌套字段名相同。
 `400 invalid_exposure` / `invalid_body` 表示请求被拒绝；
 `404 client_not_found` / `mapping_not_found` 表示目标不存在；
 `409 exposure_conflict` 会带
-`active_exposure`、`unavailable_families` 和 `closed` 报告回滚后仍有效的状态；
-`500 internal` 表示持久化或内部错误。
+`active_exposure`、`unavailable_families` 和 `closed` 报告绑定、回滚或持久化
+失败后仍有效的状态；`500 internal` 仅用于没有已知有效状态的意外错误。
 
 CLI：
 
@@ -979,7 +984,9 @@ pin 仍会强制执行；只在理解风险的情况下使用。
 模式、回退时序、客户端名称、trust-proxy、端口策略、凭据轮换/撤销/显示，以及
 映射推送/删除/暴露范围——都只需要有效 Web 会话和 CSRF 头/Origin，不会再次
 要求输入密码。Web 管理员密码确认失败按客户端 IP 限制为每分钟五次。所有修改
-仍然需要 [安全模型](#安全模型) 中描述的 CSRF 头和同源 `Origin`。
+仍然需要 [安全模型](#安全模型) 中描述的 CSRF 头和同源 `Origin`。由于这些
+修改只依赖会话，被盗的会话也能执行它们；除非控制台位于可信代理之后，否则
+请保持 `web.trust_proxy` 关闭。
 
 ### 哪些设置可以在线编辑
 
@@ -991,7 +998,7 @@ pin 仍会强制执行；只在理解风险的情况下使用。
 | `mode` | 可以。会绑定或停用监听，并可能断开使用被停用传输的客户端。不需要重新输入密码。 |
 | `auth.password`、`control.token` | 在 `auth.type: password` 时可以。仅限轮换；见下文。 |
 | `ports.allow`、`ports.deny`、`ports.auto_range`、`ports.offline_reserve` | 可以。新的允许列表不再覆盖已经运行的映射时，不会关闭它们。`offline_reserve` 至少为 `1s`。 |
-| `web.trust_proxy` | 可以。立即应用于登录和设置确认限流。不需要重新输入密码。 |
+| `web.trust_proxy` | 可以。立即应用于登录和设置确认限流。不需要重新输入密码；它本身是会话认证的修改，除非控制台位于可信代理之后，否则请保持关闭。 |
 | 在线客户端的映射 | 可以。推送权威列表、删除映射，或修改单条映射的 `public`/`local` 暴露范围。离线客户端保持只读。 |
 | 离线客户端 | 可以。在客户端详情页删除；会移除持久化客户端、映射和软端口预约。在线客户端必须先断开。 |
 | `credentials.generation`、`credentials.previous_*` | 由轮换和撤销管理，不能在控制台直接编辑。 |
@@ -1511,6 +1518,11 @@ CSRF 防护，但 TLS 保护传输中的密码和会话 cookie。
 - HY2 凭据在 `GET /api/settings` 中掩码显示。显示端点需要有效 Web 会话和
   CSRF 头（不需要当前密码），返回 `Cache-Control: no-store`，从不把明文写入
   日志或 URL。只有修改 Web 管理员用户名/密码仍需要当前密码，并对失败确认限流。
+- 取消重新认证意味着被盗的已登录 Web 会话可以执行所有非 Web 管理员操作：
+  设置、凭据轮换和显示、映射推送/删除/暴露范围，以及启用 `web.trust_proxy`。
+  只有修改 Web 管理员用户名/密码仍需要当前密码，失败确认仍受速率限制。
+  `trust_proxy` 本身也是会话认证的修改，因此除非控制台位于会覆盖
+  `X-Forwarded-For` 和 `X-Real-IP` 两个头的可信代理之后，否则请保持关闭。
 - 热设置先持久化再生效。校验或文件写入失败会保持运行中的凭据集、端口策略
   和 Web 登录不变。
 - 轮换会保持上一代 HY2 凭据对有效，直到显式撤销或后续轮换替换它；撤销会

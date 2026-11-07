@@ -25,16 +25,28 @@ All notable changes to this project are documented here.
 
 - Mapping listeners now bind IPv4 and IPv6 independently. One unavailable
   family keeps the other serving and is reported; both failing is an error.
+- Exposure persistence failures now return `409 exposure_conflict` with the
+  retained `active_exposure`, `unavailable_families`, and `closed` state
+  instead of `500`.
 - A live exposure switch closes existing TCP connections, replaces the public
   UDP sockets, and rebuilds the listeners. A failed switch rolls back to the
   previous active exposure and reports it; if rollback also fails the mapping
   stays closed.
-- Reverse UDP sessions now survive a listener switch instead of requiring a
-  client reconnect.
+- Native HY2 reverse UDP sessions are paused and reattached to the new public
+  sockets during a listener switch, so datagrams may drop briefly. In `tcp`
+  mode, or while `hy2+tcp` is using TCP, UDP-over-TCP sessions may be closed
+  and re-established, so a brief client reconnect/resync is possible.
 - Current-password re-entry was removed from transport mode, failover timing,
   client name, trust-proxy, credential rotation, revoke, and reveal. Only
   changing the Web administrator username/password still requires it. Session
   authentication and CSRF remain mandatory.
+- Security note: removing re-authentication means a stolen authenticated Web
+  session can perform every non-Web-admin mutation, including credential
+  rotation/reveal and enabling `web.trust_proxy`. Only Web administrator
+  username/password changes still require the current password, and failed
+  Web-admin confirmations remain rate-limited. Because `trust_proxy` is itself
+  a session-authenticated mutation, keep it off unless the console is behind a
+  trusted proxy that overwrites both forwarding headers.
 
 ## v1.6.4 - 2026-11-06
 

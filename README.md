@@ -984,15 +984,19 @@ value and any family warning read-only; the client never writes exposure to
 update.
 
 A change rebuilds the mapping listeners and closes existing TCP connections
-for that mapping. The public UDP sockets are replaced; the reverse UDP session
-is kept and reattached, so datagrams may drop briefly but no client reconnect
-is required. A healthy same-value request is a no-op, except that it retries a
-mapping that still has an unavailable-family warning. If one address family
+for that mapping. The public UDP sockets are replaced. Native HY2 reverse UDP
+sessions are paused and reattached, so datagrams may drop briefly. In `tcp`
+mode, or while `hy2+tcp` is using TCP, UDP-over-TCP sessions may be closed and
+re-established, so a brief client reconnect/resync is possible. A healthy
+same-value request is a no-op, except that it retries a mapping that still has
+an unavailable-family warning. If one address family
 cannot bind, the other keeps serving and the warning lists `ipv4` or `ipv6`.
 If neither family binds, a live switch rolls back to the
 previous active exposure and reports it; if the rollback bind also fails, the
 mapping stays closed. Offline, disabled, or already-closed mappings store the
-requested value for the next bind instead of rolling back.
+requested value for the next bind instead of rolling back; if that store fails,
+the API reports `409` with the previous value and `closed: true` because no
+listener is active.
 
 Server console: each mapping row has a `公网` / `仅本机` button. It asks for
 confirmation because connections close, and requires only the Web session and
@@ -1004,11 +1008,13 @@ HTTP API:
 PUT /api/clients/{clientID}/mappings/{mappingID}/exposure
 Content-Type: application/json
 X-Requested-With: hy2tun
-Origin: http://127.0.0.1:7500
+Origin: https://console.example.com
 
 {"exposure":"local"}
 ```
 
+Replace `Origin` with the scheme and host you use to open the console; CSRF
+requires it to match the request exactly. The CLI sets it to the target URL.
 A `200` response is the raw mapping object (`view.MappingView`) for that
 mapping, including `Exposure` and `UnavailableFamilies` (`null` or an empty
 array means no warning). The GET mapping list wraps the same object in a
@@ -1016,8 +1022,9 @@ array means no warning). The GET mapping list wraps the same object in a
 `invalid_body` means the request was
 rejected; `404 client_not_found` or `mapping_not_found` means the target does
 not exist; `409 exposure_conflict` reports the state that remains active with
-`active_exposure`, `unavailable_families`, and `closed`; `500 internal` covers
-unexpected persistence or internal failures.
+`active_exposure`, `unavailable_families`, and `closed` for bind, rollback,
+and persistence failures; `500 internal` is reserved for unexpected errors
+without a known active state.
 
 CLI:
 
@@ -1112,7 +1119,9 @@ rotation/revoke/reveal, and mapping push/delete/exposure — requires a valid We
 session and the CSRF header/Origin but no password re-entry. Failed
 Web-administrator password confirmations are rate-limited to five per minute
 per client IP. All mutations require the CSRF header and same-origin `Origin`
-described in [Security model](#security-model).
+described in [Security model](#security-model). Because these mutations rely on
+the session alone, a stolen session can change them; keep `web.trust_proxy`
+off unless the console is behind a trusted proxy.
 
 ### Which settings are online-editable
 
@@ -1124,7 +1133,7 @@ described in [Security model](#security-model).
 | `mode` | Yes. Binds or retires listeners and can disconnect clients using the retired transport. No password re-entry. |
 | `auth.password`, `control.token` | Yes, when `auth.type: password`. Rotation only; see below. |
 | `ports.allow`, `ports.deny`, `ports.auto_range`, `ports.offline_reserve` | Yes. Mappings already running are not closed when a new allow list no longer covers them. `offline_reserve` must be at least `1s`. |
-| `web.trust_proxy` | Yes. Applies immediately to login and settings-confirmation rate limiting. No password re-entry. |
+| `web.trust_proxy` | Yes. Applies immediately to login and settings-confirmation rate limiting. No password re-entry; it is a session-authenticated mutation, so keep it off unless the console is behind a trusted proxy. |
 | Mappings of online clients | Yes. Push an authoritative list, delete a mapping, or change one mapping's `public`/`local` exposure. Offline clients stay read-only. |
 | Offline clients | Yes. Delete from the client detail page; removes the persisted client, mappings, and soft port reservations. Online clients must disconnect first. |
 | `credentials.generation`, `credentials.previous_*` | Managed by rotation and revoke. Not edited directly in the console. |
@@ -1715,6 +1724,14 @@ the password and session cookie in transit.
   returns `Cache-Control: no-store`, and never writes plaintext to logs or
   URLs. Only Web administrator username/password changes still require the
   current password; those failures are rate-limited.
+- Removing password re-entry means a stolen authenticated Web session can
+  perform every non-Web-admin mutation: settings, credential rotation and
+  reveal, mapping push/delete/exposure, and enabling `web.trust_proxy`. Only
+  Web administrator username/password changes still require the current
+  password, and failed confirmations remain rate-limited. Because
+  `trust_proxy` is itself a session-authenticated mutation, keep it `false`
+  unless the console is behind a trusted proxy that overwrites both
+  `X-Forwarded-For` and `X-Real-IP`.
 - Hot settings are persisted before they take effect. A failed validation or
   file write leaves the running credential set, port policy, and web login
   unchanged.
