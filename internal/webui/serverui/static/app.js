@@ -830,12 +830,21 @@
           return false;
         }
         if (!response.ok) {
-          showDrawerError(pushErrorMessage(response.status, payload));
-          // A two-phase add can commit the disabled mapping before a later
-          // exposure/enable step fails. Refresh the detail revision so the
-          // drawer can retry instead of repeatedly conflicting, and show the
-          // actual partially applied row.
-          await refreshDetail(clientId, true);
+          const message = pushErrorMessage(response.status, payload);
+          const partial = Boolean(payload && payload.partial);
+          if (partial) {
+            // The mapping list was committed but a later exposure/enable step
+            // failed. Close the add drawer so a retry cannot create a second
+            // orphan mapping, and show the partially applied row after refresh.
+            closeDrawer();
+            showToast(message, "bad");
+          } else {
+            showDrawerError(message);
+          }
+          const refreshed = await refreshDetail(clientId, true);
+          if (!refreshed) {
+            window.location.reload();
+          }
           return false;
         }
         closeDrawer();
