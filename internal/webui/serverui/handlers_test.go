@@ -33,6 +33,11 @@ import (
 var testSessionKey = []byte("0123456789abcdef0123456789abcdef")
 
 // fakeServerAPI is the in-memory server API used by the handler tests.
+type pushCall struct {
+	base     int64
+	mappings []config.Mapping
+}
+
 type fakeServerAPI struct {
 	mu sync.Mutex
 
@@ -51,6 +56,7 @@ type fakeServerAPI struct {
 	pushID       string
 	pushBase     int64
 	pushMappings []config.Mapping
+	pushCalls    []pushCall
 
 	settings SettingsView
 
@@ -133,6 +139,10 @@ func (f *fakeServerAPI) PushMappings(id string, baseRevision int64, mappings []c
 	f.pushID = id
 	f.pushBase = baseRevision
 	f.pushMappings = append([]config.Mapping(nil), mappings...)
+	f.pushCalls = append(f.pushCalls, pushCall{
+		base:     baseRevision,
+		mappings: append([]config.Mapping(nil), mappings...),
+	})
 	if f.pushErr != nil {
 		return 0, f.pushErr
 	}

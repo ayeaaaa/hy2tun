@@ -4,6 +4,15 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Added
+
+- The server console's mapping add/edit drawer now includes an exposure
+  selector. A new enabled mapping set to `local` is first pushed disabled,
+  then switched to local, then pushed enabled, so it never binds a public
+  listener before the intended local bind.
+
 ## v1.7.0 - 2026-11-07
 
 ### Added

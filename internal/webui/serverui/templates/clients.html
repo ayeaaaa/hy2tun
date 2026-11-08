@@ -84,6 +84,14 @@
         <span class="field-hint">客户端可访问的 host:port</span>
       </label>
       <label class="field">
+        <span class="field-label">暴露范围</span>
+        <select class="input select" id="mapping-exposure">
+          <option value="public">公网</option>
+          <option value="local">仅本机</option>
+        </select>
+        <span class="field-hint">仅本机只监听服务端 127.0.0.1 和 ::1，不对公网开放</span>
+      </label>
+      <label class="field">
         <span class="field-label">备注</span>
         <input class="input" type="text" id="mapping-note" maxlength="128" placeholder="可选">
         <span class="field-hint">最多 128 个字符</span>

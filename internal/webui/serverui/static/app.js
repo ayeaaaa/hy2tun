@@ -737,6 +737,7 @@
     const portInput = document.getElementById("mapping-port");
     const localInput = document.getElementById("mapping-local");
     const noteInput = document.getElementById("mapping-note");
+    const exposureInput = document.getElementById("mapping-exposure");
     const enabledInput = document.getElementById("mapping-enabled");
     const assigned = document.getElementById("mapping-assigned");
     const deleteButton = document.getElementById("mapping-delete");
@@ -773,6 +774,7 @@
       portInput.value = String(options.port || 0);
       localInput.value = options.local || "";
       noteInput.value = options.note || "";
+      exposureInput.value = options.exposure === "local" ? "local" : "public";
       enabledInput.checked = options.enabled !== false;
       assigned.textContent = options.assigned ? String(options.assigned) : "—";
       deleteButton.hidden = options.mode !== "edit";
@@ -796,7 +798,7 @@
     };
 
     let saving = false;
-    const pushMappings = async (clientId, baseRevision, mappings) => {
+    const pushMappings = async (clientId, baseRevision, mappings, exposures = {}) => {
       if (saving) {
         return false;
       }
@@ -813,7 +815,9 @@
             "X-Requested-With": "hy2tun",
           },
           credentials: "same-origin",
-          body: JSON.stringify({ base_revision: baseRevision, mappings }),
+          body: JSON.stringify(Object.keys(exposures).length > 0
+            ? { base_revision: baseRevision, mappings, exposures }
+            : { base_revision: baseRevision, mappings }),
         });
         let payload = null;
         try {
@@ -898,6 +902,7 @@
           port: 0,
           local: "",
           note: "",
+          exposure: "public",
           enabled: true,
           assigned: 0,
         });
@@ -920,6 +925,7 @@
           port: Number(row.dataset.mappingPort || 0),
           local: row.dataset.mappingLocal || "",
           note: row.dataset.mappingNote || "",
+          exposure: row.dataset.exposure === "local" ? "local" : "public",
           enabled: row.dataset.mappingEnabled === "true",
           assigned: Number(row.dataset.mappingAssigned || 0),
         });
@@ -979,7 +985,26 @@
       } else {
         mappings.push(mapping);
       }
-      await pushMappings(detail.dataset.clientId, Number(detail.dataset.revision || 0), mappings);
+
+      const requestedExposure = exposureInput.value === "local" ? "local" : "public";
+      const exposures = {};
+      if (!mappingId) {
+        exposures[mapping.id] = requestedExposure;
+      } else {
+        const row = detail.querySelector(
+          `tr[data-mapping-id="${escapeSelector(mappingId)}"]`
+        );
+        const currentExposure = row && row.dataset.exposure === "local" ? "local" : "public";
+        if (currentExposure !== requestedExposure) {
+          exposures[mapping.id] = requestedExposure;
+        }
+      }
+      await pushMappings(
+        detail.dataset.clientId,
+        Number(detail.dataset.revision || 0),
+        mappings,
+        exposures
+      );
     });
 
     deleteButton.addEventListener("click", async () => {

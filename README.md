@@ -998,9 +998,12 @@ requested value for the next bind instead of rolling back; if that store fails,
 the API reports `409` with the previous value and `closed: true` because no
 listener is active.
 
-Server console: each mapping row has a `公网` / `仅本机` button. It asks for
-confirmation because connections close, and requires only the Web session and
-CSRF header, not the current password.
+Server console: each mapping row has a `公网` / `仅本机` button, and the
+mapping add/edit drawer also includes an exposure selector. The row button
+asks for confirmation because connections close; both paths require only the
+Web session and CSRF header, not the current password. Adding an enabled
+`local` mapping pushes it disabled first, then switches to local, then enables
+it, so it never binds publicly.
 
 HTTP API:
 

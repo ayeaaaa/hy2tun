@@ -13,11 +13,13 @@ import (
 
 	"hy2tun/internal/config"
 	"hy2tun/internal/control"
+	"hy2tun/internal/view"
 )
 
 type pushRequest struct {
-	BaseRevision int64            `json:"base_revision"`
-	Mappings     []config.Mapping `json:"mappings"`
+	BaseRevision int64                    `json:"base_revision"`
+	Mappings     []config.Mapping         `json:"mappings"`
+	Exposures    map[string]view.Exposure `json:"exposures,omitempty"`
 }
 
 type pushResponse struct {
@@ -64,13 +66,139 @@ func (s *Server) handlePushMappings(w http.ResponseWriter, r *http.Request) {
 		writeJSONErrorCode(w, http.StatusBadRequest, "invalid_mapping", err.Error())
 		return
 	}
+	if err := validatePushExposures(request.Mappings, request.Exposures); err != nil {
+		writeJSONErrorCode(w, http.StatusBadRequest, "invalid_exposure", err.Error())
+		return
+	}
 
-	revision, err := s.api.PushMappings(clientID, request.BaseRevision, request.Mappings)
+	if len(request.Exposures) == 0 {
+		s.pushMappings(w, clientID, request.BaseRevision, request.Mappings)
+		return
+	}
+
+	exposureAPI, ok := s.api.(ExposureAPI)
+	if !ok {
+		writeJSONErrorCode(w, http.StatusNotImplemented, "not_implemented",
+			"当前服务端 API 不支持新增映射时设置暴露范围")
+		return
+	}
+	current, ok := s.api.Client(clientID)
+	if !ok {
+		writeJSONErrorCode(w, http.StatusNotFound, "client_not_found", "客户端不存在")
+		return
+	}
+
+	// A newly added mapping that must be local and enabled cannot be pushed
+	// enabled first: the server would bind its default public listeners before
+	// the exposure switch. Push it disabled, persist local, then push the final
+	// enabled list. This keeps local a hard boundary from the first bind.
+	firstMappings := append([]config.Mapping(nil), request.Mappings...)
+	var preLocal []string
+	for i, mapping := range firstMappings {
+		if mapping.Enabled && request.Exposures[mapping.ID] == view.ExposureLocal &&
+			!clientHasMapping(current, mapping.ID) {
+			firstMappings[i].Enabled = false
+			preLocal = append(preLocal, mapping.ID)
+		}
+	}
+
+	revision := request.BaseRevision
+	if len(preLocal) > 0 {
+		var err error
+		revision, err = s.api.PushMappings(clientID, request.BaseRevision, firstMappings)
+		if err != nil {
+			s.writePushError(w, err)
+			return
+		}
+		for _, mappingID := range preLocal {
+			if _, err := exposureAPI.SetMappingExposure(clientID, mappingID, view.ExposureLocal); err != nil {
+				s.writeExposureError(w, err)
+				return
+			}
+		}
+	}
+
+	revision, err := s.api.PushMappings(clientID, revision, request.Mappings)
+	if err != nil {
+		s.writePushError(w, err)
+		return
+	}
+
+	// Apply all remaining exposure decisions after the mapping list is in its
+	// final shape. New public mappings are explicit so a stale deleted-ID
+	// exposure cannot leak into the recreated mapping.
+	for mappingID, exposure := range request.Exposures {
+		if containsString(preLocal, mappingID) {
+			continue
+		}
+		if currentMapping, exists := findClientMapping(current, mappingID); exists &&
+			exposureOrDefault(currentMapping.Exposure) == exposure {
+			continue
+		}
+		if _, err := exposureAPI.SetMappingExposure(clientID, mappingID, exposure); err != nil {
+			s.writeExposureError(w, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, pushResponse{Revision: revision})
+}
+
+func (s *Server) pushMappings(w http.ResponseWriter, clientID string, baseRevision int64, mappings []config.Mapping) {
+	revision, err := s.api.PushMappings(clientID, baseRevision, mappings)
 	if err != nil {
 		s.writePushError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, pushResponse{Revision: revision})
+}
+
+func validatePushExposures(mappings []config.Mapping, exposures map[string]view.Exposure) error {
+	if len(exposures) == 0 {
+		return nil
+	}
+	known := make(map[string]struct{}, len(mappings))
+	for _, mapping := range mappings {
+		known[mapping.ID] = struct{}{}
+	}
+	for mappingID, exposure := range exposures {
+		if _, ok := known[mappingID]; !ok {
+			return fmt.Errorf("exposures.%s 不对应任何映射", mappingID)
+		}
+		if !exposure.Valid() {
+			return fmt.Errorf("exposures.%s 必须是 public 或 local", mappingID)
+		}
+	}
+	return nil
+}
+
+func clientHasMapping(client view.ClientView, mappingID string) bool {
+	_, ok := findClientMapping(client, mappingID)
+	return ok
+}
+
+func findClientMapping(client view.ClientView, mappingID string) (view.MappingView, bool) {
+	for _, mapping := range client.Mappings {
+		if mapping.ID == mappingID {
+			return mapping, true
+		}
+	}
+	return view.MappingView{}, false
+}
+
+func exposureOrDefault(exposure view.Exposure) view.Exposure {
+	if exposure == "" {
+		return view.ExposurePublic
+	}
+	return exposure
+}
+
+func containsString(values []string, value string) bool {
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
 }
 
 func validatePushMappings(mappings []config.Mapping) error {
