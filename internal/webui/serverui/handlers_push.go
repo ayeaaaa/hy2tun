@@ -39,6 +39,17 @@ type pushErrorResponse struct {
 	Results []pushResult `json:"results,omitempty"`
 }
 
+// partialApplyResponse tells the browser that the mapping list changed but a
+// later exposure/enable transaction failed. Revision lets the open drawer
+// refresh and retry against the new state instead of getting a revision
+// conflict.
+type partialApplyResponse struct {
+	Error    string `json:"error"`
+	Code     string `json:"code"`
+	Revision int64  `json:"revision"`
+	Partial  bool   `json:"partial"`
+}
+
 func (s *Server) handlePushMappings(w http.ResponseWriter, r *http.Request) {
 	clientID := r.PathValue("id")
 	if clientID == "" {
@@ -95,8 +106,9 @@ func (s *Server) handlePushMappings(w http.ResponseWriter, r *http.Request) {
 	firstMappings := append([]config.Mapping(nil), request.Mappings...)
 	var preLocal []string
 	for i, mapping := range firstMappings {
+		currentMapping, exists := findClientMapping(current, mapping.ID)
 		if mapping.Enabled && request.Exposures[mapping.ID] == view.ExposureLocal &&
-			!clientHasMapping(current, mapping.ID) {
+			(!exists || currentMapping.Status != "running") {
 			firstMappings[i].Enabled = false
 			preLocal = append(preLocal, mapping.ID)
 		}
@@ -112,15 +124,20 @@ func (s *Server) handlePushMappings(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, mappingID := range preLocal {
 			if _, err := exposureAPI.SetMappingExposure(clientID, mappingID, view.ExposureLocal); err != nil {
-				s.writeExposureError(w, err)
+				s.writePartialApply(w, revision, "映射已创建为禁用状态，暴露范围设置失败，请刷新后继续", err)
 				return
 			}
 		}
 	}
 
+	partialRevision := revision
 	revision, err := s.api.PushMappings(clientID, revision, request.Mappings)
 	if err != nil {
-		s.writePushError(w, err)
+		if len(preLocal) > 0 {
+			s.writePartialApply(w, partialRevision, "映射已创建为禁用状态，启用推送失败，请刷新后继续", err)
+		} else {
+			s.writePushError(w, err)
+		}
 		return
 	}
 
@@ -136,11 +153,21 @@ func (s *Server) handlePushMappings(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if _, err := exposureAPI.SetMappingExposure(clientID, mappingID, exposure); err != nil {
-			s.writeExposureError(w, err)
+			s.writePartialApply(w, revision, "映射已更新，但暴露范围设置失败，请刷新后继续", err)
 			return
 		}
 	}
 	writeJSON(w, http.StatusOK, pushResponse{Revision: revision})
+}
+
+func (s *Server) writePartialApply(w http.ResponseWriter, revision int64, message string, err error) {
+	s.log.Warn("mapping push partially applied", "revision", revision, "error", err)
+	writeJSON(w, http.StatusConflict, partialApplyResponse{
+		Error:    message,
+		Code:     "partial_apply",
+		Revision: revision,
+		Partial:  true,
+	})
 }
 
 func (s *Server) pushMappings(w http.ResponseWriter, clientID string, baseRevision int64, mappings []config.Mapping) {
@@ -169,11 +196,6 @@ func validatePushExposures(mappings []config.Mapping, exposures map[string]view.
 		}
 	}
 	return nil
-}
-
-func clientHasMapping(client view.ClientView, mappingID string) bool {
-	_, ok := findClientMapping(client, mappingID)
-	return ok
 }
 
 func findClientMapping(client view.ClientView, mappingID string) (view.MappingView, bool) {

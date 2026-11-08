@@ -57,6 +57,8 @@ type fakeServerAPI struct {
 	pushBase     int64
 	pushMappings []config.Mapping
 	pushCalls    []pushCall
+	events       []string
+	pushHook     func(call int, mappings []config.Mapping) error
 
 	settings SettingsView
 
@@ -143,8 +145,14 @@ func (f *fakeServerAPI) PushMappings(id string, baseRevision int64, mappings []c
 		base:     baseRevision,
 		mappings: append([]config.Mapping(nil), mappings...),
 	})
+	f.events = append(f.events, "push")
 	if f.pushErr != nil {
 		return 0, f.pushErr
+	}
+	if f.pushHook != nil {
+		if err := f.pushHook(f.pushes, mappings); err != nil {
+			return 0, err
+		}
 	}
 
 	revision := f.pushRevision

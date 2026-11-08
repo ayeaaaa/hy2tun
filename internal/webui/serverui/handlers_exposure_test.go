@@ -41,6 +41,7 @@ func (f *fakeExposureAPI) SetMappingExposure(clientID, mappingID string, exposur
 	f.clientID = clientID
 	f.mappingID = mappingID
 	f.exposure = exposure
+	f.events = append(f.events, "exposure")
 	if f.err != nil {
 		return view.MappingView{}, f.err
 	}

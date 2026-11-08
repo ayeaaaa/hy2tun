@@ -831,6 +831,11 @@
         }
         if (!response.ok) {
           showDrawerError(pushErrorMessage(response.status, payload));
+          // A two-phase add can commit the disabled mapping before a later
+          // exposure/enable step fails. Refresh the detail revision so the
+          // drawer can retry instead of repeatedly conflicting, and show the
+          // actual partially applied row.
+          await refreshDetail(clientId, true);
           return false;
         }
         closeDrawer();

@@ -2,6 +2,7 @@ package serverui
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -45,6 +46,8 @@ func TestServerWebAddMappingLocalExposureUsesDisabledFirstPush(t *testing.T) {
 	require.Equal(t, int64(2), result.Revision)
 
 	require.Len(t, api.pushCalls, 2, "local add must push disabled, set exposure, then push enabled")
+	require.Equal(t, []string{"push", "exposure", "push"}, api.events,
+		"exposure must be set between the disabled and enabled pushes")
 	require.Equal(t, int64(0), api.pushCalls[0].base)
 	require.False(t, api.pushCalls[0].mappings[0].Enabled, "the first push must not bind a public listener")
 	require.Equal(t, int64(1), api.pushCalls[1].base)
@@ -72,6 +75,7 @@ func TestServerWebAddMappingLocalDisabledPushesOnce(t *testing.T) {
 
 	require.Len(t, api.pushCalls, 1)
 	require.False(t, api.pushCalls[0].mappings[0].Enabled)
+	require.Equal(t, []string{"push", "exposure"}, api.events)
 	require.Equal(t, 1, api.callCount())
 	_, mappingID, exposure := api.lastCall()
 	require.Equal(t, "m1", mappingID)
@@ -99,10 +103,198 @@ func TestServerWebEditMappingExposureAfterPush(t *testing.T) {
 	resp.Body.Close()
 
 	require.Len(t, api.pushCalls, 1)
+	require.Equal(t, []string{"push", "exposure"}, api.events)
 	require.Equal(t, 1, api.callCount())
 	_, mappingID, exposure := api.lastCall()
 	require.Equal(t, "m1", mappingID)
 	require.Equal(t, view.ExposureLocal, exposure)
+}
+
+func TestServerWebAddMappingLocalExposureFailureReportsPartialState(t *testing.T) {
+	api := &fakeExposureAPI{fakeServerAPI: &fakeServerAPI{
+		clients: exposurePushClient(),
+	}}
+	api.err = errors.New("exposure store unavailable")
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	body := `{"base_revision":0,"mappings":[` +
+		`{"id":"m1","type":"tcp","remote_port":25022,"local_addr":"127.0.0.1:22","enabled":true}],` +
+		`"exposures":{"m1":"local"}}`
+	resp := pushExposureRequest(t, ts, cookie, body)
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	var payload map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&payload))
+	resp.Body.Close()
+	require.Equal(t, "partial_apply", payload["code"])
+	require.Equal(t, true, payload["partial"])
+	require.Equal(t, float64(1), payload["revision"])
+	require.Len(t, api.pushCalls, 1)
+	require.Equal(t, []string{"push", "exposure"}, api.events)
+	require.False(t, api.pushCalls[0].mappings[0].Enabled)
+}
+
+func TestServerWebAddMappingLocalEnablePushFailureReportsPartialState(t *testing.T) {
+	api := &fakeExposureAPI{fakeServerAPI: &fakeServerAPI{
+		clients: exposurePushClient(),
+	}}
+	api.pushHook = func(call int, _ []config.Mapping) error {
+		if call == 2 {
+			return errors.New("second push failed")
+		}
+		return nil
+	}
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	body := `{"base_revision":0,"mappings":[` +
+		`{"id":"m1","type":"tcp","remote_port":25022,"local_addr":"127.0.0.1:22","enabled":true}],` +
+		`"exposures":{"m1":"local"}}`
+	resp := pushExposureRequest(t, ts, cookie, body)
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	var payload map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&payload))
+	resp.Body.Close()
+	require.Equal(t, "partial_apply", payload["code"])
+	require.Equal(t, true, payload["partial"])
+	require.Equal(t, float64(1), payload["revision"])
+	require.Len(t, api.pushCalls, 2)
+	require.Equal(t, []string{"push", "exposure", "push"}, api.events)
+	require.False(t, api.pushCalls[0].mappings[0].Enabled)
+	require.True(t, api.pushCalls[1].mappings[0].Enabled)
+}
+
+func TestServerWebPushExposureMissingClient(t *testing.T) {
+	api := &fakeExposureAPI{fakeServerAPI: &fakeServerAPI{}}
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	body := `{"base_revision":0,"mappings":[` +
+		`{"id":"m1","type":"tcp","remote_port":25022,"local_addr":"127.0.0.1:22","enabled":true}],` +
+		`"exposures":{"m1":"local"}}`
+	resp := pushExposureRequest(t, ts, cookie, body)
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	resp.Body.Close()
+	require.Zero(t, api.pushes)
+	require.Zero(t, api.callCount())
+}
+
+func TestServerWebEnableDisabledMappingAsLocalUsesDisabledFirstPush(t *testing.T) {
+	api := &fakeExposureAPI{fakeServerAPI: &fakeServerAPI{
+		clients: exposurePushClient(view.MappingView{
+			Mapping: config.Mapping{
+				ID: "m1", Type: "tcp", RemotePort: 25022, LocalAddr: "127.0.0.1:22", Enabled: false,
+			},
+			Status:   "disabled",
+			Exposure: view.ExposurePublic,
+		}),
+	}}
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	body := `{"base_revision":0,"mappings":[` +
+		`{"id":"m1","type":"tcp","remote_port":25022,"local_addr":"127.0.0.1:22","enabled":true}],` +
+		`"exposures":{"m1":"local"}}`
+	resp := pushExposureRequest(t, ts, cookie, body)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	resp.Body.Close()
+
+	require.Len(t, api.pushCalls, 2)
+	require.False(t, api.pushCalls[0].mappings[0].Enabled)
+	require.True(t, api.pushCalls[1].mappings[0].Enabled)
+	require.Equal(t, []string{"push", "exposure", "push"}, api.events)
+	require.Equal(t, view.ExposureLocal, api.exposure)
+}
+
+func TestServerWebAddMappingPublicSetsExplicitPublic(t *testing.T) {
+	api := &fakeExposureAPI{fakeServerAPI: &fakeServerAPI{
+		clients: exposurePushClient(),
+	}}
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	body := `{"base_revision":0,"mappings":[` +
+		`{"id":"m1","type":"tcp","remote_port":25022,"local_addr":"127.0.0.1:22","enabled":true}],` +
+		`"exposures":{"m1":"public"}}`
+	resp := pushExposureRequest(t, ts, cookie, body)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	resp.Body.Close()
+
+	require.Len(t, api.pushCalls, 1)
+	require.Equal(t, []string{"push", "exposure"}, api.events)
+	require.Equal(t, view.ExposurePublic, api.exposure)
+}
+
+func TestServerWebExistingLocalToPublicAppliesAfterPush(t *testing.T) {
+	api := &fakeExposureAPI{fakeServerAPI: &fakeServerAPI{
+		clients: exposurePushClient(view.MappingView{
+			Mapping: config.Mapping{
+				ID: "m1", Type: "tcp", RemotePort: 25022, LocalAddr: "127.0.0.1:22", Enabled: true,
+			},
+			Status:   "running",
+			Exposure: view.ExposureLocal,
+		}),
+	}}
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	body := `{"base_revision":0,"mappings":[` +
+		`{"id":"m1","type":"tcp","remote_port":25022,"local_addr":"127.0.0.1:22","enabled":true}],` +
+		`"exposures":{"m1":"public"}}`
+	resp := pushExposureRequest(t, ts, cookie, body)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	resp.Body.Close()
+
+	require.Len(t, api.pushCalls, 1)
+	require.Equal(t, []string{"push", "exposure"}, api.events)
+	require.Equal(t, view.ExposurePublic, api.exposure)
+}
+
+func TestServerWebExposurePushFailureWithoutPartialReportsNormalError(t *testing.T) {
+	api := &fakeExposureAPI{fakeServerAPI: &fakeServerAPI{
+		clients: exposurePushClient(view.MappingView{
+			Mapping: config.Mapping{
+				ID: "m1", Type: "tcp", RemotePort: 25022, LocalAddr: "127.0.0.1:22", Enabled: true,
+			},
+			Status:   "running",
+			Exposure: view.ExposurePublic,
+		}),
+		pushErr: errors.New("push rejected"),
+	}}
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	body := `{"base_revision":0,"mappings":[` +
+		`{"id":"m1","type":"tcp","remote_port":25022,"local_addr":"127.0.0.1:22","enabled":true}],` +
+		`"exposures":{"m1":"local"}}`
+	resp := pushExposureRequest(t, ts, cookie, body)
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	var payload map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&payload))
+	resp.Body.Close()
+	require.NotEqual(t, "partial_apply", payload["code"])
+	require.Nil(t, payload["partial"])
+	require.Zero(t, api.callCount(), "a failed push must not change exposure")
+}
+
+func TestServerWebLocalAddFirstPushFailureReportsNormalError(t *testing.T) {
+	api := &fakeExposureAPI{fakeServerAPI: &fakeServerAPI{
+		clients: exposurePushClient(),
+		pushErr: errors.New("first push rejected"),
+	}}
+	_, ts := newTestWeb(t, api)
+	cookie := login(t, ts)
+
+	body := `{"base_revision":0,"mappings":[` +
+		`{"id":"m1","type":"tcp","remote_port":25022,"local_addr":"127.0.0.1:22","enabled":true}],` +
+		`"exposures":{"m1":"local"}}`
+	resp := pushExposureRequest(t, ts, cookie, body)
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	var payload map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&payload))
+	resp.Body.Close()
+	require.NotEqual(t, "partial_apply", payload["code"])
+	require.Zero(t, api.callCount())
 }
 
 func TestServerWebPushRejectsInvalidExposure(t *testing.T) {
