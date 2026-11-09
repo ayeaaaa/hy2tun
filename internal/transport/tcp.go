@@ -17,6 +17,11 @@ import (
 const handshakeTimeout = 10 * time.Second
 const maxTCPStreams = 1024
 
+// lookupTCPHost is a test seam for the TCP dialer's address fallback. It keeps
+// the production resolver behavior while allowing a deterministic two-address
+// test without changing /etc/hosts or public configuration.
+var lookupTCPHost = net.DefaultResolver.LookupIPAddr
+
 type Principal struct {
 	ClientID    string
 	Generation  int64
@@ -80,9 +85,85 @@ func DialTCP(ctx context.Context, opts DialOptions) (Session, error) {
 		}
 		cfg.ServerName = host
 	}
+
+	addresses, err := resolveTCPAddresses(ctx, opts.TCPAddress)
+	if err != nil {
+		return nil, err
+	}
 	hctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
-	raw, err := (&net.Dialer{}).DialContext(hctx, "tcp", opts.TCPAddress)
+
+	// A dual-stack hostname can resolve to an address whose TCP port accepts
+	// the connection but resets TLS (seen with broken IPv6 paths). A plain
+	// net.Dialer only falls back before connect, so try each address here and
+	// preserve the same TLS policy for every attempt. Security/auth/protocol
+	// failures stop immediately; only recognized network failures fall through.
+	perAddress := handshakeTimeout
+	if len(addresses) > 1 {
+		perAddress = handshakeTimeout / time.Duration(len(addresses))
+		if perAddress < time.Second {
+			perAddress = time.Second
+		}
+	}
+	var lastErr error
+	for _, address := range addresses {
+		attemptCtx, attemptCancel := context.WithTimeout(hctx, perAddress)
+		session, err := dialTCPAddress(attemptCtx, opts, greeting, cfg, address)
+		attemptCancel()
+		if err == nil {
+			return session, nil
+		}
+		lastErr = err
+		if !FallbackAllowed(err) {
+			return nil, err
+		}
+		if hctx.Err() != nil {
+			break
+		}
+	}
+	if lastErr == nil {
+		lastErr = errConfig
+	}
+	return nil, lastErr
+}
+
+func resolveTCPAddresses(ctx context.Context, address string) ([]string, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, errConfig
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return []string{net.JoinHostPort(host, port)}, nil
+	}
+	ips, err := lookupTCPHost(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(ips))
+	out := make([]string, 0, len(ips))
+	for _, candidate := range ips {
+		if candidate.IP == nil {
+			continue
+		}
+		host := candidate.IP.String()
+		if candidate.Zone != "" {
+			host += "%" + candidate.Zone
+		}
+		address := net.JoinHostPort(host, port)
+		if _, exists := seen[address]; exists {
+			continue
+		}
+		seen[address] = struct{}{}
+		out = append(out, address)
+	}
+	if len(out) == 0 {
+		return nil, errConfig
+	}
+	return out, nil
+}
+
+func dialTCPAddress(ctx context.Context, opts DialOptions, greeting Greeting, cfg *tls.Config, address string) (Session, error) {
+	raw, err := (&net.Dialer{}).DialContext(ctx, "tcp", address)
 	if err != nil {
 		return nil, err
 	}
@@ -93,19 +174,20 @@ func DialTCP(ctx context.Context, opts DialOptions) (Session, error) {
 			_ = raw.Close()
 		}
 	}()
-	stop := context.AfterFunc(hctx, func() { _ = raw.Close() })
+	stop := context.AfterFunc(ctx, func() { _ = raw.Close() })
 	defer stop()
-	deadline, _ := hctx.Deadline()
-	_ = conn.SetDeadline(deadline)
-	if err := conn.HandshakeContext(hctx); err != nil {
-		return nil, tlsHandshakeError(hctx, err)
+	if deadline, hasDeadline := ctx.Deadline(); hasDeadline {
+		_ = conn.SetDeadline(deadline)
+	}
+	if err := conn.HandshakeContext(ctx); err != nil {
+		return nil, tlsHandshakeError(ctx, err)
 	}
 	if err := writeJSONFrame(conn, greeting, greetingLimit); err != nil {
-		return nil, contextError(hctx, err)
+		return nil, contextError(ctx, err)
 	}
 	var ack GreetingAck
 	if err := readJSONFrame(conn, &ack, greetingLimit); err != nil {
-		return nil, contextError(hctx, err)
+		return nil, contextError(ctx, err)
 	}
 	if !ack.OK {
 		if !safeWireError(ack.Error) {
@@ -119,11 +201,11 @@ func DialTCP(ctx context.Context, opts DialOptions) (Session, error) {
 	if ack.Version != protocolVersion || ack.Error != "" || !validWireMode(ack.Mode) {
 		return nil, ErrProtocol
 	}
-	if err := hctx.Err(); err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if !stop() {
-		return nil, contextError(hctx, net.ErrClosed)
+		return nil, contextError(ctx, net.ErrClosed)
 	}
 	_ = conn.SetDeadline(time.Time{})
 	mux, err := yamux.Client(conn, tcpMuxConfig())

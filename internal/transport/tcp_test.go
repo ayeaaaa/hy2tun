@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"net"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -338,4 +339,75 @@ func tcpPair(t *testing.T, limits RateLimits, up, down uint64) (Session, *TCPPee
 	require.NoError(t, r.err)
 	t.Cleanup(func() { _ = r.peer.Close() })
 	return s, r.peer, ctx
+}
+
+// TestDialTCPFallsBackToNextAddressAfterTLSFailure reproduces the production
+// IPv6 path: TCP connects, but the TLS handshake is reset. The dialer must try
+// the next resolved address (IPv4) instead of returning the first failure.
+func TestDialTCPFallsBackToNextAddressAfterTLSFailure(t *testing.T) {
+	cert, err := testutil.SelfSignedCert("tunnel.test")
+	require.NoError(t, err)
+	valid, err := net.Listen("tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer valid.Close()
+	port := valid.Addr().(*net.TCPAddr).Port
+	reset, err := net.Listen("tcp6", net.JoinHostPort("::1", strconv.Itoa(port)))
+	if err != nil {
+		t.Skipf("IPv6 loopback is unavailable: %v", err)
+	}
+	defer reset.Close()
+	resetAccepted := make(chan struct{})
+	go func() {
+		c, err := reset.Accept()
+		if err == nil {
+			close(resetAccepted)
+			_ = c.Close()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	serverDone := make(chan error, 1)
+	go func() {
+		c, err := valid.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		peer, err := AcceptTCP(ctx, c, TCPServerOptions{
+			TLS:          &tls.Config{Certificates: []tls.Certificate{cert}},
+			Authenticate: testTCPAuth,
+			Mode:         config.ModeAuto,
+		})
+		if peer != nil {
+			defer peer.Close()
+		}
+		serverDone <- err
+	}()
+
+	oldLookup := lookupTCPHost
+	lookupTCPHost = func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{
+			{IP: net.ParseIP("::1")},
+			{IP: net.ParseIP("127.0.0.1")},
+		}, nil
+	}
+	t.Cleanup(func() { lookupTCPHost = oldLookup })
+
+	session, err := DialTCP(ctx, DialOptions{
+		TCPAddress:   net.JoinHostPort("fallback.test", strconv.Itoa(port)),
+		TLS:          &tls.Config{InsecureSkipVerify: true},
+		Auth:         "auth",
+		ControlToken: "secret",
+		ClientID:     "client",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, session)
+	_ = session.Close()
+	require.NoError(t, waitError(t, serverDone))
+	select {
+	case <-resetAccepted:
+	case <-time.After(time.Second):
+		t.Fatal("the first address was not attempted, so fallback was not exercised")
+	}
 }

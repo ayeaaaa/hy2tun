@@ -4,6 +4,14 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Fixed
+
+- TCP fallback now tries every resolved address after a post-connect TLS
+  failure. Previously an IPv6 TCP path that accepted the connection and then
+  reset TLS could prevent fallback to a working IPv4 path.
+
 ## v1.7.1 - 2026-11-08
 
 ### Added
