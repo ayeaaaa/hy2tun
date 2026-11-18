@@ -1,11 +1,11 @@
 github.com/andybalholm/brotli v1.2.7 h1:UgafRPGMam5ySHfRkhthMqOFA6IFoeF3D7mWIDLjG5A=
 github.com/andybalholm/brotli v1.2.7/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
-github.com/apernet/hysteria/core/v2 v2.13.0 h1:6hWhxnbGAH04VpInXrq/AVoH+kscha4YECx7Tj2yc9Y=
-github.com/apernet/hysteria/core/v2 v2.13.0/go.mod h1:nmxpy/ABkrPG1eNaMzGWUoIlOBjAkb3X2I8H1TGgd1A=
+github.com/apernet/hysteria/core/v2 v2.14.0 h1:s0ZJKT1cRWc4/GLIDXdFKvnV+QINLvgtpyi3i/60WNQ=
+github.com/apernet/hysteria/core/v2 v2.14.0/go.mod h1:Fe4Ywiw6XVN0LG/aFne29Lwo8vkQwJWpEZHJ3bzXNHQ=
 github.com/apernet/hysteria/extras/v2 v2.13.0 h1:cenZ6WcsvwyNvRAUjqNxjDcyAJH7GeGP8DLuSRFSfyo=
 github.com/apernet/hysteria/extras/v2 v2.13.0/go.mod h1:UeJrvFSznan/9LWT0v1Z4QpCop+mZ/jbduGC3UIw2CM=
-github.com/apernet/quic-go v0.63.1-0.20261004180939-a10df75c260c h1:cxK8qTA0YCsj68A7zLYDCfPgMTOyt3ePkHh+oXEmYU0=
-github.com/apernet/quic-go v0.63.1-0.20261004180939-a10df75c260c/go.mod h1:J7UZVOMF2M1LiE3iiUZWPuy8YCPAcLJOwVURrfJCvc0=
+github.com/apernet/quic-go v0.65.1-0.20261109005002-2895f039137a h1:uCIlOCbXUtBkFk47HxIkQieCkV+zKv5VCDawLtj3Pkc=
+github.com/apernet/quic-go v0.65.1-0.20261109005002-2895f039137a/go.mod h1:J7UZVOMF2M1LiE3iiUZWPuy8YCPAcLJOwVURrfJCvc0=
 github.com/fatedier/yamux v0.3.0 h1:NHcAbiv2YMZJjV413Ibw0OccvRVWP1nTTQjdRdFKI/0=
 github.com/fatedier/yamux v0.3.0/go.mod h1:d4FtRDrC9sHvRpiDL6J5EnfjLhqzZZplHe5yToSn2Ac=
 github.com/klauspost/compress v1.20.2 h1:v5tiZvm1KGLyg5d5oXdXe3lsSPrbEUiKoXGia//I7Qo=
