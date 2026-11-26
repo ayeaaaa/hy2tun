@@ -279,11 +279,14 @@ git commit -m "feat(windows): embed hy2tun application icon"
 - Create: `scripts/openwrt/luci-app-hy2tun/htdocs/luci-static/resources/icons/hy2tun.png` (32×32 generated)
 - Modify: `scripts/openwrt/build-luci-ipk.sh`
 - Modify: `scripts/openwrt/luci-app-hy2tun/luasrc/controller/hy2tun.lua`
+- Modify: `scripts/icons/build-icons.sh`
 - Test: `scripts/openwrt/test-ipk.sh`
 - Test: `scripts/openwrt/test-luci-controller.sh`
+- Test: `scripts/openwrt/test-luci-controller.lua`
+- Test: `scripts/icons/test-icons.sh`
 
 **Interfaces:**
-- The package includes `htdocs/luci-static/resources/icons/hy2tun.png`.
+- The package installs `/www/luci-static/resources/icons/hy2tun.png`; the source lives at `htdocs/luci-static/resources/icons/hy2tun.png` for standard LuCI packaging conventions.
 - The controller sets an icon on the existing Services entry when the running LuCI theme supports per-entry icons; older themes must ignore the field without error.
 - No theme-specific CSS/JS.
 
@@ -292,22 +295,32 @@ git commit -m "feat(windows): embed hy2tun application icon"
 Extend `scripts/openwrt/test-ipk.sh` to assert the LuCI IPK contains:
 
 ```sh
-luci-app-hy2tun_*.ipk: htdocs/luci-static/resources/icons/hy2tun.png
+grep -q './www/luci-static/resources/icons/hy2tun.png' "$work/luci/files.txt"
 ```
 
-and that the controller source contains an `icon` assignment near the `admin/services/hy2tun` entry. Run tests; expect failure.
+Extend `scripts/icons/test-icons.sh` to assert the LuCI source PNG is exactly 32×32 after generation. Extend the Lua harness (`test-luci-controller.lua`) so its `entry` stub captures `icon`, and assert the page route has `icon == "icons/hy2tun.png"` after `controller.index()`. Run tests; expect failure.
 
 - [ ] **Step 2: Generate and package the 32px icon**
 
-In `scripts/icons/build-icons.sh`, render the mono or full-color mark to the LuCI path at 32×32. Update `build-luci-ipk.sh` to copy `htdocs` into the package tree when present:
+In `scripts/icons/build-icons.sh`, render the full-color rounded badge mark to the LuCI source path at 32×32. Update `build-luci-ipk.sh` to install the LuCI static asset into the package's `/www` root (the source `htdocs` prefix is a LuCI source convention, not an install path):
 
 ```sh
-[ -d "$src/htdocs" ] && cp -R "$src/htdocs" "$pkg/"
+install -d "$pkg/www/luci-static/resources/icons"
+install -m 644 "$src/htdocs/luci-static/resources/icons/hy2tun.png" \
+	"$pkg/www/luci-static/resources/icons/hy2tun.png"
 ```
 
 - [ ] **Step 3: Set the menu icon best-effort**
 
-In `hy2tun.lua`, assign the icon to the existing `admin/services/hy2tun` entry without changing its title/order/dependency. Use the LuCI-supported icon field/path for the project’s Lua API; if the installed legacy schema ignores it, the entry must still load. Do not add per-theme CSS/JS.
+In `hy2tun.lua`, assign the icon to the existing `admin/services/hy2tun` entry without changing its title/order/dependency:
+
+```lua
+local page = entry({"admin", "services", "hy2tun"}, template("hy2tun/status"), _("hy2tun"), 60)
+page.dependent = false
+page.icon = "icons/hy2tun.png"
+```
+
+The icon path is relative to `/luci-static/resources/`, so the installed file is `/www/luci-static/resources/icons/hy2tun.png`. If an installed legacy LuCI schema ignores the extra field, the entry must still load. Do not add per-theme CSS/JS.
 
 - [ ] **Step 4: Run OpenWrt checks**
 
