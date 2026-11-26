@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="hy2tun-mark-mono-title">
+  <title id="hy2tun-mark-mono-title">hy2tun</title>
+  <path d="M160 365 V275 A96 96 0 0 1 352 275 V365" fill="none" stroke="#2f6b52" stroke-width="44" stroke-linecap="round"/>
+  <circle cx="160" cy="365" r="34" fill="#2f6b52"/>
+  <circle cx="352" cy="365" r="34" fill="#2f6b52"/>
+</svg>

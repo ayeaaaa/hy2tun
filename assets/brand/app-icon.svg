@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="hy2tun-app-icon-title">
+  <title id="hy2tun-app-icon-title">hy2tun</title>
+  <rect width="512" height="512" fill="#2f6b52"/>
+  <g transform="translate(256 256) scale(1.4966) translate(-256 -278)">
+    <path d="M160 365 V275 A96 96 0 0 1 352 275 V365" fill="none" stroke="#ffffff" stroke-width="44" stroke-linecap="round"/>
+    <circle cx="160" cy="365" r="34" fill="#ffffff"/>
+    <circle cx="352" cy="365" r="34" fill="#ffffff"/>
+  </g>
+</svg>
