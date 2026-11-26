@@ -20,9 +20,11 @@ type outbound struct {
 	endpointClosed *atomic.Bool
 }
 
+var _ hyserver.Outbound = (*outbound)(nil)
+
 // TCP dials reqAddr as a normal TCP destination. Reserved hy2tun virtual
 // addresses are never dialed as real hosts.
-func (o *outbound) TCP(reqAddr string) (net.Conn, error) {
+func (o *outbound) TCP(_ *hyserver.RequestInfo, reqAddr string) (net.Conn, error) {
 	if kind, token, ok := parseVirtualAddr(reqAddr); ok {
 		return o.virtualTCP(kind, token)
 	}
@@ -35,7 +37,7 @@ func (o *outbound) TCP(reqAddr string) (net.Conn, error) {
 // UDP opens a full-cone UDP socket. Hysteria sends all destinations of one
 // client session through it. Reserved hy2tun UDP addresses are routed to the
 // owning mapping's public socket; other virtual addresses are rejected.
-func (o *outbound) UDP(reqAddr string) (hyserver.UDPConn, error) {
+func (o *outbound) UDP(_ *hyserver.RequestInfo, reqAddr string) (hyserver.UDPConn, error) {
 	if kind, token, ok := parseVirtualAddr(reqAddr); ok {
 		return o.virtualUDP(kind, token)
 	}
@@ -51,6 +53,6 @@ func (o *outbound) UDP(reqAddr string) (hyserver.UDPConn, error) {
 
 // CheckUDP permits every UDP destination. Access control is not part of this
 // task.
-func (o *outbound) CheckUDP(reqAddr string) error {
+func (o *outbound) CheckUDP(_ *hyserver.RequestInfo, reqAddr string) error {
 	return nil
 }
