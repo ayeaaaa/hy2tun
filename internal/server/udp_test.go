@@ -693,7 +693,7 @@ func TestOutboundUDPRejectsUnknownVirtualToken(t *testing.T) {
 
 	token := strings.Repeat("0", 32)
 	o := &outbound{server: srv}
-	_, err := o.UDP(udpVirtualAddress(token))
+	_, err := o.UDP(nil, udpVirtualAddress(token))
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), token, "errors must not expose UDP tokens")
 }

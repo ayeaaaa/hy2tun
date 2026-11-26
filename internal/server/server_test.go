@@ -248,7 +248,7 @@ func TestOutboundProxiesNormalTCP(t *testing.T) {
 	defer stopEcho()
 
 	o := &outbound{}
-	conn, err := o.TCP(echoAddr)
+	conn, err := o.TCP(nil, echoAddr)
 	require.NoError(t, err)
 	defer conn.Close()
 	requireTCPEcho(t, conn, "ping")
@@ -259,7 +259,7 @@ func TestOutboundProxiesNormalUDP(t *testing.T) {
 	defer stopEcho()
 
 	o := &outbound{}
-	conn, err := o.UDP(echoAddr)
+	conn, err := o.UDP(nil, echoAddr)
 	require.NoError(t, err)
 	defer conn.Close()
 
@@ -285,9 +285,9 @@ func TestOutboundRejectsVirtualAddresses(t *testing.T) {
 		"_hy2tun_unknown:0",
 		"_hy2tun_data_:0",
 	} {
-		_, err := o.TCP(addr)
+		_, err := o.TCP(nil, addr)
 		require.Error(t, err, "TCP %s", addr)
-		_, err = o.UDP(addr)
+		_, err = o.UDP(nil, addr)
 		require.Error(t, err, "UDP %s", addr)
 	}
 }

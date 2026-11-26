@@ -43,7 +43,7 @@ func TestProbeDoesNotRegisterOrPersist(t *testing.T) {
 	listener := owner.mappings["tcp"].listeners.TCP[0]
 	s.mappings.mu.Unlock()
 	for i := 0; i < 3; i++ {
-		probe, err := (&outbound{server: s}).TCP("_hy2tun_probe_:0")
+		probe, err := (&outbound{server: s}).TCP(nil, "_hy2tun_probe_:0")
 		require.NoError(t, err)
 		require.NoError(t, probe.SetDeadline(time.Now().Add(time.Second)))
 		nonce := "11223344556677889900aabbccddeeff"

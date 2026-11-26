@@ -3,9 +3,9 @@ module hy2tun
 go 1.26.0
 
 require (
-	github.com/apernet/hysteria/core/v2 v2.13.0
-	github.com/apernet/hysteria/extras/v2 v2.13.0
-	github.com/apernet/quic-go v0.63.1-0.20261004180939-a10df75c260c
+	github.com/apernet/hysteria/core/v2 v2.14.0
+	github.com/apernet/hysteria/extras/v2 v2.14.0
+	github.com/apernet/quic-go v0.65.1-0.20261109005002-2895f039137a
 	github.com/fatedier/yamux v0.3.0
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/crypto v0.58.0
