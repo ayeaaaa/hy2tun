@@ -5,6 +5,13 @@
 [![CI](https://github.com/ayeaaaa/hy2tun/actions/workflows/ci.yml/badge.svg)](https://github.com/ayeaaaa/hy2tun/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/lockup-dark.svg">
+    <img src="assets/brand/lockup-light.svg" alt="hy2tun" width="360">
+  </picture>
+</p>
+
 `hy2tun` is a reverse port-forwarding tunnel built on the official
 [Hysteria 2](https://github.com/apernet/hysteria) core. A client inside a
 private network connects out to a public server and exposes selected TCP and

@@ -5,6 +5,13 @@
 [![CI](https://github.com/ayeaaaa/hy2tun/actions/workflows/ci.yml/badge.svg)](https://github.com/ayeaaaa/hy2tun/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/lockup-dark.svg">
+    <img src="assets/brand/lockup-light.svg" alt="hy2tun" width="360">
+  </picture>
+</p>
+
 `hy2tun` 是一个基于官方 [Hysteria 2](https://github.com/apernet/hysteria)
 核心实现的反向端口映射隧道。内网客户端主动连接到公网服务端，把选定的 TCP
 和 UDP 服务暴露在服务端的公网端口上。默认的 `hy2` 模式（以及 `hy2+tcp`）
