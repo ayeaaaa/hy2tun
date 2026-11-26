@@ -57,6 +57,37 @@ done
 [ "$(printf '%s\n' "$ico_sizes" | wc -l | tr -d ' ')" = "3" ] ||
   fail "favicon.ico must contain exactly 16/32/48 layers"
 
+# Windows executables share one multi-size icon and resource script.
+for f in assets/brand/windows/hy2tun.ico \
+         assets/brand/windows/hy2tun.rc \
+         assets/brand/windows/hy2tund.rc; do
+  test -s "$root/$f" || fail "missing $f"
+done
+windows_ico_sizes=$(identify -format '%wx%h\n' "$brand/windows/hy2tun.ico")
+for size in 16x16 24x24 32x32 48x48 64x64 128x128 256x256; do
+  printf '%s\n' "$windows_ico_sizes" | grep -qx "$size" ||
+    fail "hy2tun.ico missing $size layer"
+done
+[ "$(printf '%s\n' "$windows_ico_sizes" | wc -l | tr -d ' ')" = "7" ] ||
+  fail "hy2tun.ico must contain exactly 16/24/32/48/64/128/256 layers"
+grep -qx '1 ICON "hy2tun.ico"' "$brand/windows/hy2tun.rc" ||
+  fail "hy2tun.rc must reference the hy2tun.ico icon as resource ID 1"
+grep -qx '1 ICON "hy2tun.ico"' "$brand/windows/hy2tund.rc" ||
+  fail "hy2tund.rc must reference the hy2tun.ico icon as resource ID 1"
+
+# Go links the Windows/amd64 resource objects; each must be a real COFF object
+# carrying an .rsrc section, not merely a non-empty file.
+command -v x86_64-w64-mingw32-objdump >/dev/null 2>&1 ||
+  fail "x86_64-w64-mingw32-objdump is required to inspect Windows resources"
+for f in cmd/hy2tun/hy2tun_windows_amd64.syso \
+         cmd/hy2tund/hy2tund_windows_amd64.syso; do
+  test -s "$root/$f" || fail "missing $f"
+  file "$root/$f" | grep -E 'COFF|object' >/dev/null ||
+    fail "$f is not a COFF object"
+  x86_64-w64-mingw32-objdump -h "$root/$f" | grep -q '\.rsrc' ||
+    fail "$f missing .rsrc section"
+done
+
 # Favicon marks are rounded badges with transparency; app icons are opaque full-bleed.
 [ "$(identify -format '%[opaque]' "$server/favicon-16.png")" = "false" ] ||
   fail "favicon-16.png must keep transparent corners"

@@ -12,6 +12,13 @@ if ! command -v convert >/dev/null 2>&1; then
   exit 1
 fi
 
+windres=x86_64-w64-mingw32-windres
+if ! command -v "$windres" >/dev/null 2>&1; then
+  echo "build-icons: x86_64-w64-mingw32-windres is required to build Windows resources but was not found in PATH" >&2
+  echo "build-icons: install mingw-w64 binutils and re-run scripts/icons/build-icons.sh" >&2
+  exit 1
+fi
+
 tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/hy2tun-icons.XXXXXX")
 trap 'rm -rf "$tmpdir"' EXIT HUP INT TERM
 
@@ -36,6 +43,22 @@ convert -background none "$brand/mark.svg" \
 render_png "$brand/app-icon.svg" 180x180 "$tmpdir/apple-touch-icon.png"
 render_png "$brand/app-icon.svg" 192x192 "$tmpdir/icon-192.png"
 render_png "$brand/app-icon.svg" 512x512 "$tmpdir/icon-512.png"
+
+# Windows executables use the full-bleed app icon. All layers Windows consumes
+# are present; the 256px layer is PNG-compressed by the ICO encoder.
+windows="$brand/windows"
+install -d -m 755 "$windows"
+convert -background none "$brand/app-icon.svg" \
+  -define icon:auto-resize=16,24,32,48,64,128,256 \
+  -strip -depth 8 "$tmpdir/hy2tun.ico"
+install -m 644 "$tmpdir/hy2tun.ico" "$windows/hy2tun.ico"
+
+# Go auto-links these objects only for GOOS=windows GOARCH=amd64. The resource
+# scripts reference hy2tun.ico, resolved relative to the -I search directory.
+"$windres" -I "$windows" -i "$windows/hy2tun.rc" \
+  -o "$root/cmd/hy2tun/hy2tun_windows_amd64.syso"
+"$windres" -I "$windows" -i "$windows/hy2tund.rc" \
+  -o "$root/cmd/hy2tund/hy2tund_windows_amd64.syso"
 
 # Social preview must be exactly 1200x630.
 render_png "$brand/og-1200x630.svg" '1200x630!' "$tmpdir/social-preview.png"
