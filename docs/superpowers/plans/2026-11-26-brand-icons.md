@@ -93,7 +93,6 @@ Create variants by changing only the palette/background:
 
 - render `mark.svg` → `favicon.svg` (or copy the badge SVG), `favicon-16.png`, `favicon-32.png`, `favicon.ico` with 16/32/48 sizes;
 - render `app-icon.svg` → `apple-touch-icon.png` (180), `icon-192.png`, `icon-512.png` (full-bleed, as the design requires for installed/app icons);
-- render `app-icon.svg` for Windows 16/24/32/48/64/128/256 `.ico` layers;
 - render `og-1200x630.svg` → `social-preview.png` at exactly 1200×630;
 - copy the Web assets into both `internal/webui/serverui/static/` and `internal/webui/clientui/static/`;
 - write `site.webmanifest` with `name`/`short_name` `hy2tun`, `theme_color` `#2f6b52`, background `#f6f6f4`, and 192/512 icons;
