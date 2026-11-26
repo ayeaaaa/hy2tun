@@ -1026,6 +1026,18 @@ func TestServerStaticAssetsAreRevalidated(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestServerWebManifestContentType(t *testing.T) {
+	_, ts := newTestWeb(t, &fakeServerAPI{})
+
+	resp := doRequest(t, ts.Client(), http.MethodGet, ts.URL+"/static/site.webmanifest", "", nil, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "application/manifest+json", resp.Header.Get("Content-Type"))
+	manifest := readJSON[struct {
+		Name string `json:"name"`
+	}](t, resp)
+	require.Equal(t, "hy2tun", manifest.Name)
+}
+
 func TestServerWebStaticAndLoginPage(t *testing.T) {
 	_, ts := newTestWeb(t, &fakeServerAPI{})
 

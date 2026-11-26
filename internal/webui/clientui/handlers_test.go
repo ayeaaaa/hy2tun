@@ -750,6 +750,18 @@ func TestClientWebStaticAndLoginPage(t *testing.T) {
 	requireBrandPage(t, body)
 }
 
+func TestClientWebManifestContentType(t *testing.T) {
+	_, ts := newTestClientWeb(t, &fakeClientAPI{})
+
+	resp := doClientRequest(t, ts.Client(), http.MethodGet, ts.URL+"/static/site.webmanifest", "", nil, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "application/manifest+json", resp.Header.Get("Content-Type"))
+	manifest := readClientJSON[struct {
+		Name string `json:"name"`
+	}](t, resp)
+	require.Equal(t, "hy2tun", manifest.Name)
+}
+
 func TestClientWebHSTSBehindTLSProxy(t *testing.T) {
 	web, _ := newTestClientWeb(t, &fakeClientAPI{})
 

@@ -363,6 +363,9 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 func cacheStatic(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "public, max-age=3600")
+		if strings.HasSuffix(r.URL.Path, ".webmanifest") {
+			w.Header().Set("Content-Type", "application/manifest+json")
+		}
 		next.ServeHTTP(w, r)
 	})
 }
