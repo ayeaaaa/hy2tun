@@ -4,6 +4,17 @@
 
 本文件记录项目的重要变更。
 
+## v1.7.3 - 2026-11-26
+
+### 变更
+
+- Hysteria core 和 extras 升级到 v2.14.0，并配套升级 apernet/quic-go 到
+  v0.65.1。Hysteria 2.14 带来新的 ACL 引擎和 UDP 转发性能优化；hy2tun 不使用
+  ACL。服务端 `Outbound` 接口已适配新的 `RequestInfo` 参数。
+- 升级 `golang.org/x/crypto` 到 v0.59.0、`golang.org/x/sys` 到 v0.50.0、
+  `golang.org/x/term` 到 v0.48.0、`golang.org/x/text` 到 v0.44.0。
+- CI 和发布构建改用 Go 1.26.11，包含 `net/http` GO-2026-6859 的修复。
+
 ## v1.7.2 - 2026-11-09
 
 ### 修复

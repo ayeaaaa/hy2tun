@@ -4,6 +4,19 @@
 
 All notable changes to this project are documented here.
 
+## v1.7.3 - 2026-11-26
+
+### Changed
+
+- Upgraded Hysteria core and extras to v2.14.0 with the matching apernet/quic-go
+  v0.65.1. Hysteria 2.14 brings its new ACL engine and UDP forwarding
+  performance improvements; hy2tun does not use ACL. The server `Outbound`
+  interface was adapted to the new `RequestInfo` parameter.
+- Updated `golang.org/x/crypto` to v0.59.0, `golang.org/x/sys` to v0.50.0,
+  `golang.org/x/term` to v0.48.0, and `golang.org/x/text` to v0.44.0.
+- CI and release builds now use Go 1.26.11, which includes the fix for
+  `net/http` GO-2026-6859.
+
 ## v1.7.2 - 2026-11-09
 
 ### Fixed
