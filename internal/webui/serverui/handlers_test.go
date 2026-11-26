@@ -385,6 +385,23 @@ func readJSON[T any](t *testing.T, resp *http.Response) T {
 	return value
 }
 
+func requireBrandPage(t *testing.T, body string) {
+	t.Helper()
+	for _, want := range []string{
+		`<link rel="icon" href="/static/favicon.ico" sizes="any">`,
+		`<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">`,
+		`<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">`,
+		`<link rel="manifest" href="/static/site.webmanifest">`,
+		`<meta name="theme-color" content="#2f6b52">`,
+		`<picture aria-hidden="true">`,
+		`<source srcset="/static/mark-dark.svg" media="(prefers-color-scheme: dark)">`,
+		`<img class="brand-mark" src="/static/mark.svg" width="18" height="18" alt="">`,
+	} {
+		require.Contains(t, body, want)
+	}
+	require.NotContains(t, body, `<span class="brand-mark"`)
+}
+
 func csrfHeaders(origin string) map[string]string {
 	headers := map[string]string{
 		"Content-Type":     "application/json",
@@ -451,6 +468,7 @@ func TestServerWebLoginAndOverview(t *testing.T) {
 	body := readBody(t, resp)
 	require.Contains(t, body, "概览")
 	require.Contains(t, body, "在线客户端")
+	requireBrandPage(t, body)
 
 	// Unauthenticated pages redirect, API calls get 401.
 	resp = doRequest(t, noRedirectClient(ts), http.MethodGet, ts.URL+"/", "", nil, nil)
@@ -1035,6 +1053,7 @@ func TestServerWebStaticAndLoginPage(t *testing.T) {
 	require.Contains(t, body, `action="/api/login"`)
 	require.Contains(t, body, "登录管理控制台")
 	require.Contains(t, body, "https://github.com/ayeaaaa/hy2tun")
+	requireBrandPage(t, body)
 
 	cookie := login(t, ts)
 	resp = doRequest(t, noRedirectClient(ts), http.MethodGet, ts.URL+"/login", "", cookie, nil)

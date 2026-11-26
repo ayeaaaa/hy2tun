@@ -374,6 +374,23 @@ func readClientJSON[T any](t *testing.T, resp *http.Response) T {
 	return value
 }
 
+func requireBrandPage(t *testing.T, body string) {
+	t.Helper()
+	for _, want := range []string{
+		`<link rel="icon" href="/static/favicon.ico" sizes="any">`,
+		`<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">`,
+		`<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">`,
+		`<link rel="manifest" href="/static/site.webmanifest">`,
+		`<meta name="theme-color" content="#2f6b52">`,
+		`<picture aria-hidden="true">`,
+		`<source srcset="/static/mark-dark.svg" media="(prefers-color-scheme: dark)">`,
+		`<img class="brand-mark" src="/static/mark.svg" width="18" height="18" alt="">`,
+	} {
+		require.Contains(t, body, want)
+	}
+	require.NotContains(t, body, `<span class="brand-mark"`)
+}
+
 func TestClientWebAddMappingWritesConfig(t *testing.T) {
 	api := &fakeClientAPI{}
 	_, ts := newTestClientWeb(t, api)
@@ -676,6 +693,7 @@ func TestClientWebPageRendersStatusTabsAndSettings(t *testing.T) {
 	require.Contains(t, body, "data-tab=\"mappings\"")
 	require.Contains(t, body, "data-tab=\"logs\"")
 	require.Contains(t, body, "data-tab=\"settings\"")
+	requireBrandPage(t, body)
 }
 
 func TestClientWebRequiresAuthAndCSRF(t *testing.T) {
@@ -729,6 +747,7 @@ func TestClientWebStaticAndLoginPage(t *testing.T) {
 	require.Contains(t, body, `action="/api/login"`)
 	require.Contains(t, body, "登录客户端控制台")
 	require.Contains(t, body, "https://github.com/ayeaaaa/hy2tun")
+	requireBrandPage(t, body)
 }
 
 func TestClientWebHSTSBehindTLSProxy(t *testing.T) {

@@ -177,23 +177,10 @@ select {
 }
 
 .brand-mark {
-  position: relative;
   width: 18px;
   height: 18px;
   flex: none;
-  border-radius: 5px;
-  background: var(--accent);
-}
-
-.brand-mark::after {
-  content: "";
-  position: absolute;
-  inset: 5px;
-  border: 1.5px solid var(--accent-contrast);
-  border-right-color: transparent;
-  border-bottom-color: transparent;
-  border-radius: 2px;
-  transform: rotate(45deg);
+  display: block;
 }
 
 .brand-name {
