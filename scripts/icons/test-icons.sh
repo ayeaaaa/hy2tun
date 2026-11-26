@@ -5,6 +5,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 brand="$root/assets/brand"
 server="$root/internal/webui/serverui/static"
 client="$root/internal/webui/clientui/static"
+luci_icon="$root/scripts/openwrt/luci-app-hy2tun/htdocs/luci-static/resources/icons/hy2tun.png"
 
 fail() {
   echo "test-icons: $*" >&2
@@ -43,6 +44,8 @@ check_png_size "$server/favicon-32.png" 32x32
 check_png_size "$server/apple-touch-icon.png" 180x180
 check_png_size "$server/icon-192.png" 192x192
 check_png_size "$server/icon-512.png" 512x512
+test -s "$luci_icon" || fail "missing LuCI icon htdocs/luci-static/resources/icons/hy2tun.png"
+check_png_size "$luci_icon" 32x32
 
 for f in favicon-16.png favicon-32.png apple-touch-icon.png icon-192.png icon-512.png; do
   identify "$server/$f" >/dev/null || fail "cannot decode server asset $f"

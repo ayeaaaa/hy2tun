@@ -436,6 +436,8 @@ local function run()
 	check(by_path["admin/services/hy2tun/action"].leaf == true, "action must be leaf")
 	check(by_path["admin/services/hy2tun"].target.name == "hy2tun/status",
 		"page route must render the status template")
+	check(by_path["admin/services/hy2tun"].icon == "icons/hy2tun.png",
+		"page route must reference the LuCI icon")
 
 	-- LuCI reads `post` from the call()/post() target, not the route node.
 	local data_node = by_path["admin/services/hy2tun/data"]

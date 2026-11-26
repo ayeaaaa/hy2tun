@@ -5,6 +5,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 brand="$root/assets/brand"
 server="$root/internal/webui/serverui/static"
 client="$root/internal/webui/clientui/static"
+luci_icons="$root/scripts/openwrt/luci-app-hy2tun/htdocs/luci-static/resources/icons"
 
 if ! command -v convert >/dev/null 2>&1; then
   echo "build-icons: ImageMagick 'convert' is required but was not found in PATH" >&2
@@ -59,6 +60,12 @@ install -m 644 "$tmpdir/hy2tun.ico" "$windows/hy2tun.ico"
   -o "$root/cmd/hy2tun/hy2tun_windows_amd64.syso"
 "$windres" -I "$windows" -i "$windows/hy2tund.rc" \
   -o "$root/cmd/hy2tund/hy2tund_windows_amd64.syso"
+
+# LuCI serves per-entry menu icons from /luci-static/resources/icons. The
+# package build maps this htdocs source tree onto /www.
+install -d -m 755 "$luci_icons"
+render_png "$brand/mark.svg" 32x32 "$tmpdir/hy2tun-luci.png"
+install -m 644 "$tmpdir/hy2tun-luci.png" "$luci_icons/hy2tun.png"
 
 # Social preview must be exactly 1200x630.
 render_png "$brand/og-1200x630.svg" '1200x630!' "$tmpdir/social-preview.png"

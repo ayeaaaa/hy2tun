@@ -30,6 +30,9 @@ control="$work/control"
 mkdir -p "$pkg/usr/lib/lua/luci" "$control"
 cp -R "$src/luasrc/controller" "$pkg/usr/lib/lua/luci/"
 cp -R "$src/luasrc/view" "$pkg/usr/lib/lua/luci/"
+install -d "$pkg/www/luci-static/resources/icons"
+install -m 644 "$src/htdocs/luci-static/resources/icons/hy2tun.png" \
+	"$pkg/www/luci-static/resources/icons/hy2tun.png"
 
 cat > "$control/control" <<CONTROL
 Package: luci-app-hy2tun

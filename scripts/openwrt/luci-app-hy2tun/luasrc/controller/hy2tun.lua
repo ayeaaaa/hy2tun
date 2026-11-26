@@ -640,7 +640,9 @@ function index()
 		return
 	end
 
-	entry({"admin", "services", "hy2tun"}, template("hy2tun/status"), _("hy2tun"), 60).dependent = false
+	local page = entry({"admin", "services", "hy2tun"}, template("hy2tun/status"), _("hy2tun"), 60)
+	page.dependent = false
+	page.icon = "icons/hy2tun.png"
 
 	local data = entry({"admin", "services", "hy2tun", "data"}, call("data"), nil)
 	data.leaf = true

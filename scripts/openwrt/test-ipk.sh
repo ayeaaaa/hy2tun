@@ -48,6 +48,7 @@ grep -q '^Package: luci-app-hy2tun$' "$work/luci/control"
 grep -q '^Depends: luci-base, luci-compat, hy2tun (>= 1.6.0)$' "$work/luci/control"
 grep -q './usr/lib/lua/luci/controller/hy2tun.lua' "$work/luci/files.txt"
 grep -q './usr/lib/lua/luci/view/hy2tun/status.htm' "$work/luci/files.txt"
+grep -q './www/luci-static/resources/icons/hy2tun.png' "$work/luci/files.txt"
 
 # Guard the LuCI regressions that caused a 502 Bad Gateway page: the
 # controller must load nixio.fs and own the service status redirection.
