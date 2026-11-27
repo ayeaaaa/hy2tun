@@ -507,7 +507,7 @@ exist. Edit the config before starting the service.
 
 ## hy2tun-manager (optional multi-server control plane)
 
-[![manager release](https://img.shields.io/github/v/release/ayeaaaa/hy2tun?filter=hy2tun-manager-*&label=hy2tun-manager)](https://github.com/ayeaaaa/hy2tun/releases/tag/hy2tun-manager-v0.1.1)
+[![manager release](https://img.shields.io/github/v/release/ayeaaaa/hy2tun?filter=hy2tun-manager-*&label=hy2tun-manager)](https://github.com/ayeaaaa/hy2tun/releases/tag/hy2tun-manager-v0.1.2)
 
 `hy2tun-manager` is a separate, optional control plane for a fleet of existing
 `hy2tund` servers. Add each server's reverse-proxied Web URL and administrator
@@ -524,7 +524,8 @@ The manager only calls the existing server Web APIs. It does not change the
 does not edit client-local configuration or schedule client-to-server
 connections; those remain separate follow-up work.
 
-Manager releases are independent Linux amd64/arm64 archives. The first login is
+Manager releases are independent Linux amd64/arm64 archives; the repository
+also has a `manager` Docker target and Compose service. The first login is
 `admin` / `admin`; change it immediately after first login. See
 [`docs/hy2tun-manager.md`](docs/hy2tun-manager.md) for installation,
 reverse-proxy, reset-admin, and security details. The manager is a

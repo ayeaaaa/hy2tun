@@ -15,7 +15,10 @@ RUN CGO_ENABLED=0 go build -trimpath \
       -o /out/hy2tund ./cmd/hy2tund && \
     CGO_ENABLED=0 go build -trimpath \
       -ldflags "-s -w -X hy2tun/internal/version.Version=${VERSION} -X hy2tun/internal/version.Commit=${COMMIT} -X hy2tun/internal/version.Date=${DATE}" \
-      -o /out/hy2tun ./cmd/hy2tun
+      -o /out/hy2tun ./cmd/hy2tun && \
+    CGO_ENABLED=0 go build -trimpath \
+      -ldflags "-s -w -X hy2tun/internal/version.Version=${VERSION} -X hy2tun/internal/version.Commit=${COMMIT} -X hy2tun/internal/version.Date=${DATE}" \
+      -o /out/hy2tun-manager ./cmd/hy2tun-manager
 
 FROM gcr.io/distroless/static-debian12:nonroot AS server
 COPY --from=build /out/hy2tund /usr/local/bin/hy2tund
@@ -28,3 +31,9 @@ COPY --from=build /out/hy2tun /usr/local/bin/hy2tun
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/hy2tun"]
 CMD ["-c", "/etc/hy2tun/client.yaml"]
+
+FROM gcr.io/distroless/static-debian12:nonroot AS manager
+COPY --from=build /out/hy2tun-manager /usr/local/bin/hy2tun-manager
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/local/bin/hy2tun-manager"]
+CMD ["-config", "/etc/hy2tun/manager.yaml"]

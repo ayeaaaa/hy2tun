@@ -41,7 +41,7 @@ manager 只保存：
 
 manager 使用独立版本和发布标签：
 
-<https://github.com/ayeaaaa/hy2tun/releases/tag/hy2tun-manager-v0.1.0>
+<https://github.com/ayeaaaa/hy2tun/releases/tag/hy2tun-manager-v0.1.2>
 
 归档包含：
 
@@ -55,7 +55,7 @@ manager 使用独立版本和发布标签：
 ## 安装
 
 ```sh
-tar -xzf hy2tun-manager_0.1.0_linux_amd64.tar.gz
+tar -xzf hy2tun-manager_0.1.2_linux_amd64.tar.gz
 sudo useradd --system --user-group --home-dir /var/lib/hy2tun-manager \
   --shell /usr/sbin/nologin hy2tun-manager
 sudo install -m 0755 hy2tun-manager /usr/local/bin/hy2tun-manager
@@ -89,6 +89,27 @@ trust_proxy: false
 - `base_path` 支持反向代理前缀，例如 `/hy2tun-manager/`。
 - `trust_proxy` 仅在受信反向代理会覆盖 `X-Forwarded-For` 和 `X-Real-IP` 时启用。
 - `state_file` 与 `key_file` 必须成对备份；丢失 `manager.key` 会导致上游密码无法解密。
+
+## Docker
+
+仓库的 Dockerfile 提供 `manager` target，Compose 文件提供 `hy2tun-manager`
+服务。镜像以非 root UID/GID `65532` 运行，并使用 host 网络，与原生安装默认的
+loopback 监听一致。
+
+```sh
+docker compose build hy2tun-manager
+mkdir -p manager-config manager-state
+cp examples/manager.yaml manager-config/manager.yaml
+sudo chown -R 65532:65532 manager-config manager-state
+docker compose up -d hy2tun-manager
+```
+
+配置在 `manager-config/manager.yaml`；状态、密钥、审计日志和单实例锁在
+`manager-state/`。请成对备份状态和密钥。manager 仍在宿主机 loopback 的
+`127.0.0.1:7600` 监听，应由宿主机的 HTTPS 反向代理或 VPN 对外发布。
+
+Compose 服务使用 host 网络，manager 也只发布 Linux 版本；不要用同一个状态目录
+运行多个 manager 容器，进程锁只覆盖单个容器。
 
 ## 首次登录
 
@@ -167,7 +188,7 @@ sudo systemctl start hy2tun-manager
 
 ```sh
 make build-manager
-VERSION=0.1.0 ./scripts/release-manager.sh
+VERSION=0.1.2 ./scripts/release-manager.sh
 ```
 
 只构建 Linux amd64/arm64。发布脚本不会修改 `hy2tund`/`hy2tun` 的现有发布矩阵。

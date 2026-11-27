@@ -430,7 +430,7 @@ sudo ./scripts/install.sh client
 
 ## hy2tun-manager（可选多服务端控制台）
 
-[![manager release](https://img.shields.io/github/v/release/ayeaaaa/hy2tun?filter=hy2tun-manager-*&label=hy2tun-manager)](https://github.com/ayeaaaa/hy2tun/releases/tag/hy2tun-manager-v0.1.1)
+[![manager release](https://img.shields.io/github/v/release/ayeaaaa/hy2tun?filter=hy2tun-manager-*&label=hy2tun-manager)](https://github.com/ayeaaaa/hy2tun/releases/tag/hy2tun-manager-v0.1.2)
 
 `hy2tun-manager` 是一个独立、可选的多服务端控制台，用于管理已有的
 `hy2tund` 服务端。每台服务端只需接入一次（反向代理后的 Web 地址和管理员
@@ -446,8 +446,9 @@ manager 只调用服务端现有 Web API，不改变 `hy2tund`/`hy2tun` 数据�
 不会连接 manager。第一版明确不修改客户端本机配置，也不做客户端到服务端的
 连接编排，这些属于后续功能。
 
-manager 使用独立的 Linux amd64/arm64 发布包。首次登录用户名和密码都是
-`admin`，请首次登录后立即修改。安装、反向代理、重置管理员和安全说明见
+manager 使用独立的 Linux amd64/arm64 发布包；仓库也提供 `manager` Docker
+target 和 Compose 服务。首次登录用户名和密码都是 `admin`，请首次登录后立即
+修改。安装、反向代理、重置管理员和安全说明见
 [`docs/hy2tun-manager.zh-CN.md`](docs/hy2tun-manager.zh-CN.md)。由于它持有
 所有上游服务端的管理员凭据，应把它视为高敏感的单管理员服务。
 

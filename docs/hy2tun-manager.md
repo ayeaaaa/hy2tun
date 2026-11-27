@@ -106,6 +106,30 @@ existing administrator.
 Open the manager at `http://127.0.0.1:7600/` through an SSH tunnel for the first
 login, or through the HTTPS reverse proxy below. Log in as `admin`.
 
+## Docker
+
+The repository Dockerfile has a `manager` target; the Compose file exposes it
+as the `hy2tun-manager` service. The image runs as nonroot UID/GID `65532` and
+uses host networking, matching the default loopback listener used by the native
+install.
+
+```sh
+docker compose build hy2tun-manager
+mkdir -p manager-config manager-state
+cp examples/manager.yaml manager-config/manager.yaml
+sudo chown -R 65532:65532 manager-config manager-state
+docker compose up -d hy2tun-manager
+```
+
+Configuration lives in `manager-config/manager.yaml`; state, key, audit, and
+the single-instance lock live in `manager-state/`. Back up the state and key
+together. The manager remains reachable at the host's loopback `127.0.0.1:7600`
+and should be published through the host's HTTPS reverse proxy or VPN.
+
+The container must run on a Linux host because the Compose service uses host
+networking and the manager is a Linux-only release. Do not run multiple manager
+containers against the same state directory; the process lock is per container.
+
 ## Reset the administrator password
 
 The manager snapshots the administrator hash when its HTTP shell starts, so a

@@ -1,5 +1,7 @@
 /bin/
 /dist/
+/manager-config/
+/manager-state/
 *.test
 coverage.out
 RELEASE_NOTES.md

@@ -32,3 +32,19 @@ services:
       - ./config:/etc/hy2tun
     depends_on:
       - hy2tund
+
+  hy2tun-manager:
+    build:
+      context: .
+      target: manager
+    network_mode: host
+    restart: unless-stopped
+    # The manager is single-instance and owns its lock/state/key/audit files.
+    # Create ./manager-config and ./manager-state on the host, copy
+    # examples/manager.yaml to manager-config/manager.yaml, and chown both
+    # directories to UID/GID 65532 before starting. Host networking keeps the
+    # default manager listener on host loopback for the reverse proxy.
+    user: "${HY2TUN_UID:-65532}:${HY2TUN_GID:-65532}"
+    volumes:
+      - ./manager-config:/etc/hy2tun
+      - ./manager-state:/var/lib/hy2tun-manager
