@@ -10,7 +10,11 @@
     <p class="muted mono wrap">{{.Client.ID}}</p>
   </div>
   <div class="page-actions">
+    {{if .LoadError}}
+    <span class="state-badge muted">状态未知</span>
+    {{else}}
     <span class="state-badge {{.Client.StateClass}}">{{.Client.OnlineLabel}}</span>
+    {{end}}
     <a class="btn btn-quiet" href="{{.BasePath}}servers/{{.Server.ID}}/clients/{{.Client.PathID}}">刷新页面</a>
   </div>
 </div>
@@ -74,7 +78,7 @@
     <fieldset class="mapping-add-fields" {{if .Client.ReadOnly}}disabled{{end}}>
       <label class="field">
         <span class="field-label">类型</span>
-        <select class="input" data-mapping-add-field="type">
+        <select class="input" data-mapping-add-field="type" {{if .Client.ReadOnly}}disabled{{end}}>
           <option value="tcp">TCP</option>
           <option value="udp">UDP</option>
         </select>
@@ -82,26 +86,26 @@
       <label class="field">
         <span class="field-label">远程端口（0 = 自动）</span>
         <input class="input" type="number" min="0" max="65535" step="1" inputmode="numeric"
-               value="0" data-mapping-add-field="remote_port">
+               value="0" data-mapping-add-field="remote_port" {{if .Client.ReadOnly}}disabled{{end}}>
       </label>
       <label class="field">
         <span class="field-label">本地地址</span>
         <input class="input mono" type="text" required placeholder="127.0.0.1:22"
-               data-mapping-add-field="local_addr">
+               data-mapping-add-field="local_addr" {{if .Client.ReadOnly}}disabled{{end}}>
       </label>
       <label class="field">
         <span class="field-label">备注</span>
-        <input class="input" type="text" maxlength="128" data-mapping-add-field="note">
+        <input class="input" type="text" maxlength="128" data-mapping-add-field="note" {{if .Client.ReadOnly}}disabled{{end}}>
       </label>
       <label class="field">
         <span class="field-label">暴露范围</span>
-        <select class="input" data-mapping-add-field="exposure">
+        <select class="input" data-mapping-add-field="exposure" {{if .Client.ReadOnly}}disabled{{end}}>
           <option value="public">公网</option>
           <option value="local">仅本机</option>
         </select>
       </label>
       <label class="field checkbox-field">
-        <input type="checkbox" checked data-mapping-add-field="enabled">
+        <input type="checkbox" checked data-mapping-add-field="enabled" {{if .Client.ReadOnly}}disabled{{end}}>
         <span>新增后立即启用</span>
       </label>
       <div class="form-actions">

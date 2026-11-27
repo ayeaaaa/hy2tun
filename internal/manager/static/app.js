@@ -295,6 +295,18 @@
     });
   };
 
+  const freezeExposureControl = (row, button) => {
+    if (!row) {
+      return;
+    }
+    row.setAttribute("data-exposure-frozen", "true");
+    const select = row.querySelector("[data-exposure-select]");
+    if (select) {
+      select.disabled = true;
+    }
+    button.disabled = true;
+  };
+
   const mappingEndpoint = mappingTable ? mappingTable.dataset.endpoint : "";
   const mappingBaseRevision = mappingTable
     ? Number(mappingTable.dataset.baseRevision || 0)
@@ -407,7 +419,10 @@
         await sendMappings(mappings, null, `映射 ${mappingID} 已删除。`);
       } catch (_error) {
         showNotice("无法连接到管理器，请检查网络。", "error");
-        button.disabled = false;
+      } finally {
+        if (!mappingTable.hasAttribute("data-frozen")) {
+          button.disabled = false;
+        }
       }
     });
   });
@@ -427,7 +442,10 @@
         await sendMappings(mappings, null, "映射启用状态已更新。");
       } catch (_error) {
         showNotice("无法连接到管理器，请检查网络。", "error");
-        button.disabled = false;
+      } finally {
+        if (!mappingTable.hasAttribute("data-frozen")) {
+          button.disabled = false;
+        }
       }
     });
   });
@@ -500,6 +518,9 @@
         if (!response.ok) {
           const message = data && data.error ? data.error : "调整暴露范围失败，请稍后再试。";
           mappingShownError(message, data);
+          if (data && data.reload) {
+            freezeExposureControl(row, button);
+          }
           return;
         }
         showNotice("暴露范围已更新。", "info");
@@ -507,7 +528,9 @@
       } catch (_error) {
         showNotice("无法连接到管理器，请检查网络。", "error");
       } finally {
-        button.disabled = false;
+        if (!row.hasAttribute("data-exposure-frozen")) {
+          button.disabled = false;
+        }
       }
     });
   });

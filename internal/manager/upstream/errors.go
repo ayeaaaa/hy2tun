@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"hy2tun/internal/view"
 )
 
 // Stable upstream JSON error codes the manager branches on. Do not classify a
@@ -22,14 +24,32 @@ const (
 	CodeExposureConflict = "exposure_conflict"
 )
 
+// MappingPushResult is one per-mapping result from a rejected or partially
+// applied mapping push. It mirrors the server's push results without exposing
+// credentials.
+type MappingPushResult struct {
+	ID           string `json:"id"`
+	OK           bool   `json:"ok"`
+	AssignedPort int    `json:"assigned_port"`
+	Error        string `json:"error"`
+}
+
 // APIError is a non-2xx upstream response. Code is the server's JSON code
 // verbatim; it is empty when the server did not supply one. Message never
-// contains a request password or token.
+// contains a request password or token. The optional detail fields preserve
+// the server's partial-apply and exposure-conflict state for the operator.
 type APIError struct {
 	Status     int
 	Code       string
 	Message    string
 	RetryAfter time.Duration
+
+	Revision            int64
+	Partial             bool
+	Results             []MappingPushResult
+	ActiveExposure      view.Exposure
+	UnavailableFamilies []string
+	Closed              bool
 }
 
 // Error implements error. It never contains credentials, only the upstream
@@ -62,10 +82,16 @@ const maxErrorMessageRunes = 512
 // echoing arbitrary HTML.
 func newAPIError(status int, header http.Header, body []byte, secrets ...string) *APIError {
 	var payload struct {
-		Error      string `json:"error"`
-		Message    string `json:"message"`
-		Code       string `json:"code"`
-		RetryAfter int64  `json:"retry_after"`
+		Error               string              `json:"error"`
+		Message             string              `json:"message"`
+		Code                string              `json:"code"`
+		RetryAfter          int64               `json:"retry_after"`
+		Revision            int64               `json:"revision"`
+		Partial             bool                `json:"partial"`
+		Results             []MappingPushResult `json:"results"`
+		ActiveExposure      view.Exposure       `json:"active_exposure"`
+		UnavailableFamilies []string            `json:"unavailable_families"`
+		Closed              bool                `json:"closed"`
 	}
 	_ = json.Unmarshal(body, &payload)
 
@@ -82,11 +108,22 @@ func newAPIError(status int, header http.Header, body []byte, secrets ...string)
 	if retryAfter == 0 && payload.RetryAfter > 0 {
 		retryAfter = time.Duration(payload.RetryAfter) * time.Second
 	}
+	results := make([]MappingPushResult, len(payload.Results))
+	for index, result := range payload.Results {
+		result.Error = truncateRunes(redactSecrets(result.Error, secrets), maxErrorMessageRunes)
+		results[index] = result
+	}
 	return &APIError{
-		Status:     status,
-		Code:       strings.TrimSpace(payload.Code),
-		Message:    message,
-		RetryAfter: retryAfter,
+		Status:              status,
+		Code:                strings.TrimSpace(payload.Code),
+		Message:             message,
+		RetryAfter:          retryAfter,
+		Revision:            payload.Revision,
+		Partial:             payload.Partial,
+		Results:             results,
+		ActiveExposure:      payload.ActiveExposure,
+		UnavailableFamilies: append([]string(nil), payload.UnavailableFamilies...),
+		Closed:              payload.Closed,
 	}
 }
 

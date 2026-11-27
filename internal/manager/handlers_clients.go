@@ -23,6 +23,7 @@ const (
 
 	mappingUpdateAction   = "mapping.update"
 	mappingExposureAction = "mapping.exposure"
+	mappingRefetchAction  = "mapping.refetch"
 )
 
 // mappingPushPayload is the manager-side mirror of hy2tund's full-list mapping
@@ -49,6 +50,23 @@ func (e *clientOperationError) Error() string {
 	}
 	return e.Message
 }
+
+// postMutationReadError marks a mutation that the upstream API accepted but
+// whose confirming client-detail read failed. The handler records the mutation
+// success and the refetch failure as separate audit entries instead of claiming
+// the write itself failed.
+type postMutationReadError struct {
+	Err error
+}
+
+func (e *postMutationReadError) Error() string {
+	if e == nil || e.Err == nil {
+		return "mutation applied but client refresh failed"
+	}
+	return e.Err.Error()
+}
+
+func (e *postMutationReadError) Unwrap() error { return e.Err }
 
 func (s *WebServer) handleClientsPage(w http.ResponseWriter, r *http.Request) {
 	if s.inventory == nil {
@@ -187,12 +205,18 @@ func (s *WebServer) handlePushClientMappings(w http.ResponseWriter, r *http.Requ
 		// push; never echo the stale form or a locally incremented revision.
 		loaded, readErr := client.Client(callCtx, clientID)
 		if readErr != nil {
-			return readErr
+			return &postMutationReadError{Err: readErr}
 		}
 		refreshed = loaded
 		return nil
 	})
 	if mutationErr != nil {
+		var refetch *postMutationReadError
+		if errors.As(mutationErr, &refetch) {
+			s.recordAppliedMutationWithRefetchFailure(ctx, inventory, record, mappingUpdateAction, auditTarget, refetch.Err)
+			s.writeClientMutationAppliedError(w, refetch.Err)
+			return
+		}
 		s.finishClientMutationAudit(ctx, inventory, record, mappingUpdateAction, auditTarget, "error", mutationErr)
 		s.writeClientMutationError(w, mutationErr)
 		return
@@ -248,12 +272,18 @@ func (s *WebServer) handleSetMappingExposure(w http.ResponseWriter, r *http.Requ
 		}
 		loaded, readErr := client.Client(callCtx, clientID)
 		if readErr != nil {
-			return readErr
+			return &postMutationReadError{Err: readErr}
 		}
 		refreshed = loaded
 		return nil
 	})
 	if mutationErr != nil {
+		var refetch *postMutationReadError
+		if errors.As(mutationErr, &refetch) {
+			s.recordAppliedMutationWithRefetchFailure(ctx, inventory, record, mappingExposureAction, target, refetch.Err)
+			s.writeClientMutationAppliedError(w, refetch.Err)
+			return
+		}
 		s.finishClientMutationAudit(ctx, inventory, record, mappingExposureAction, target, "error", mutationErr)
 		s.writeClientMutationError(w, mutationErr)
 		return
@@ -372,6 +402,13 @@ func (s *WebServer) finishClientMutationAudit(ctx context.Context, inventory *In
 	inventory.appendAuditBestEffort(ctx, entry)
 }
 
+// recordAppliedMutationWithRefetchFailure keeps the accepted mutation and the
+// confirming read failure as separate terminal audit records.
+func (s *WebServer) recordAppliedMutationWithRefetchFailure(ctx context.Context, inventory *Inventory, record ServerRecord, action, target string, refetchErr error) {
+	s.finishClientMutationAudit(ctx, inventory, record, action, target, "ok", nil)
+	s.finishClientMutationAudit(ctx, inventory, record, mappingRefetchAction, target, "error", refetchErr)
+}
+
 func clientErrorMessage(err error) string {
 	if err == nil {
 		return ""
@@ -425,10 +462,7 @@ func clientErrorCode(err error) string {
 
 func (s *WebServer) writeClientMutationError(w http.ResponseWriter, err error) {
 	status, code, message, reload, retryAfter := classifyClientMutationError(err)
-	if retryAfter > 0 {
-		seconds := int64((retryAfter + time.Second - 1) / time.Second)
-		w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
-	}
+	message = clientRetryMessage(message, retryAfter, w)
 	body := map[string]any{"error": message}
 	if code != "" {
 		body["code"] = code
@@ -436,7 +470,63 @@ func (s *WebServer) writeClientMutationError(w http.ResponseWriter, err error) {
 	if reload {
 		body["reload"] = true
 	}
+	addClientErrorDetails(body, err)
 	writeJSON(w, status, body)
+}
+
+// writeClientMutationAppliedError reports a mutation that the upstream API
+// accepted but whose confirming read failed. It must not claim the write failed
+// or tell the operator to retry the stale form as if nothing was applied.
+func (s *WebServer) writeClientMutationAppliedError(w http.ResponseWriter, err error) {
+	status, code, message, _, retryAfter := classifyClientMutationError(err)
+	if status == http.StatusBadRequest || status == http.StatusConflict || status == http.StatusNotFound {
+		status = http.StatusBadGateway
+	}
+	message = clientRetryMessage(message, retryAfter, w)
+	body := map[string]any{
+		"error":   "变更已保存，但读取最新客户端状态失败：" + message,
+		"applied": true,
+		"reload":  true,
+	}
+	if code != "" {
+		body["code"] = code
+	}
+	addClientErrorDetails(body, err)
+	writeJSON(w, status, body)
+}
+
+func clientRetryMessage(message string, retryAfter time.Duration, w http.ResponseWriter) string {
+	if retryAfter <= 0 {
+		return message
+	}
+	seconds := int64((retryAfter + time.Second - 1) / time.Second)
+	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+	return fmt.Sprintf("%s（%d 秒后可重试）", message, seconds)
+}
+
+func addClientErrorDetails(body map[string]any, err error) {
+	var apiError *upstream.APIError
+	if !errors.As(err, &apiError) {
+		return
+	}
+	if apiError.Revision != 0 {
+		body["revision"] = apiError.Revision
+	}
+	if apiError.Partial {
+		body["partial"] = true
+	}
+	if len(apiError.Results) > 0 {
+		body["results"] = apiError.Results
+	}
+	if strings.TrimSpace(string(apiError.ActiveExposure)) != "" {
+		body["active_exposure"] = apiError.ActiveExposure
+	}
+	if len(apiError.UnavailableFamilies) > 0 {
+		body["unavailable_families"] = apiError.UnavailableFamilies
+	}
+	if apiError.Closed {
+		body["closed"] = true
+	}
 }
 
 func classifyClientMutationError(err error) (status int, code, message string, reload bool, retryAfter time.Duration) {
@@ -460,7 +550,7 @@ func classifyClientMutationError(err error) (status int, code, message string, r
 		case apiError.Status == http.StatusConflict:
 			return http.StatusConflict, code, message, true, 0
 		case apiError.Status == http.StatusTooManyRequests:
-			return http.StatusTooManyRequests, code, message, true, apiError.RetryAfter
+			return http.StatusTooManyRequests, code, message, false, apiError.RetryAfter
 		case apiError.Status == http.StatusUnauthorized || apiError.Status == http.StatusForbidden:
 			return http.StatusBadGateway, code, message, false, 0
 		default:

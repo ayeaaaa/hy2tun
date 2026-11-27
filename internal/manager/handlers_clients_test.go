@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/net/html"
 
 	"hy2tun/internal/config"
 	managerupstream "hy2tun/internal/manager/upstream"
@@ -43,21 +45,34 @@ type fakeClientUpstream struct {
 	server    *httptest.Server
 	closeOnce sync.Once
 
-	mu                 sync.Mutex
-	loginCount         int
-	clientGetCount     int
-	clients            map[string]managerupstream.ClientView
-	pushRequests       []fakeMappingPush
-	exposureRequests   []fakeExposurePush
-	pushStatus         int
-	pushCode           string
-	pushMessage        string
-	exposureStatus     int
-	exposureCode       string
-	exposureMessage    string
-	overviewGate       <-chan struct{}
-	overviewStarted    chan struct{}
-	overviewStartTaken bool
+	mu                   sync.Mutex
+	loginCount           int
+	clientGetCount       int
+	mappingAttemptCount  int
+	exposureAttemptCount int
+	clients              map[string]managerupstream.ClientView
+	pushRequests         []fakeMappingPush
+	exposureRequests     []fakeExposurePush
+	pushStatus           int
+	pushCode             string
+	pushMessage          string
+	pushDetails          map[string]any
+	exposureStatus       int
+	exposureCode         string
+	exposureMessage      string
+	exposureDetails      map[string]any
+	clientDetailStatus   int
+	clientDetailCode     string
+	clientDetailMessage  string
+	afterMutationStatus  int
+	afterMutationCode    string
+	afterMutationMessage string
+	nextClientGetStatus  int
+	nextClientGetCode    string
+	nextClientGetMessage string
+	overviewGate         <-chan struct{}
+	overviewStarted      chan struct{}
+	overviewStartTaken   bool
 }
 
 func newFakeClientUpstream(t *testing.T) *fakeClientUpstream {
@@ -107,19 +122,59 @@ func (f *fakeClientUpstream) BaseURL() string { return f.server.URL + fakeUpstre
 func (f *fakeClientUpstream) close() { f.closeOnce.Do(f.server.Close) }
 
 func (f *fakeClientUpstream) failMappings(status int, code, message string) {
+	f.failMappingsDetails(status, code, message, nil)
+}
+
+func (f *fakeClientUpstream) failMappingsDetails(status int, code, message string, details map[string]any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pushStatus = status
 	f.pushCode = code
 	f.pushMessage = message
+	f.pushDetails = cloneAnyMap(details)
 }
 
 func (f *fakeClientUpstream) failExposure(status int, code, message string) {
+	f.failExposureDetails(status, code, message, nil)
+}
+
+func (f *fakeClientUpstream) failExposureDetails(status int, code, message string, details map[string]any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.exposureStatus = status
 	f.exposureCode = code
 	f.exposureMessage = message
+	f.exposureDetails = cloneAnyMap(details)
+}
+
+func (f *fakeClientUpstream) failClientDetail(status int, code, message string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.clientDetailStatus = status
+	f.clientDetailCode = code
+	f.clientDetailMessage = message
+}
+
+// failAfterMutation makes the first client-detail read after a successful
+// mapping push or exposure return an error, simulating a write that reached the
+// server but whose confirming read failed.
+func (f *fakeClientUpstream) failAfterMutation(status int, code, message string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.afterMutationStatus = status
+	f.afterMutationCode = code
+	f.afterMutationMessage = message
+}
+
+func cloneAnyMap(values map[string]any) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 func (f *fakeClientUpstream) setOnline(clientID string, online bool) {
@@ -140,6 +195,24 @@ func (f *fakeClientUpstream) clientGets() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.clientGetCount
+}
+
+func (f *fakeClientUpstream) mappingAttempts() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.mappingAttemptCount
+}
+
+func (f *fakeClientUpstream) exposureAttempts() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.exposureAttemptCount
+}
+
+func (f *fakeClientUpstream) setClient(clientID string, client managerupstream.ClientView) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.clients[clientID] = client
 }
 
 func (f *fakeClientUpstream) pushes() []fakeMappingPush {
@@ -263,6 +336,25 @@ func (f *fakeClientUpstream) handle(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 1 && r.Method == http.MethodGet:
 		f.mu.Lock()
 		f.clientGetCount++
+		if f.clientDetailStatus != 0 {
+			status := f.clientDetailStatus
+			code := f.clientDetailCode
+			message := f.clientDetailMessage
+			f.mu.Unlock()
+			writeTestJSON(w, status, map[string]any{"error": message, "code": code})
+			return
+		}
+		if f.nextClientGetStatus != 0 {
+			status := f.nextClientGetStatus
+			code := f.nextClientGetCode
+			message := f.nextClientGetMessage
+			f.nextClientGetStatus = 0
+			f.nextClientGetCode = ""
+			f.nextClientGetMessage = ""
+			f.mu.Unlock()
+			writeTestJSON(w, status, map[string]any{"error": message, "code": code})
+			return
+		}
 		client, ok := f.clients[clientID]
 		f.mu.Unlock()
 		if !ok {
@@ -309,11 +401,16 @@ func (f *fakeClientUpstream) handlePushMappings(w http.ResponseWriter, r *http.R
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.mappingAttemptCount++
 	if f.pushStatus != 0 {
 		status := f.pushStatus
 		code := f.pushCode
 		message := f.pushMessage
-		writeTestJSON(w, status, map[string]any{"error": message, "code": code})
+		body := map[string]any{"error": message, "code": code}
+		for key, value := range f.pushDetails {
+			body[key] = value
+		}
+		writeTestJSON(w, status, body)
 		return
 	}
 	client, ok := f.clients[clientID]
@@ -336,6 +433,11 @@ func (f *fakeClientUpstream) handlePushMappings(w http.ResponseWriter, r *http.R
 	client.Mappings = applyMappingPush(client.Mappings, payload.Mappings, payload.Exposures)
 	client.Revision++
 	f.clients[clientID] = client
+	if f.afterMutationStatus != 0 {
+		f.nextClientGetStatus = f.afterMutationStatus
+		f.nextClientGetCode = f.afterMutationCode
+		f.nextClientGetMessage = f.afterMutationMessage
+	}
 	writeTestJSON(w, http.StatusOK, map[string]any{"revision": client.Revision})
 }
 
@@ -350,11 +452,16 @@ func (f *fakeClientUpstream) handleExposure(w http.ResponseWriter, r *http.Reque
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.exposureAttemptCount++
 	if f.exposureStatus != 0 {
 		status := f.exposureStatus
 		code := f.exposureCode
 		message := f.exposureMessage
-		writeTestJSON(w, status, map[string]any{"error": message, "code": code})
+		body := map[string]any{"error": message, "code": code}
+		for key, value := range f.exposureDetails {
+			body[key] = value
+		}
+		writeTestJSON(w, status, body)
 		return
 	}
 	client, ok := f.clients[clientID]
@@ -371,6 +478,11 @@ func (f *fakeClientUpstream) handleExposure(w http.ResponseWriter, r *http.Reque
 		})
 		client.Mappings[index].Exposure = payload.Exposure
 		f.clients[clientID] = client
+		if f.afterMutationStatus != 0 {
+			f.nextClientGetStatus = f.afterMutationStatus
+			f.nextClientGetCode = f.afterMutationCode
+			f.nextClientGetMessage = f.afterMutationMessage
+		}
 		writeTestJSON(w, http.StatusOK, client.Mappings[index])
 		return
 	}
@@ -533,7 +645,7 @@ func TestClientMappingConflictAndOfflineRules(t *testing.T) {
 	require.NoError(t, err)
 	readBody(t, resp)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
-	require.Empty(t, upstream.pushes())
+	require.Zero(t, upstream.mappingAttempts(), "CSRF rejection must not reach upstream")
 
 	upstream.failMappings(http.StatusConflict, managerupstream.CodeConflict, "客户端配置已更新，请刷新后重试")
 	resp, body = env.putJSON(t, endpoint, map[string]any{
@@ -553,12 +665,14 @@ func TestClientMappingConflictAndOfflineRules(t *testing.T) {
 	require.Equal(t, managerupstream.CodeConflict, conflict.Code)
 	require.Contains(t, conflict.Error, "刷新")
 	require.True(t, conflict.Reload)
-	require.Empty(t, upstream.pushes(), "a conflict must not be retried or forwarded twice")
+	require.Equal(t, 1, upstream.mappingAttempts(), "a conflict must be attempted exactly once, never retried")
+	require.Empty(t, upstream.pushes(), "a rejected conflict is not a recorded success")
 
 	upstream.failExposure(http.StatusConflict, managerupstream.CodeExposureConflict, "映射暴露范围切换失败，已保留当前状态")
 	resp, body = env.putJSON(t, endpoint+"/m1/exposure", map[string]any{"exposure": "local"})
 	require.Equal(t, http.StatusConflict, resp.StatusCode, body)
 	require.Contains(t, body, managerupstream.CodeExposureConflict)
+	require.Equal(t, 1, upstream.exposureAttempts(), "an exposure conflict must be attempted exactly once")
 	require.Empty(t, upstream.exposures())
 
 	upstream.failMappings(http.StatusConflict, managerupstream.CodeClientOffline, "客户端离线，无法修改配置")
@@ -571,18 +685,54 @@ func TestClientMappingConflictAndOfflineRules(t *testing.T) {
 	})
 	require.Equal(t, http.StatusConflict, resp.StatusCode, body)
 	require.Contains(t, body, managerupstream.CodeClientOffline)
+	require.Equal(t, 2, upstream.mappingAttempts(), "upstream client_offline is one attempt, not a retry")
 	require.Empty(t, upstream.pushes())
 
 	// A client that the fresh detail reports as offline disables mapping
-	// controls without blocking the exposure-only server-side operation.
+	// controls and must be rejected by the manager before any upstream push.
 	upstream.setOnline("c1", false)
+	upstream.failMappings(0, "", "")
+	attemptsBeforeOffline := upstream.mappingAttempts()
+	resp, body = env.putJSON(t, endpoint, map[string]any{
+		"base_revision": 7,
+		"mappings": []map[string]any{{
+			"id": "m1", "type": "tcp", "remote_port": 8080,
+			"local_addr": "127.0.0.1:22", "note": "must not reach upstream", "enabled": true,
+		}},
+	})
+	require.Equal(t, http.StatusConflict, resp.StatusCode, body)
+	require.Contains(t, body, managerupstream.CodeClientOffline)
+	require.Equal(t, attemptsBeforeOffline, upstream.mappingAttempts(),
+		"an offline client mapping edit must be rejected before the upstream PUT")
+
 	status, page := env.getPage(t, "/servers/"+server.ID+"/clients/c1")
 	require.Equal(t, http.StatusOK, status, page)
 	require.Contains(t, page, "离线客户端不可编辑")
-	require.Contains(t, page, `data-mapping-save-list`)
-	require.Contains(t, page, "disabled")
 	require.Contains(t, page, "暴露范围仍可调整")
 
+	mappingFields := htmlElementsWithAttr(t, page, "data-mapping-field")
+	require.Len(t, mappingFields, 5)
+	for _, field := range mappingFields {
+		require.True(t, htmlHasAttr(field, "disabled"), "every mapping field must be disabled while offline")
+	}
+	addFields := htmlElementsWithAttr(t, page, "data-mapping-add-field")
+	require.Len(t, addFields, 6)
+	for _, field := range addFields {
+		require.True(t, htmlHasAttr(field, "disabled"), "every add-mapping field must be disabled while offline")
+	}
+	for _, attr := range []string{"data-mapping-save-list", "data-mapping-delete", "data-mapping-toggle"} {
+		controls := htmlElementsWithAttr(t, page, attr)
+		require.Len(t, controls, 1, attr)
+		require.True(t, htmlHasAttr(controls[0], "disabled"), "%s must be disabled while offline", attr)
+	}
+	exposureSelects := htmlElementsWithAttr(t, page, "data-exposure-select")
+	require.Len(t, exposureSelects, 1)
+	require.False(t, htmlHasAttr(exposureSelects[0], "disabled"), "offline exposure control must remain enabled")
+	exposureButtons := htmlElementsWithAttr(t, page, "data-mapping-exposure")
+	require.Len(t, exposureButtons, 1)
+	require.False(t, htmlHasAttr(exposureButtons[0], "disabled"), "offline exposure action must remain enabled")
+
+	exposureAttemptsBefore := upstream.exposureAttempts()
 	upstream.failExposure(0, "", "")
 	resp, body = env.putJSON(t, endpoint+"/m1/exposure", map[string]any{"exposure": "local"})
 	require.Equal(t, http.StatusOK, resp.StatusCode, body)
@@ -590,6 +740,7 @@ func TestClientMappingConflictAndOfflineRules(t *testing.T) {
 	require.Len(t, exposures, 1)
 	require.Equal(t, "m1", exposures[0].MappingID)
 	require.Equal(t, view.ExposureLocal, exposures[0].Exposure)
+	require.Equal(t, exposureAttemptsBefore+1, upstream.exposureAttempts())
 
 	entries := auditEntries(t, env.audit)
 	require.NotEmpty(t, entries)
@@ -611,6 +762,274 @@ func TestClientMappingConflictAndOfflineRules(t *testing.T) {
 	require.True(t, sawOffline)
 	require.True(t, sawExposure)
 	require.NotContains(t, readAuditRaw(t, env.audit), "upstream-pw")
+}
+
+func TestClientPageLoadFailureShowsUnknownState(t *testing.T) {
+	upstream := newFakeClientUpstream(t)
+	env := newManagerTestEnv(t)
+
+	resp, body := env.postJSON(t, "/api/servers", addServerPayload("us", upstream.BaseURL(), "upstream-pw"))
+	require.Equal(t, http.StatusCreated, resp.StatusCode, body)
+	var server ServerView
+	require.NoError(t, json.Unmarshal([]byte(body), &server))
+
+	upstream.failClientDetail(http.StatusInternalServerError, "internal", "client detail unavailable")
+	status, page := env.getPage(t, "/servers/"+server.ID+"/clients/c1")
+	require.Equal(t, http.StatusBadGateway, status)
+	require.Contains(t, page, "状态未知")
+	require.Contains(t, page, "client detail unavailable")
+	require.NotContains(t, page, "离线客户端不可编辑")
+	require.NotContains(t, page, ">离线<", "a failed read must not claim the client is offline")
+}
+
+func TestClientPageEscapesAdversarialIDs(t *testing.T) {
+	upstream := newFakeClientUpstream(t)
+	env := newManagerTestEnv(t)
+
+	resp, body := env.postJSON(t, "/api/servers", addServerPayload("us", upstream.BaseURL(), "upstream-pw"))
+	require.Equal(t, http.StatusCreated, resp.StatusCode, body)
+	var server ServerView
+	require.NoError(t, json.Unmarshal([]byte(body), &server))
+
+	clientID := `c1<script>"&`
+	mappingID := `m1<img src=x>`
+	upstream.setClient(clientID, managerupstream.ClientView{
+		ID:       clientID,
+		Name:     `<b>laptop</b>`,
+		Version:  "v1.7.4",
+		Revision: 3,
+		Online:   true,
+		Mappings: []managerupstream.MappingView{{
+			Mapping: config.Mapping{
+				ID: mappingID, Type: "tcp", RemotePort: 22,
+				LocalAddr: "127.0.0.1:22", Note: `<script>alert(1)</script>`, Enabled: true,
+			},
+			Status: "running", Exposure: view.ExposurePublic,
+		}},
+	})
+
+	status, page := env.getPage(t, "/servers/"+server.ID+"/clients")
+	require.Equal(t, http.StatusOK, status)
+	require.Contains(t, page, "c1&lt;script&gt;")
+	require.NotContains(t, page, `c1<script>"&`)
+
+	status, page = env.getPage(t, "/servers/"+server.ID+"/clients/"+url.PathEscape(clientID))
+	require.Equal(t, http.StatusOK, status, page)
+	require.Contains(t, page, "m1&lt;img src=x&gt;")
+	require.NotContains(t, page, "m1<img src=x>")
+	require.Contains(t, page, "&lt;script&gt;alert(1)&lt;/script&gt;")
+	require.NotContains(t, page, "<script>alert(1)</script>")
+	require.NotContains(t, page, `c1<script>"&`)
+}
+
+func TestClientMappingErrorClassificationAndAttempts(t *testing.T) {
+	upstream := newFakeClientUpstream(t)
+	env := newManagerTestEnv(t)
+
+	resp, body := env.postJSON(t, "/api/servers", addServerPayload("us", upstream.BaseURL(), "upstream-pw"))
+	require.Equal(t, http.StatusCreated, resp.StatusCode, body)
+	var server ServerView
+	require.NoError(t, json.Unmarshal([]byte(body), &server))
+	endpoint := "/api/servers/" + server.ID + "/clients/c1/mappings"
+	payload := map[string]any{
+		"base_revision": 7,
+		"mappings": []map[string]any{{
+			"id": "m1", "type": "tcp", "remote_port": 8080,
+			"local_addr": "127.0.0.1:22", "note": "error matrix", "enabled": true,
+		}},
+	}
+
+	cases := []struct {
+		name       string
+		status     int
+		code       string
+		details    map[string]any
+		wantStatus int
+		wantReload bool
+	}{
+		{
+			name:   "partial_apply",
+			status: http.StatusConflict,
+			code:   managerupstream.CodePartialApply,
+			details: map[string]any{
+				"revision": 9,
+				"partial":  true,
+				"results": []map[string]any{{
+					"id": "m1", "ok": false, "error": "bind failed",
+				}},
+			},
+			wantStatus: http.StatusConflict,
+			wantReload: true,
+		},
+		{"push_rejected", http.StatusConflict, managerupstream.CodePushRejected, nil, http.StatusConflict, true},
+		{"client_not_ready", http.StatusConflict, managerupstream.CodeClientNotReady, nil, http.StatusConflict, true},
+		{"invalid_mapping", http.StatusBadRequest, "invalid_mapping", nil, http.StatusBadRequest, false},
+		{"client_not_found", http.StatusNotFound, "client_not_found", nil, http.StatusNotFound, true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			upstream.failMappingsDetails(testCase.status, testCase.code, "upstream message for "+testCase.name, testCase.details)
+			before := upstream.mappingAttempts()
+			resp, body = env.putJSON(t, endpoint, payload)
+			require.Equal(t, testCase.wantStatus, resp.StatusCode, body)
+			var got struct {
+				Error    string `json:"error"`
+				Code     string `json:"code"`
+				Reload   bool   `json:"reload"`
+				Revision int64  `json:"revision"`
+				Partial  bool   `json:"partial"`
+				Results  []struct {
+					ID    string `json:"id"`
+					OK    bool   `json:"ok"`
+					Error string `json:"error"`
+				} `json:"results"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(body), &got))
+			require.Equal(t, testCase.code, got.Code)
+			require.Equal(t, testCase.wantReload, got.Reload)
+			require.Equal(t, before+1, upstream.mappingAttempts(), "exactly one upstream mapping attempt")
+			require.Empty(t, upstream.pushes())
+			if testCase.name == "partial_apply" {
+				require.Equal(t, int64(9), got.Revision)
+				require.True(t, got.Partial)
+				require.Len(t, got.Results, 1)
+				require.Equal(t, "m1", got.Results[0].ID)
+				require.False(t, got.Results[0].OK)
+				require.Equal(t, "bind failed", got.Results[0].Error)
+			}
+		})
+	}
+
+	// A 429 is transient: report Retry-After and leave the form usable.
+	upstream.failMappingsDetails(http.StatusTooManyRequests, "rate_limited", "slow down", map[string]any{"retry_after": 3})
+	resp, body = env.putJSON(t, endpoint, payload)
+	require.Equal(t, http.StatusTooManyRequests, resp.StatusCode, body)
+	require.Equal(t, "3", resp.Header.Get("Retry-After"))
+	require.NotContains(t, body, `"reload":true`, "a rate limit must not freeze the form")
+
+	// The exposure path also leaves the control usable after a transient 429.
+	upstream.failExposureDetails(http.StatusTooManyRequests, "rate_limited", "exposure slow down", map[string]any{"retry_after": 2})
+	exposureAttemptsBefore := upstream.exposureAttempts()
+	resp, body = env.putJSON(t, endpoint+"/m1/exposure", map[string]any{"exposure": "local"})
+	require.Equal(t, http.StatusTooManyRequests, resp.StatusCode, body)
+	require.Equal(t, "2", resp.Header.Get("Retry-After"))
+	require.NotContains(t, body, `"reload":true`)
+	require.Equal(t, exposureAttemptsBefore+1, upstream.exposureAttempts())
+
+	// Invalid local input and unknown JSON fields are rejected before upstream.
+	upstream.failMappings(0, "", "")
+	upstream.failExposure(0, "", "")
+	exposureAttemptsBefore = upstream.exposureAttempts()
+	resp, body = env.putJSON(t, endpoint+"/m1/exposure", map[string]any{"exposure": "bogus"})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode, body)
+	require.Equal(t, exposureAttemptsBefore, upstream.exposureAttempts())
+
+	mappingAttemptsBefore := upstream.mappingAttempts()
+	resp, body = env.putJSON(t, endpoint, map[string]any{
+		"base_revision": 7,
+		"mappings":      []map[string]any{},
+		"unexpected":    true,
+	})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode, body)
+	require.Equal(t, mappingAttemptsBefore, upstream.mappingAttempts())
+}
+
+func TestClientExposureConflictPreservesDetails(t *testing.T) {
+	upstream := newFakeClientUpstream(t)
+	env := newManagerTestEnv(t)
+
+	resp, body := env.postJSON(t, "/api/servers", addServerPayload("us", upstream.BaseURL(), "upstream-pw"))
+	require.Equal(t, http.StatusCreated, resp.StatusCode, body)
+	var server ServerView
+	require.NoError(t, json.Unmarshal([]byte(body), &server))
+
+	upstream.failExposureDetails(http.StatusConflict, managerupstream.CodeExposureConflict,
+		"映射暴露范围切换失败，映射已关闭",
+		map[string]any{
+			"active_exposure":      "public",
+			"unavailable_families": []string{"ipv6"},
+			"closed":               true,
+		})
+	before := upstream.exposureAttempts()
+	resp, body = env.putJSON(t, "/api/servers/"+server.ID+"/clients/c1/mappings/m1/exposure", map[string]any{"exposure": "local"})
+	require.Equal(t, http.StatusConflict, resp.StatusCode, body)
+	require.Equal(t, before+1, upstream.exposureAttempts())
+	var got struct {
+		Code                string   `json:"code"`
+		Reload              bool     `json:"reload"`
+		ActiveExposure      string   `json:"active_exposure"`
+		UnavailableFamilies []string `json:"unavailable_families"`
+		Closed              bool     `json:"closed"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &got))
+	require.Equal(t, managerupstream.CodeExposureConflict, got.Code)
+	require.True(t, got.Reload)
+	require.Equal(t, "public", got.ActiveExposure)
+	require.Equal(t, []string{"ipv6"}, got.UnavailableFamilies)
+	require.True(t, got.Closed)
+}
+
+func TestClientMutationRefetchFailureAuditsSuccessSeparately(t *testing.T) {
+	upstream := newFakeClientUpstream(t)
+	env := newManagerTestEnv(t)
+
+	resp, body := env.postJSON(t, "/api/servers", addServerPayload("us", upstream.BaseURL(), "upstream-pw"))
+	require.Equal(t, http.StatusCreated, resp.StatusCode, body)
+	var server ServerView
+	require.NoError(t, json.Unmarshal([]byte(body), &server))
+
+	upstream.failAfterMutation(http.StatusInternalServerError, "internal", "detail refresh failed")
+	resp, body = env.putJSON(t, "/api/servers/"+server.ID+"/clients/c1/mappings", map[string]any{
+		"base_revision": 7,
+		"mappings": []map[string]any{{
+			"id": "m1", "type": "tcp", "remote_port": 8080,
+			"local_addr": "127.0.0.1:22", "note": "applied", "enabled": true,
+		}},
+	})
+	require.Equal(t, http.StatusBadGateway, resp.StatusCode, body)
+	var got struct {
+		Error   string `json:"error"`
+		Applied bool   `json:"applied"`
+		Reload  bool   `json:"reload"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &got))
+	require.True(t, got.Applied)
+	require.True(t, got.Reload)
+	require.Contains(t, got.Error, "已保存")
+	require.Equal(t, 1, upstream.mappingAttempts())
+
+	entries := auditEntries(t, env.audit)
+	require.GreaterOrEqual(t, len(entries), 3)
+	last := entries[len(entries)-1]
+	previous := entries[len(entries)-2]
+	require.Equal(t, "mapping.refetch", last.Action)
+	require.Equal(t, "error", last.Result)
+	require.Equal(t, "mapping.update", previous.Action)
+	require.Equal(t, "ok", previous.Result)
+
+	// The exposure path uses the same applied/refetch split.
+	resp, body = env.putJSON(t, "/api/servers/"+server.ID+"/clients/c1/mappings/m1/exposure", map[string]any{"exposure": "local"})
+	require.Equal(t, http.StatusBadGateway, resp.StatusCode, body)
+	require.NoError(t, json.Unmarshal([]byte(body), &got))
+	require.True(t, got.Applied)
+	require.Equal(t, 1, upstream.exposureAttempts())
+	entries = auditEntries(t, env.audit)
+	last = entries[len(entries)-1]
+	previous = entries[len(entries)-2]
+	require.Equal(t, "mapping.refetch", last.Action)
+	require.Equal(t, "error", last.Result)
+	require.Equal(t, "mapping.exposure", previous.Action)
+	require.Equal(t, "ok", previous.Result)
+}
+
+func TestClientMappingScriptFreezesReloadErrors(t *testing.T) {
+	script, err := managerAssets.ReadFile("static/app.js")
+	require.NoError(t, err)
+	source := string(script)
+	require.Contains(t, source, "freezeMappingEditor();")
+	require.Contains(t, source, "freezeExposureControl(row, button);")
+	require.Contains(t, source, `data-exposure-frozen`)
+	require.Contains(t, source, `if (data && data.reload)`)
 }
 
 func TestClientMappingAuditFailureBlocksUpstreamWrite(t *testing.T) {
@@ -802,6 +1221,33 @@ func TestInventoryWithClientReusesAndRevalidatesClient(t *testing.T) {
 	}))
 	require.NotSame(t, first, third, "a direct store identity change must recreate the upstream client")
 	require.Equal(t, 1, secondUpstream.logins())
+}
+
+func htmlElementsWithAttr(t *testing.T, page, attrName string) []*html.Node {
+	t.Helper()
+	document, err := html.Parse(strings.NewReader(page))
+	require.NoError(t, err)
+	var found []*html.Node
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if node.Type == html.ElementNode && htmlHasAttr(node, attrName) {
+			found = append(found, node)
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(document)
+	return found
+}
+
+func htmlHasAttr(node *html.Node, name string) bool {
+	for _, attribute := range node.Attr {
+		if attribute.Key == name {
+			return true
+		}
+	}
+	return false
 }
 
 func discardResponseBody(response *http.Response) {
