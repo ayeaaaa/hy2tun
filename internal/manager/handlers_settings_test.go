@@ -62,8 +62,9 @@ type fakeSettingsUpstream struct {
 	revokeAttempts   int
 	revokeBodies     []string
 
-	failures     map[string]fakeSettingsFailure
-	rejectLogins bool
+	failures            map[string]fakeSettingsFailure
+	rejectLogins        bool
+	echoRotationSecrets bool
 }
 
 func newFakeSettingsUpstream(t *testing.T) *fakeSettingsUpstream {
@@ -111,6 +112,12 @@ func newFakeSettingsUpstream(t *testing.T) *fakeSettingsUpstream {
 func (f *fakeSettingsUpstream) BaseURL() string { return f.server.URL + fakeUpstreamBasePath }
 
 func (f *fakeSettingsUpstream) close() { f.closeOnce.Do(f.server.Close) }
+
+func (f *fakeSettingsUpstream) setEchoRotationSecrets(echo bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.echoRotationSecrets = echo
+}
 
 func (f *fakeSettingsUpstream) setRejectLogins(reject bool) {
 	f.mu.Lock()
@@ -409,6 +416,11 @@ func (f *fakeSettingsUpstream) handle(w http.ResponseWriter, r *http.Request) {
 		results := []managerupstream.CredentialResult{
 			{ClientID: "c1", Name: "laptop", Generation: next, Status: "synced"},
 			{ClientID: "c2", Name: "phone", Generation: previous, Status: "pending"},
+		}
+		if f.echoRotationSecrets {
+			auth, _ := body["auth"].(string)
+			token, _ := body["control_token"].(string)
+			results[0].Error = "push failed: " + auth + " / " + token
 		}
 		f.mu.Unlock()
 		writeTestJSON(w, http.StatusOK, map[string]any{"generation": next, "results": results})
@@ -715,7 +727,10 @@ func TestWebAdminReloginFailureMarksAuthErrorAndKeepsNewSecret(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode, body)
 	require.Contains(t, body, `"applied":true`)
+	require.Contains(t, body, `"settings_available":false`)
 	require.Contains(t, body, "重新登录失败")
+	require.NotContains(t, body, `"web_username"`)
+	require.NotContains(t, body, `"mode"`)
 	require.NotContains(t, body, "next-secret-pw")
 	require.NotContains(t, body, "upstream-pw")
 
@@ -759,6 +774,178 @@ func TestSettingsSecretSanitizersDoNotLeak(t *testing.T) {
 	require.Equal(t, "ok", results[1].Error)
 }
 
+func TestWebAdminUpdateUsesCurrentInventoryRecordUnderLock(t *testing.T) {
+	upstream := newFakeSettingsUpstream(t)
+	env := newManagerTestEnv(t)
+	server := addFakeSettingsServer(t, env, upstream)
+
+	// Simulate an inventory edit that completes after the handler read its
+	// outer record but before it acquires the per-server operation lock.
+	lock := env.inventory.operationLock(server.ID)
+	lock.Lock()
+	released := false
+	defer func() {
+		if !released {
+			lock.Unlock()
+		}
+	}()
+
+	body, err := json.Marshal(map[string]any{
+		"username":         "ops",
+		"new_password":     "next-secret-pw",
+		"confirm_password": "next-secret-pw",
+	})
+	require.NoError(t, err)
+	request := env.newRequest(t, http.MethodPut, "/api/servers/"+server.ID+"/settings/web", string(body))
+
+	type requestResult struct {
+		status int
+		body   string
+		err    error
+	}
+	done := make(chan requestResult, 1)
+	go func() {
+		response, requestErr := env.server.Client().Do(request)
+		if requestErr != nil {
+			done <- requestResult{err: requestErr}
+			return
+		}
+		defer response.Body.Close()
+		data, readErr := io.ReadAll(response.Body)
+		done <- requestResult{status: response.StatusCode, body: string(data), err: readErr}
+	}()
+
+	require.Eventually(t, func() bool {
+		return auditContainsPending(env.audit.path, "settings.web")
+	}, 2*time.Second, 20*time.Millisecond, "web settings handler did not append its pending audit entry")
+
+	current := findSettingsServerRecordByID(t, env.store, server.ID)
+	current.Name = "concurrent-edit"
+	require.NoError(t, env.store.UpdateServer(current, nil))
+	lock.Unlock()
+	released = true
+
+	var result requestResult
+	select {
+	case result = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("web settings request did not finish")
+	}
+	require.NoError(t, result.err)
+	require.Equal(t, http.StatusOK, result.status, result.body)
+
+	updated := findSettingsServerRecordByID(t, env.store, server.ID)
+	require.Equal(t, "concurrent-edit", updated.Name, "a concurrent inventory name edit must not be clobbered")
+	require.Equal(t, "ops", updated.UpstreamUsername)
+	require.Equal(t, current.BaseURL, updated.BaseURL)
+	require.Equal(t, current.TLSSkipVerify, updated.TLSSkipVerify)
+
+	entries := auditEntries(t, env.audit)
+	var terminal *AuditEntry
+	for index := range entries {
+		if entries[index].Action == settingsWebAction && entries[index].Result == "ok" {
+			terminal = &entries[index]
+		}
+	}
+	require.NotNil(t, terminal)
+	require.Equal(t, "concurrent-edit", terminal.ServerName, "terminal audit should use the current inventory name")
+}
+
+func auditContainsPending(path, action string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var entry AuditEntry
+		if json.Unmarshal([]byte(line), &entry) != nil {
+			continue
+		}
+		if entry.Action == action && entry.Result == "pending" {
+			return true
+		}
+	}
+	return false
+}
+
+func findSettingsServerRecordByID(t *testing.T, store *Store, id string) ServerRecord {
+	t.Helper()
+	for _, record := range store.State().Servers {
+		if record.ID == id {
+			return record
+		}
+	}
+	t.Fatalf("server %q not found in state", id)
+	return ServerRecord{}
+}
+
+func TestRotationClientResultsAreSanitizedInJSONHTMLAndAudit(t *testing.T) {
+	upstream := newFakeSettingsUpstream(t)
+	upstream.setEchoRotationSecrets(true)
+	env := newManagerTestEnv(t)
+	server := addFakeSettingsServer(t, env, upstream)
+	base := "/api/servers/" + server.ID + "/settings"
+
+	jsonAuth := "rotation-json-auth"
+	jsonToken := "rotation-json-token-0123456789"
+	resp, body := env.putJSON(t, base+"/credentials", map[string]any{
+		"auth": jsonAuth, "control_token": jsonToken, "sync_mode": "auto",
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, body)
+	require.Contains(t, body, "[REDACTED]")
+	require.NotContains(t, body, jsonAuth)
+	require.NotContains(t, body, jsonToken)
+	var rotated struct {
+		Results []managerupstream.CredentialResult `json:"results"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &rotated))
+	require.NotEmpty(t, rotated.Results)
+	require.Contains(t, rotated.Results[0].Error, "[REDACTED]")
+
+	htmlAuth := "rotation-html-auth"
+	htmlToken := "rotation-html-token-0123456789"
+	resp, body = env.putForm(t, base+"/credentials", url.Values{
+		"auth":          {htmlAuth},
+		"control_token": {htmlToken},
+		"sync_mode":     {"auto"},
+	}, true)
+	require.Equal(t, http.StatusOK, resp.StatusCode, body)
+	require.Contains(t, body, "[REDACTED]")
+	require.NotContains(t, body, htmlAuth)
+	require.NotContains(t, body, htmlToken)
+
+	rawAudit := readAuditRaw(t, env.audit)
+	for _, secret := range []string{jsonAuth, jsonToken, htmlAuth, htmlToken} {
+		require.NotContains(t, rawAudit, secret)
+	}
+}
+
+func TestFailedFormParsePreservesCurrentSettingValues(t *testing.T) {
+	upstream := newFakeSettingsUpstream(t)
+	env := newManagerTestEnv(t)
+	server := addFakeSettingsServer(t, env, upstream)
+
+	hugeAllow := strings.Repeat("x", settingsBodyLimit+1024)
+	resp, body := env.putForm(t, "/api/servers/"+server.ID+"/settings/ports", url.Values{
+		"allow": {hugeAllow},
+	}, true)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode, body)
+	require.Contains(t, body, "请求体不是有效的表单")
+	require.Contains(t, body, `value="20000-29999"`, "unrelated settings must keep their current values")
+	require.Contains(t, body, `value="30"`, "unrelated settings must keep their current values")
+	require.NotContains(t, body, strings.Repeat("x", 128))
+}
+
+func TestSettingsSuccessNoticeOnlyClaimsRefreshWhenReadSucceeded(t *testing.T) {
+	require.Equal(t, "服务器设置已保存，但未能读取最新配置。", settingsSuccessNotice(false, ""))
+	require.Empty(t, settingsSuccessNotice(false, "设置已保存，但读取失败"))
+	require.Empty(t, settingsSuccessNotice(true, "设置已保存，但读取失败"))
+	require.Equal(t, "服务器设置已保存，并已重新读取最新配置。", settingsSuccessNotice(true, ""))
+}
+
 func TestSettingsFailuresAreAuditedAndNoSecretLeak(t *testing.T) {
 	upstream := newFakeSettingsUpstream(t)
 	env := newManagerTestEnv(t)
@@ -791,6 +978,7 @@ func TestSettingsFailuresAreAuditedAndNoSecretLeak(t *testing.T) {
 	require.Contains(t, body, "invalid_credentials")
 	require.NotContains(t, body, "new-auth-secret")
 	require.NotContains(t, body, "new-control-token-secret")
+	require.NotContains(t, body, "auth password must be at least 8 bytes", "raw upstream detail must not be rendered")
 
 	upstream.setFailure("rotate", http.StatusTooManyRequests, "rate_limited", "请求过多", 30)
 	resp, body = env.putJSON(t, base+"/credentials", map[string]any{
@@ -805,7 +993,7 @@ func TestSettingsFailuresAreAuditedAndNoSecretLeak(t *testing.T) {
 
 	// A form-encoded failure is rendered as HTML with the operator's
 	// non-secret input preserved and secret fields never echoed.
-	upstream.setFailure("ports", http.StatusUnprocessableEntity, "invalid_ports", "端口策略无效", 0)
+	upstream.setFailure("ports", http.StatusUnprocessableEntity, "invalid_ports", "raw-upstream-port-detail", 0)
 	resp, body = env.putForm(t, base+"/ports", url.Values{
 		"allow":                   {"443, 8000-8100"},
 		"deny":                    {"22"},
@@ -814,8 +1002,15 @@ func TestSettingsFailuresAreAuditedAndNoSecretLeak(t *testing.T) {
 	}, true)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode, body)
 	require.Contains(t, body, "端口策略无效")
+	require.NotContains(t, body, "raw-upstream-port-detail", "raw upstream detail must not be rendered")
 	require.Contains(t, body, "443, 8000-8100", "failed form input must be preserved")
 	require.Contains(t, body, `value="45"`)
+
+	upstream.setFailure("revoke", http.StatusUnprocessableEntity, "revoke_failed", "raw-revoke-detail", 0)
+	resp, body = env.postJSON(t, base+"/credentials/revoke?confirm=revoke", map[string]any{})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode, body)
+	require.Contains(t, body, "撤销旧凭据失败")
+	require.NotContains(t, body, "raw-revoke-detail", "raw upstream detail must not be rendered")
 
 	upstream.setFailure("web", http.StatusForbidden, "invalid_password", "当前密码不正确", 0)
 	resp, body = env.putForm(t, base+"/web", url.Values{
@@ -847,6 +1042,7 @@ func TestSettingsFailuresAreAuditedAndNoSecretLeak(t *testing.T) {
 	for _, secret := range []string{
 		"upstream-pw", "brand-new-secret", "new-auth-secret",
 		"new-control-token-secret", "form-secret-password",
+		"auth password must be at least 8 bytes", "raw-upstream-port-detail", "raw-revoke-detail",
 	} {
 		require.NotContains(t, rawAudit, secret)
 	}

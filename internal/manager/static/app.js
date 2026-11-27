@@ -778,7 +778,9 @@
           return;
         }
         clearSettingsSecrets(form, kind);
-        applySettingsSnapshot(data || {});
+        if (data && data.settings_available !== false) {
+          applySettingsSnapshot(data);
+        }
         renderRotationResults(data || {});
         if (data && data.warning) {
           showNotice(data.warning, "warn");

@@ -77,18 +77,6 @@ func (e *settingsOperationError) Error() string {
 	return e.Message
 }
 
-// settingsActionResponse is the JSON success shape. The refreshed, secret-free
-// settings snapshot is promoted to the top level; rotation adds the generation
-// and per-client results, and a partial success adds Applied/Warning instead of
-// pretending the mutation failed.
-type settingsActionResponse struct {
-	upstream.Settings
-	Generation int64                       `json:"generation,omitempty"`
-	Results    []upstream.CredentialResult `json:"results,omitempty"`
-	Applied    bool                        `json:"applied,omitempty"`
-	Warning    string                      `json:"warning,omitempty"`
-}
-
 type settingsMutationOutcome struct {
 	Settings    upstream.Settings
 	HasSettings bool
@@ -316,6 +304,14 @@ func (s *WebServer) handleUpdateServerWebAdmin(w http.ResponseWriter, r *http.Re
 	defer cancel()
 	var storeErr error
 	mutationErr := inventory.WithClient(mutationCtx, record.ID, func(callCtx context.Context, client *upstream.Client) error {
+		// The outer record may have been read before the per-server lock was
+		// acquired. Re-read it under the lock so a concurrent inventory edit
+		// (name, base URL, TLS flag, or username) is never clobbered.
+		currentRecord, found := inventory.serverRecord(record.ID)
+		if !found {
+			return fmt.Errorf("%w: %s", ErrServerNotFound, record.ID)
+		}
+		record = currentRecord
 		currentPassword, readErr := inventory.store.ServerPassword(record.ID)
 		if readErr != nil {
 			return &settingsOperationError{
@@ -355,7 +351,7 @@ func (s *WebServer) handleUpdateServerWebAdmin(w http.ResponseWriter, r *http.Re
 		storeFailure := &settingsOperationError{
 			Status:  http.StatusInternalServerError,
 			Code:    "credential_store_failed",
-			Message: "上游服务器已接受新的 Web 管理员凭据，但管理器保存新的上游凭据失败；请立即在“编辑服务器”中更新上游凭据。",
+			Message: "上游服务器已接受新的 Web 管理员凭据，但管理器未能完整保存新的上游用户名和密码；请立即在“编辑服务器”中更新上游凭据。",
 		}
 		s.finishSettingsAudit(ctx, inventory, record, settingsWebCredentialsError, target, "error", storeFailure)
 		// Drop the stale cached client and mark the server if the remaining
@@ -443,7 +439,7 @@ func (s *WebServer) beginSettingsMutation(w http.ResponseWriter, r *http.Request
 	return ctx, true
 }
 
-// settingsInvoke runs one upstream mutation. Rotation needs to capture its
+// runSettingsMutation runs one upstream mutation. Rotation needs to capture its
 // response; all other mutations use the plain form.
 func (s *WebServer) runSettingsMutation(
 	w http.ResponseWriter,
@@ -532,13 +528,7 @@ func (s *WebServer) finishSettingsAudit(ctx context.Context, inventory *Inventor
 
 func (s *WebServer) writeSettingsSuccess(w http.ResponseWriter, r *http.Request, inventory *Inventory, record ServerRecord, form settingsFormValues, outcome settingsMutationOutcome) {
 	if !wantsSettingsHTML(r) {
-		writeJSON(w, http.StatusOK, settingsActionResponse{
-			Settings:   outcome.Settings,
-			Generation: outcome.Generation,
-			Results:    outcome.Results,
-			Applied:    outcome.Applied,
-			Warning:    outcome.Warning,
-		})
+		writeJSON(w, http.StatusOK, settingsSuccessPayload(outcome))
 		return
 	}
 
@@ -565,9 +555,56 @@ func (s *WebServer) writeSettingsSuccess(w http.ResponseWriter, r *http.Request,
 	if outcome.Generation > 0 || len(outcome.Results) > 0 {
 		data.Rotation = newSettingsRotationView(outcome.Generation, outcome.Results)
 	}
-	data.Notice = "服务器设置已保存，并已重新读取最新配置。"
+	data.Notice = settingsSuccessNotice(hasSettings, outcome.Warning)
 	data.Warning = outcome.Warning
 	s.render(w, http.StatusOK, s.settingsTemplate, data)
+}
+
+// settingsSuccessPayload serializes the success response. When the refreshed
+// snapshot could not be read, it deliberately omits all settings fields instead
+// of sending a zero-valued snapshot the UI might apply.
+func settingsSuccessPayload(outcome settingsMutationOutcome) map[string]any {
+	payload := make(map[string]any, 4)
+	payload["settings_available"] = outcome.HasSettings
+	if outcome.HasSettings {
+		encoded, err := json.Marshal(outcome.Settings)
+		if err == nil {
+			var fields map[string]any
+			if json.Unmarshal(encoded, &fields) == nil {
+				for key, value := range fields {
+					payload[key] = value
+				}
+			} else {
+				payload["settings_available"] = false
+			}
+		} else {
+			payload["settings_available"] = false
+		}
+	}
+	if outcome.Generation > 0 {
+		payload["generation"] = outcome.Generation
+	}
+	if outcome.Results != nil {
+		payload["results"] = outcome.Results
+	}
+	if outcome.Applied {
+		payload["applied"] = true
+	}
+	if strings.TrimSpace(outcome.Warning) != "" {
+		payload["warning"] = outcome.Warning
+	}
+	return payload
+}
+
+func settingsSuccessNotice(hasSettings bool, warning string) string {
+	switch {
+	case strings.TrimSpace(warning) != "":
+		return ""
+	case hasSettings:
+		return "服务器设置已保存，并已重新读取最新配置。"
+	default:
+		return "服务器设置已保存，但未能读取最新配置。"
+	}
 }
 
 func (s *WebServer) writeSettingsError(w http.ResponseWriter, r *http.Request, inventory *Inventory, record ServerRecord, form settingsFormValues, err error, applied bool) {
@@ -648,13 +685,13 @@ func decodeModeSettings(w http.ResponseWriter, r *http.Request) (settingsModePay
 	if isJSONSettingsRequest(r) {
 		var payload settingsModePayload
 		if err := decodeSettingsJSON(w, r, &payload); err != nil {
-			return payload, settingsFormValues{Kind: "mode"}, err
+			return payload, settingsFormValues{}, err
 		}
 		return payload, settingsFormValues{Kind: "mode", Mode: string(payload.Mode)}, nil
 	}
 	values, err := parseSettingsForm(w, r)
 	if err != nil {
-		return settingsModePayload{}, settingsFormValues{Kind: "mode"}, err
+		return settingsModePayload{}, settingsFormValues{}, err
 	}
 	form := settingsFormValues{Kind: "mode", Mode: strings.TrimSpace(values.Get("mode"))}
 	return settingsModePayload{Mode: config.TransportMode(form.Mode)}, form, nil
@@ -676,7 +713,7 @@ func decodePortsSettings(w http.ResponseWriter, r *http.Request) (settingsPortsP
 	if isJSONSettingsRequest(r) {
 		var payload settingsPortsPayload
 		if err := decodeSettingsJSON(w, r, &payload); err != nil {
-			return payload, settingsFormValues{Kind: "ports"}, err
+			return payload, settingsFormValues{}, err
 		}
 		form := settingsFormValues{
 			Kind:                  "ports",
@@ -689,7 +726,7 @@ func decodePortsSettings(w http.ResponseWriter, r *http.Request) (settingsPortsP
 	}
 	values, err := parseSettingsForm(w, r)
 	if err != nil {
-		return settingsPortsPayload{}, settingsFormValues{Kind: "ports"}, err
+		return settingsPortsPayload{}, settingsFormValues{}, err
 	}
 	form := settingsFormValues{
 		Kind:      "ports",
@@ -717,13 +754,13 @@ func decodeWebSettings(w http.ResponseWriter, r *http.Request) (settingsWebPaylo
 	if isJSONSettingsRequest(r) {
 		var payload settingsWebPayload
 		if err := decodeSettingsJSON(w, r, &payload); err != nil {
-			return payload, settingsFormValues{Kind: "web"}, err
+			return payload, settingsFormValues{}, err
 		}
 		return payload, settingsFormValues{Kind: "web", WebUsername: payload.Username}, nil
 	}
 	values, err := parseSettingsForm(w, r)
 	if err != nil {
-		return settingsWebPayload{}, settingsFormValues{Kind: "web"}, err
+		return settingsWebPayload{}, settingsFormValues{}, err
 	}
 	payload := settingsWebPayload{
 		Username:        strings.TrimSpace(values.Get("username")),
@@ -758,17 +795,17 @@ func decodeTrustProxySettings(w http.ResponseWriter, r *http.Request) (settingsT
 	if isJSONSettingsRequest(r) {
 		var payload settingsTrustProxyPayload
 		if err := decodeSettingsJSON(w, r, &payload); err != nil {
-			return payload, settingsFormValues{Kind: "proxy"}, err
+			return payload, settingsFormValues{}, err
 		}
 		if payload.TrustProxy == nil {
-			return payload, settingsFormValues{Kind: "proxy"},
+			return payload, settingsFormValues{},
 				&settingsOperationError{Status: http.StatusBadRequest, Code: "invalid_request", Message: "trust_proxy is required"}
 		}
 		return payload, settingsFormValues{Kind: "proxy", TrustProxy: *payload.TrustProxy}, nil
 	}
 	values, err := parseSettingsForm(w, r)
 	if err != nil {
-		return settingsTrustProxyPayload{}, settingsFormValues{Kind: "proxy"}, err
+		return settingsTrustProxyPayload{}, settingsFormValues{}, err
 	}
 	trust := parseFormBool(values.Get("trust_proxy"))
 	return settingsTrustProxyPayload{TrustProxy: &trust}, settingsFormValues{Kind: "proxy", TrustProxy: trust}, nil
@@ -778,13 +815,13 @@ func decodeRotateSettings(w http.ResponseWriter, r *http.Request) (settingsRotat
 	if isJSONSettingsRequest(r) {
 		var payload settingsRotatePayload
 		if err := decodeSettingsJSON(w, r, &payload); err != nil {
-			return payload, settingsFormValues{Kind: "rotate", SyncMode: settingsDefaultSyncMode}, err
+			return payload, settingsFormValues{}, err
 		}
 		return payload, settingsFormValues{Kind: "rotate", SyncMode: payload.SyncMode}, nil
 	}
 	values, err := parseSettingsForm(w, r)
 	if err != nil {
-		return settingsRotatePayload{}, settingsFormValues{Kind: "rotate", SyncMode: settingsDefaultSyncMode}, err
+		return settingsRotatePayload{}, settingsFormValues{}, err
 	}
 	payload := settingsRotatePayload{
 		Auth:         values.Get("auth"),
@@ -999,10 +1036,7 @@ func settingsUpstreamMessage(apiError *upstream.APIError) string {
 	case "invalid_mode":
 		return "传输模式无效。"
 	case "invalid_ports":
-		if upstreamMessage != "" {
-			return "端口策略无效：" + upstreamMessage
-		}
-		return "端口策略无效。"
+		return "端口策略无效，请检查端口格式、自动分配范围和离线预留时间。"
 	case "invalid_web_config":
 		return "更新上游 Web 管理员失败。"
 	case "username_required":
@@ -1014,19 +1048,13 @@ func settingsUpstreamMessage(apiError *upstream.APIError) string {
 	case "invalid_sync_mode":
 		return "同步方式必须是 auto 或 manual。"
 	case "invalid_credentials":
-		if upstreamMessage != "" {
-			return "新凭据无效：" + upstreamMessage
-		}
-		return "新凭据无效。"
+		return "新凭据无效，请检查 HY2 密码和 control token 的长度与格式。"
 	case "unsupported_auth_type":
 		return "上游 HY2 认证方式不是 password，无法在线轮换凭据。"
 	case "no_change":
 		return "新凭据与当前凭据相同，未创建新代际。"
 	case "revoke_failed":
-		if upstreamMessage != "" {
-			return "撤销旧凭据失败：" + upstreamMessage
-		}
-		return "撤销旧凭据失败。"
+		return "撤销旧凭据失败，请稍后重试。"
 	case "internal":
 		return "上游服务器写入配置失败。"
 	case "not_implemented", "unsupported":

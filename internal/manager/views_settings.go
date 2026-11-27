@@ -183,10 +183,6 @@ func (v serverSettingsView) Rotatable() bool {
 	return v.Credentials.Rotatable && strings.EqualFold(strings.TrimSpace(v.AuthType), "password")
 }
 
-func (v serverSettingsView) AllowText() string { return strings.Join(v.Ports.Allow, ", ") }
-
-func (v serverSettingsView) DenyText() string { return strings.Join(v.Ports.Deny, ", ") }
-
 func (v serverSettingsView) ReserveLabel() string {
 	if v.Ports.OfflineReserveSeconds <= 0 {
 		return "—"
