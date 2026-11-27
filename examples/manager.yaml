@@ -1,0 +1,31 @@
+# hy2tun-manager example configuration.
+#
+# Copy to /etc/hy2tun/manager.yaml. The manager itself contains no plaintext
+# administrator or upstream password in this file; credentials live in the
+# 0600 state file that this process creates.
+#
+# The default listener is loopback-only. Publish it through an HTTPS reverse
+# proxy (or an SSH tunnel/VPN); do not expose port 7600 directly to the
+# internet.
+
+# Manager HTTP listener. Loopback on the conventional port is intentional.
+listen: "127.0.0.1:7600"
+
+# Optional reverse-proxy path prefix. Use "/" for the root of a dedicated
+# hostname, or e.g. "/hy2tun-manager/" when sharing a hostname.
+base_path: "/"
+
+# State, encryption key, and audit log. Keep the directory private to the
+# manager service account. state.json and manager.key must be backed up and
+# restored together.
+state_file: "/var/lib/hy2tun-manager/state.json"
+key_file: "/var/lib/hy2tun-manager/manager.key"
+audit_file: "/var/lib/hy2tun-manager/audit.jsonl"
+
+# Background inventory refresh interval. Minimum is 1s.
+refresh_interval: "30s"
+
+# Set true only when a trusted reverse proxy overwrites X-Forwarded-For and
+# X-Real-IP with the direct client address. Otherwise the login limiter keys on
+# the proxy address and all users share one bucket.
+trust_proxy: false

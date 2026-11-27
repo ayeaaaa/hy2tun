@@ -182,6 +182,24 @@ func (s *Store) State() State {
 	return cloneState(s.state)
 }
 
+// SetAdminPassword hashes a new manager administrator password at the current
+// bcrypt cost and persists it. The plaintext is never logged or returned. The
+// manager's HTTP shell snapshots the hash at construction, so a running manager
+// must be restarted before the new password is accepted.
+func (s *Store) SetAdminPassword(password string) error {
+	if strings.TrimSpace(password) == "" {
+		return fmt.Errorf("administrator password is required")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash administrator password: %w", err)
+	}
+	return s.Update(func(state *State) error {
+		state.Admin.PasswordHash = string(hash)
+		return nil
+	})
+}
+
 // Update mutates a copy of the state and atomically persists it. If the
 // mutation or the rename fails, the in-memory state is left unchanged. When
 // the rename succeeds but the directory fsync fails, the new state is

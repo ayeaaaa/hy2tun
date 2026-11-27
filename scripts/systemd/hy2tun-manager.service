@@ -1,0 +1,38 @@
+[Unit]
+Description=hy2tun manager (multi-server control plane)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The manager holds upstream server administrator credentials. Run it as a
+# dedicated unprivileged account; the state directory is created for it.
+# Create the account first:
+#   useradd --system --home-dir /var/lib/hy2tun-manager \
+#     --shell /usr/sbin/nologin hy2tun-manager
+User=hy2tun-manager
+Group=hy2tun-manager
+ExecStart=/usr/local/bin/hy2tun-manager -config /etc/hy2tun/manager.yaml
+Restart=always
+RestartSec=2s
+StateDirectory=hy2tun-manager
+StateDirectoryMode=0700
+ConfigurationDirectory=hy2tun
+WorkingDirectory=/var/lib/hy2tun-manager
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target
