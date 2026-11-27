@@ -28,7 +28,7 @@
 <section class="panel" aria-labelledby="client-list-heading">
   <div class="panel-section panel-heading">
     <h2 id="client-list-heading">客户端列表</h2>
-    <p class="muted">共 {{len .Clients}} 个客户端；最近刷新：{{time .Server.LastRefresh}}</p>
+    <p class="muted">{{if .LoadError}}客户端列表暂不可用{{else}}共 {{len .Clients}} 个客户端{{end}}；最近刷新：{{time .Server.LastRefresh}}</p>
   </div>
   {{if .Clients}}
   <div class="table-wrap">

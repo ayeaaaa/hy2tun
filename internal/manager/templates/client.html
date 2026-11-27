@@ -124,8 +124,31 @@
             {{if .Client.ReadOnly}}disabled{{end}}>保存映射列表</button>
   </div>
   <div class="alert" id="client-mutation-error" role="alert" hidden>
-    <span data-mutation-error-text></span>
-    <a class="back-link" href="{{.BasePath}}servers/{{.Server.ID}}/clients/{{.Client.PathID}}">重新加载</a>
+    <p><span data-mutation-error-text></span>
+      <a class="back-link" href="{{.BasePath}}servers/{{.Server.ID}}/clients/{{.Client.PathID}}">重新加载</a></p>
+    <div data-mutation-details hidden>
+      <p class="muted" data-mutation-revision hidden></p>
+      <p class="muted" data-mutation-partial hidden>服务端只应用了部分映射，请按逐映射结果处理后重新加载。</p>
+      <div data-mutation-results hidden>
+        <h3>逐映射结果</h3>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th scope="col">映射</th>
+                <th scope="col">结果</th>
+                <th scope="col">分配端口</th>
+                <th scope="col">错误</th>
+              </tr>
+            </thead>
+            <tbody data-mutation-results-body></tbody>
+          </table>
+        </div>
+      </div>
+      <p data-mutation-exposure hidden></p>
+      <p data-mutation-unavailable hidden></p>
+      <p data-mutation-closed hidden>映射当前已关闭，没有可用的监听端口。</p>
+    </div>
   </div>
   <div class="table-wrap">
     <table class="data-table mapping-table"

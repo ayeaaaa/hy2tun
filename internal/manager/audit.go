@@ -28,6 +28,10 @@ type AuditEntry struct {
 type AuditLog struct {
 	path string
 	mu   sync.Mutex
+	// dirSynced records that the audit directory entry has been fsynced. It
+	// starts false per process so a failed first append can retry the directory
+	// sync on the next write instead of requiring file re-creation.
+	dirSynced bool
 }
 
 // NewAuditLog returns an audit log that writes to path. The file is created
@@ -61,7 +65,18 @@ func (l *AuditLog) Append(entry AuditEntry) error {
 		_ = file.Close()
 		return fmt.Errorf("secure audit log %s: %w", l.path, err)
 	}
+	before, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return fmt.Errorf("inspect audit log %s: %w", l.path, err)
+	}
+	previousSize := before.Size()
 	if _, err := file.Write(line); err != nil {
+		// A short or failed append can leave a partial JSON line. Roll the
+		// file back to the last complete entry before returning the
+		// fail-closed error.
+		_ = file.Truncate(previousSize)
+		_ = file.Sync()
 		_ = file.Close()
 		return fmt.Errorf("write audit log %s: %w", l.path, err)
 	}
@@ -72,10 +87,11 @@ func (l *AuditLog) Append(entry AuditEntry) error {
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close audit log %s: %w", l.path, err)
 	}
-	if created {
+	if created || !l.dirSynced {
 		if err := syncDirFn(filepath.Dir(l.path)); err != nil {
 			return fmt.Errorf("sync audit log directory %s: %w", filepath.Dir(l.path), err)
 		}
+		l.dirSynced = true
 	}
 	return nil
 }

@@ -70,6 +70,9 @@ type fakeClientUpstream struct {
 	nextClientGetStatus  int
 	nextClientGetCode    string
 	nextClientGetMessage string
+	clientsStatus        int
+	clientsCode          string
+	clientsMessage       string
 	overviewGate         <-chan struct{}
 	overviewStarted      chan struct{}
 	overviewStartTaken   bool
@@ -153,6 +156,14 @@ func (f *fakeClientUpstream) failClientDetail(status int, code, message string) 
 	f.clientDetailStatus = status
 	f.clientDetailCode = code
 	f.clientDetailMessage = message
+}
+
+func (f *fakeClientUpstream) failClients(status int, code, message string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.clientsStatus = status
+	f.clientsCode = code
+	f.clientsMessage = message
 }
 
 // failAfterMutation makes the first client-detail read after a successful
@@ -315,6 +326,14 @@ func (f *fakeClientUpstream) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	case "/api/clients":
 		f.mu.Lock()
+		if f.clientsStatus != 0 {
+			status := f.clientsStatus
+			code := f.clientsCode
+			message := f.clientsMessage
+			f.mu.Unlock()
+			writeTestJSON(w, status, map[string]any{"error": message, "code": code})
+			return
+		}
 		clients := make([]managerupstream.ClientView, 0, len(f.clients))
 		for _, client := range f.clients {
 			clients = append(clients, cloneClientView(client))
@@ -782,6 +801,24 @@ func TestClientPageLoadFailureShowsUnknownState(t *testing.T) {
 	require.NotContains(t, page, ">离线<", "a failed read must not claim the client is offline")
 }
 
+func TestClientsPageReadFailureDoesNotClaimZeroClients(t *testing.T) {
+	upstream := newFakeClientUpstream(t)
+	env := newManagerTestEnv(t)
+
+	resp, body := env.postJSON(t, "/api/servers", addServerPayload("us", upstream.BaseURL(), "upstream-pw"))
+	require.Equal(t, http.StatusCreated, resp.StatusCode, body)
+	var server ServerView
+	require.NoError(t, json.Unmarshal([]byte(body), &server))
+
+	upstream.failClients(http.StatusBadGateway, "upstream_error", "client list unavailable")
+	status, page := env.getPage(t, "/servers/"+server.ID+"/clients")
+	require.Equal(t, http.StatusBadGateway, status)
+	require.Contains(t, page, "client list unavailable")
+	require.Contains(t, page, "客户端列表暂不可用")
+	require.NotContains(t, page, "共 0 个客户端",
+		"a failed client-list read must not look like a successful empty list")
+}
+
 func TestClientPageEscapesAdversarialIDs(t *testing.T) {
 	upstream := newFakeClientUpstream(t)
 	env := newManagerTestEnv(t)
@@ -1030,6 +1067,19 @@ func TestClientMappingScriptFreezesReloadErrors(t *testing.T) {
 	require.Contains(t, source, "freezeExposureControl(row, button);")
 	require.Contains(t, source, `data-exposure-frozen`)
 	require.Contains(t, source, `if (data && data.reload)`)
+	// The error box renders the upstream diagnostics, not just the summary
+	// text: per-mapping results and exposure-conflict state.
+	require.Contains(t, source, "data-mutation-results-body")
+	require.Contains(t, source, "data-mutation-exposure")
+	require.Contains(t, source, "active_exposure")
+	require.Contains(t, source, "unavailable_families")
+	require.Contains(t, source, "data.partial")
+
+	template, err := managerAssets.ReadFile("templates/client.html")
+	require.NoError(t, err)
+	require.Contains(t, string(template), "data-mutation-details")
+	require.Contains(t, string(template), "逐映射结果")
+	require.Contains(t, string(template), "data-mutation-results-body")
 }
 
 func TestClientMappingAuditFailureBlocksUpstreamWrite(t *testing.T) {

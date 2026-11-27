@@ -42,6 +42,25 @@ func TestAuditFileIsPrivateAndAppendsOneLinePerEntry(t *testing.T) {
 	require.False(t, entry.Time.IsZero())
 }
 
+func TestAuditRetriesDirectorySyncAfterFirstCreationFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	log := NewAuditLog(path)
+
+	originalSyncDir := syncDirFn
+	syncDirFn = func(string) error { return errors.New("injected directory sync failure") }
+	err := log.Append(AuditEntry{Action: "server.add", Result: "ok"})
+	require.ErrorContains(t, err, "sync audit log directory")
+
+	syncDirFn = originalSyncDir
+	require.NoError(t, log.Append(AuditEntry{Action: "server.edit", Result: "ok"}),
+		"the same audit log must retry the directory sync on its next append")
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Len(t, strings.Split(strings.TrimSpace(string(data)), "\n"), 2)
+}
+
 func TestAuditAppendSyncsDirectoryOnCreateAndFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.jsonl")

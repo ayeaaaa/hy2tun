@@ -16,6 +16,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/term"
 
@@ -24,9 +25,14 @@ import (
 )
 
 const (
-	defaultConfigPath     = "/etc/hy2tun/manager.yaml"
-	minAdminPasswordBytes = 8
-	shutdownGracePeriod   = 10 * time.Second
+	defaultConfigPath      = "/etc/hy2tun/manager.yaml"
+	minAdminPasswordRunes  = 8
+	maxAdminPasswordBytes  = 72
+	shutdownGracePeriod    = 10 * time.Second
+	managerReadTimeout     = 15 * time.Second
+	managerWriteTimeout    = 60 * time.Second
+	managerIdleTimeout     = 60 * time.Second
+	managerReadHeaderLimit = 10 * time.Second
 )
 
 func main() {
@@ -60,7 +66,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, ready func(ne
 		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
 	}
 	if *showVersion {
-		fmt.Fprintln(stdout, version.Version)
+		fmt.Fprintf(stdout, "hy2tun-manager %s (commit %s, built %s)\n", version.Version, version.Commit, version.Date)
 		return nil
 	}
 	if *resetAdmin {
@@ -79,6 +85,14 @@ func serveManager(configPath string, stderr io.Writer, ready func(net.Addr)) err
 	if err != nil {
 		return err
 	}
+	// Hold the state lock for the whole service lifetime. reset-admin uses the
+	// same lock and must fail while this process is running: the live manager
+	// has an in-memory hash snapshot and could otherwise overwrite the reset.
+	stateLock, err := manager.AcquireStateLock(cfg.StateFile)
+	if err != nil {
+		return err
+	}
+	defer stateLock.Close()
 	store, err := manager.OpenStore(cfg.StateFile, cfg.KeyFile)
 	if err != nil {
 		return err
@@ -96,8 +110,11 @@ func serveManager(configPath string, stderr io.Writer, ready func(net.Addr)) err
 	server := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           web.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		ReadTimeout:       managerReadTimeout,
+		ReadHeaderTimeout: managerReadHeaderLimit,
+		WriteTimeout:      managerWriteTimeout,
+		IdleTimeout:       managerIdleTimeout,
+		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelError),
 	}
 	listener, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
@@ -167,13 +184,21 @@ func serveManager(configPath string, stderr io.Writer, ready func(net.Addr)) err
 }
 
 // resetAdminPassword changes only the administrator bcrypt hash in the state
-// file. The running manager keeps its construction-time hash snapshot, so the
-// operator must restart it after this command.
+// file. It refuses to run while a manager holds the state lock, because that
+// process keeps a construction-time hash snapshot and could overwrite the new
+// hash on its next state mutation. The operator must stop the service, run the
+// reset, and then start the service again.
 func resetAdminPassword(configPath string, stdin io.Reader, stderr io.Writer) error {
 	cfg, err := manager.LoadConfig(configPath)
 	if err != nil {
 		return err
 	}
+	stateLock, err := manager.AcquireStateLock(cfg.StateFile)
+	if err != nil {
+		return err
+	}
+	defer stateLock.Close()
+
 	store, err := manager.OpenStore(cfg.StateFile, cfg.KeyFile)
 	if err != nil {
 		return err
@@ -182,8 +207,35 @@ func resetAdminPassword(configPath string, stdin io.Reader, stderr io.Writer) er
 	if err != nil {
 		return err
 	}
+	audit := manager.NewAuditLog(cfg.AuditFile)
+	if err := audit.Append(manager.AuditEntry{
+		Actor:  "cli",
+		Action: "admin.reset",
+		Target: "admin",
+		Result: "pending",
+	}); err != nil {
+		return fmt.Errorf("audit log is unavailable; administrator password was not changed: %w", err)
+	}
 	if err := store.SetAdminPassword(password); err != nil {
+		_ = audit.Append(manager.AuditEntry{
+			Actor:   "cli",
+			Action:  "admin.reset",
+			Target:  "admin",
+			Result:  "error",
+			Message: err.Error(),
+		})
 		return err
+	}
+	if err := audit.Append(manager.AuditEntry{
+		Actor:  "cli",
+		Action: "admin.reset",
+		Target: "admin",
+		Result: "ok",
+	}); err != nil {
+		// The hash is already committed. Report the audit durability failure
+		// rather than pretending the reset failed; the operator can verify the
+		// password and fix the audit log.
+		return fmt.Errorf("administrator password updated but the audit log could not be written: %w", err)
 	}
 	fmt.Fprintln(stderr, "hy2tun-manager: administrator password updated; restart the running manager so it reloads the new hash and ends existing sessions")
 	return nil
@@ -244,8 +296,11 @@ func validateNewPassword(password, confirmation string) (string, error) {
 	if strings.TrimSpace(password) == "" {
 		return "", fmt.Errorf("new administrator password must not be empty")
 	}
-	if len(password) < minAdminPasswordBytes {
-		return "", fmt.Errorf("new administrator password must be at least %d characters", minAdminPasswordBytes)
+	if utf8.RuneCountInString(password) < minAdminPasswordRunes {
+		return "", fmt.Errorf("new administrator password must be at least %d characters", minAdminPasswordRunes)
+	}
+	if len(password) > maxAdminPasswordBytes {
+		return "", fmt.Errorf("new administrator password must not exceed %d bytes", maxAdminPasswordBytes)
 	}
 	if password != confirmation {
 		return "", fmt.Errorf("new administrator passwords do not match")

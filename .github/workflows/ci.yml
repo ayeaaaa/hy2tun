@@ -42,6 +42,7 @@ jobs:
         run: |
           node --check internal/webui/clientui/static/app.js
           node --check internal/webui/serverui/static/app.js
+          node --check internal/manager/static/app.js
 
       - name: Vet
         run: go vet ./...

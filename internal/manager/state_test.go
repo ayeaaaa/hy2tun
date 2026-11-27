@@ -126,6 +126,7 @@ func TestOpenStoreCreatesAdminAndPrintsPasswordOnce(t *testing.T) {
 	statePath := filepath.Join(dir, "state.json")
 	keyPath := filepath.Join(dir, "manager.key")
 
+	t.Setenv(InitialAdminPasswordEnv, "")
 	oldGenerator := initialAdminPasswordGenerator
 	oldWriter := initialAdminPasswordWriter
 	var output bytes.Buffer
@@ -318,6 +319,105 @@ func TestOpenStoreKeyCheckDetectsWrongKeyWithoutServerPasswords(t *testing.T) {
 
 	_, err = OpenStore(secondStatePath, secondKeyPath)
 	require.ErrorContains(t, err, "key check failed")
+}
+
+func TestOpenStoreCreatesParentDirectories(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state", "nested", "state.json")
+	keyPath := filepath.Join(dir, "keys", "nested", "manager.key")
+
+	store, err := OpenStore(statePath, keyPath)
+	require.NoError(t, err)
+	require.FileExists(t, statePath)
+	require.FileExists(t, keyPath)
+	require.NotEmpty(t, store.State().Admin.PasswordHash)
+	require.Equal(t, 0o700, fileMode(t, filepath.Dir(statePath)))
+	require.Equal(t, 0o700, fileMode(t, filepath.Dir(keyPath)))
+}
+
+func TestOpenStoreRemovesOrphanKeyAfterFirstStateSaveFailure(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	keyPath := filepath.Join(dir, "manager.key")
+
+	originalWrite := atomicWriteFn
+	atomicWriteFn = func(string, []byte) (bool, error) {
+		return false, errors.New("injected first state save failure")
+	}
+	t.Cleanup(func() { atomicWriteFn = originalWrite })
+
+	_, err := OpenStore(statePath, keyPath)
+	require.ErrorContains(t, err, "initialize manager state")
+	require.NoFileExists(t, statePath)
+	require.NoFileExists(t, keyPath, "a failed first state save must not leave an orphan key")
+
+	atomicWriteFn = originalWrite
+	store, err := OpenStore(statePath, keyPath)
+	require.NoError(t, err, "a clean retry after orphan-key cleanup must succeed")
+	require.NotEmpty(t, store.State().Admin.PasswordHash)
+}
+
+func TestOpenStoreMigratesMissingKeyCheck(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	keyPath := filepath.Join(dir, "manager.key")
+
+	store, err := OpenStore(statePath, keyPath)
+	require.NoError(t, err)
+	require.NotEmpty(t, store.State().KeyCheck)
+
+	data, err := os.ReadFile(statePath)
+	require.NoError(t, err)
+	var state State
+	require.NoError(t, json.Unmarshal(data, &state))
+	state.KeyCheck = ""
+	encoded, err := json.MarshalIndent(state, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(statePath, append(encoded, '\n'), 0o600))
+
+	reopened, err := OpenStore(statePath, keyPath)
+	require.NoError(t, err)
+	require.NotEmpty(t, reopened.State().KeyCheck, "a legacy state must gain a key check")
+
+	otherDir := t.TempDir()
+	_, otherKey, err := func() (*Store, []byte, error) {
+		other, openErr := OpenStore(filepath.Join(otherDir, "state.json"), filepath.Join(otherDir, "manager.key"))
+		if openErr != nil {
+			return nil, nil, openErr
+		}
+		keyData, readErr := os.ReadFile(filepath.Join(otherDir, "manager.key"))
+		return other, keyData, readErr
+	}()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(keyPath, otherKey, 0o600))
+
+	_, err = OpenStore(statePath, keyPath)
+	require.ErrorContains(t, err, "key check failed")
+}
+
+func TestOpenStoreInitialPasswordFromEnvOnlyOnFirstRun(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	keyPath := filepath.Join(dir, "manager.key")
+	const envPassword = "env-initial-admin-password"
+	t.Setenv(InitialAdminPasswordEnv, envPassword)
+
+	oldWriter := initialAdminPasswordWriter
+	var output bytes.Buffer
+	initialAdminPasswordWriter = &output
+	t.Cleanup(func() { initialAdminPasswordWriter = oldWriter })
+
+	store, err := OpenStore(statePath, keyPath)
+	require.NoError(t, err)
+	state := store.State()
+	require.NoError(t, bcrypt.CompareHashAndPassword([]byte(state.Admin.PasswordHash), []byte(envPassword)))
+	require.Empty(t, output.String(), "an environment-supplied initial password must not be printed")
+
+	t.Setenv(InitialAdminPasswordEnv, "a-different-password")
+	reopened, err := OpenStore(statePath, keyPath)
+	require.NoError(t, err)
+	require.Equal(t, state.Admin.PasswordHash, reopened.State().Admin.PasswordHash,
+		"the environment variable must never reset an existing administrator")
 }
 
 func TestStateFileTightensPermissionsOnLoad(t *testing.T) {

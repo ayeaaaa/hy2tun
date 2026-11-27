@@ -1,7 +1,10 @@
 package manager
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,7 +57,15 @@ func LoadConfig(path string) (Config, error) {
 	}
 
 	var raw fileConfig
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	// Reject unknown keys: a typo such as "state_fil" must not silently fall
+	// back to the deployment default and write state somewhere unexpected.
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&raw); err != nil && !errors.Is(err, io.EOF) {
+		return Config{}, fmt.Errorf("parse manager config %s: %w", path, err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != nil && !errors.Is(err, io.EOF) {
 		return Config{}, fmt.Errorf("parse manager config %s: %w", path, err)
 	}
 

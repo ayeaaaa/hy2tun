@@ -261,6 +261,9 @@
   const mutationErrorText = mutationError
     ? mutationError.querySelector("[data-mutation-error-text]")
     : null;
+  const mutationDetails = mutationError
+    ? mutationError.querySelector("[data-mutation-details]")
+    : null;
 
   const responseData = async (response) => {
     try {
@@ -270,9 +273,105 @@
     }
   };
 
+  const setDetailLine = (selector, text) => {
+    const element = mutationError ? mutationError.querySelector(selector) : null;
+    if (!element) {
+      return;
+    }
+    element.textContent = text || "";
+    element.hidden = !text;
+  };
+
+  const renderMutationDetails = (data) => {
+    if (!mutationDetails || !data) {
+      return;
+    }
+    let hasDetails = false;
+    if (typeof data.revision === "number" && data.revision > 0) {
+      setDetailLine("[data-mutation-revision]", `服务端最新配置版本：r${data.revision}`);
+      hasDetails = true;
+    } else {
+      setDetailLine("[data-mutation-revision]", "");
+    }
+    if (data.partial) {
+      setDetailLine("[data-mutation-partial]", "服务端只应用了部分映射，请按逐映射结果处理后重新加载。");
+      hasDetails = true;
+    } else {
+      setDetailLine("[data-mutation-partial]", "");
+    }
+
+    const resultsSection = mutationError.querySelector("[data-mutation-results]");
+    const resultsBody = mutationError.querySelector("[data-mutation-results-body]");
+    if (resultsSection && resultsBody) {
+      resultsBody.replaceChildren();
+      if (Array.isArray(data.results) && data.results.length > 0) {
+        data.results.forEach((result) => {
+          const row = document.createElement("tr");
+          const cells = [
+            result.id || "—",
+            result.ok ? "成功" : "失败",
+            result.assigned_port > 0 ? String(result.assigned_port) : "—",
+            result.error || "—",
+          ];
+          cells.forEach((value, index) => {
+            const cell = document.createElement("td");
+            cell.textContent = value;
+            if (index === 0 || index === 3) {
+              cell.className = "mono wrap";
+            }
+            if (index === 3 && result.error) {
+              cell.className = "error-text mono wrap";
+            }
+            row.appendChild(cell);
+          });
+          resultsBody.appendChild(row);
+        });
+        resultsSection.hidden = false;
+        hasDetails = true;
+      } else {
+        resultsSection.hidden = true;
+      }
+    }
+
+    const exposure = data.active_exposure === "local" ? "仅本机" : data.active_exposure === "public" ? "公网" : "";
+    setDetailLine("[data-mutation-exposure]", exposure ? `当前生效暴露范围：${exposure}` : "");
+    if (exposure) {
+      hasDetails = true;
+    }
+    const families = Array.isArray(data.unavailable_families) ? data.unavailable_families.filter(Boolean) : [];
+    setDetailLine(
+      "[data-mutation-unavailable]",
+      families.length > 0 ? `不可用协议族：${families.join("、")}` : "",
+    );
+    if (families.length > 0) {
+      hasDetails = true;
+    }
+    setDetailLine(
+      "[data-mutation-closed]",
+      data.closed ? "映射当前已关闭，没有可用的监听端口。" : "",
+    );
+    if (data.closed) {
+      hasDetails = true;
+    }
+    mutationDetails.hidden = !hasDetails;
+  };
+
   const mappingShownError = (message, data) => {
     showNotice(message, "error");
-    if (data && data.reload && mutationError && mutationErrorText) {
+    if (!mutationError || !mutationErrorText) {
+      return;
+    }
+    renderMutationDetails(data);
+    const hasDetails = Boolean(data) && (
+      data.reload ||
+      data.partial ||
+      data.closed ||
+      (Array.isArray(data.results) && data.results.length > 0) ||
+      typeof data.revision === "number" ||
+      Boolean(data.active_exposure) ||
+      (Array.isArray(data.unavailable_families) && data.unavailable_families.length > 0)
+    );
+    if (hasDetails) {
       mutationErrorText.textContent = message;
       mutationError.hidden = false;
       mutationError.scrollIntoView({ block: "nearest" });
@@ -576,6 +675,16 @@
 
   const settingsFormField = (form, name) => form.elements.namedItem(name);
 
+  // The upstream HY2 credential fields are validated in bytes by the server
+  // API. UTF-8 encoding keeps the browser check aligned for non-ASCII input.
+  const utf8ByteLength = (value) => {
+    try {
+      return new TextEncoder().encode(String(value || "")).length;
+    } catch (_error) {
+      return String(value || "").length;
+    }
+  };
+
   const settingsPayload = (form, kind) => {
     switch (kind) {
       case "mode": {
@@ -637,12 +746,12 @@
         const syncMode = settingsFormField(form, "sync_mode");
         const authValue = auth ? auth.value : "";
         const tokenValue = token ? token.value : "";
-        if (authValue.length < 8) {
-          showNotice("新的 HY2 密码至少需要 8 个字符。", "error");
+        if (utf8ByteLength(authValue) < 8) {
+          showNotice("新的 HY2 密码至少需要 8 个字节。", "error");
           return null;
         }
-        if (tokenValue.length < 16) {
-          showNotice("新的 control token 至少需要 16 个字符。", "error");
+        if (utf8ByteLength(tokenValue) < 16) {
+          showNotice("新的 control token 至少需要 16 个字节。", "error");
           return null;
         }
         const sync = syncMode ? syncMode.value : "auto";

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"crypto/rand"
+	"debug/elf"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -16,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"testing"
@@ -25,6 +29,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"hy2tun/internal/manager"
+	"hy2tun/internal/version"
 )
 
 const (
@@ -85,6 +90,20 @@ func TestRunServesManagerAndStopsOnSIGTERM(t *testing.T) {
 	require.Equal(t, len(testNewAdminPassword)*2+2, stdin.Len(),
 		"normal startup must not read reset-admin input")
 
+	// The running manager owns the state lock. A concurrent reset must fail
+	// before prompting or changing the hash, and it must not consume stdin.
+	_, err = manager.AcquireStateLock(statePath)
+	require.ErrorIs(t, err, manager.ErrStateLocked)
+	resetErr := run([]string{"-config", configPath, "-reset-admin"}, stdin, io.Discard, io.Discard, nil)
+	require.ErrorIs(t, resetErr, manager.ErrStateLocked)
+	require.Contains(t, resetErr.Error(), "stop")
+	require.Equal(t, len(testNewAdminPassword)*2+2, stdin.Len(),
+		"a blocked reset-admin must not read or consume the password input")
+	still, err := manager.OpenStore(statePath, keyPath)
+	require.NoError(t, err)
+	require.Equal(t, beforeState.Admin.PasswordHash, still.State().Admin.PasswordHash,
+		"a reset while the manager is running must not change the hash")
+
 	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
 	select {
 	case err := <-runErr:
@@ -94,10 +113,54 @@ func TestRunServesManagerAndStopsOnSIGTERM(t *testing.T) {
 		t.Fatal("manager did not shut down after SIGTERM")
 	}
 
+	// Shutdown releases the lock so the documented stop -> reset -> start
+	// sequence can proceed.
+	releasedLock, err := manager.AcquireStateLock(statePath)
+	require.NoError(t, err)
+	require.NoError(t, releasedLock.Close())
+
 	after, err := manager.OpenStore(statePath, keyPath)
 	require.NoError(t, err)
 	require.Equal(t, beforeState.Admin.PasswordHash, after.State().Admin.PasswordHash,
 		"normal startup must not reset the administrator password")
+}
+
+func TestResetAdminFailsWhileStateLockHeld(t *testing.T) {
+	dir := t.TempDir()
+	statePath, keyPath := writeManagerState(t, dir, testAdminPassword)
+	configPath := writeManagerConfig(t, dir, "127.0.0.1:0")
+
+	before, err := manager.OpenStore(statePath, keyPath)
+	require.NoError(t, err)
+	beforeHash := before.State().Admin.PasswordHash
+
+	lock, err := manager.AcquireStateLock(statePath)
+	require.NoError(t, err)
+	defer lock.Close()
+
+	stdin := strings.NewReader(testNewAdminPassword + "\n" + testNewAdminPassword + "\n")
+	inputLen := stdin.Len()
+	var stderr bytes.Buffer
+	err = run([]string{"-config", configPath, "-reset-admin"}, stdin, io.Discard, &stderr, nil)
+	require.ErrorIs(t, err, manager.ErrStateLocked)
+	require.Contains(t, err.Error(), "stop")
+	require.Equal(t, inputLen, stdin.Len(), "the blocked reset must fail before reading the password")
+
+	after, err := manager.OpenStore(statePath, keyPath)
+	require.NoError(t, err)
+	require.Equal(t, beforeHash, after.State().Admin.PasswordHash,
+		"a blocked reset-admin must not touch the state file")
+}
+
+func TestVersionIncludesCommitAndDate(t *testing.T) {
+	var stdout bytes.Buffer
+	err := run([]string{"-version"}, strings.NewReader(""), &stdout, io.Discard, nil)
+	require.NoError(t, err)
+	output := stdout.String()
+	require.Contains(t, output, "hy2tun-manager")
+	require.Contains(t, output, version.Version)
+	require.Contains(t, output, version.Commit)
+	require.Contains(t, output, version.Date)
 }
 
 func TestResetAdminChangesOnlyPasswordAndInvalidatesOldSession(t *testing.T) {
@@ -146,6 +209,13 @@ func TestResetAdminChangesOnlyPasswordAndInvalidatesOldSession(t *testing.T) {
 	require.NotEqual(t, testAdminPassword, testNewAdminPassword)
 	require.NoError(t, bcrypt.CompareHashAndPassword([]byte(after.Admin.PasswordHash), []byte(testNewAdminPassword)))
 	require.Error(t, bcrypt.CompareHashAndPassword([]byte(after.Admin.PasswordHash), []byte(testAdminPassword)))
+
+	auditData, err := os.ReadFile(filepath.Join(dir, "audit.jsonl"))
+	require.NoError(t, err)
+	require.Contains(t, string(auditData), `"action":"admin.reset"`)
+	require.Contains(t, string(auditData), `"result":"ok"`)
+	require.NotContains(t, string(auditData), testNewAdminPassword)
+	require.NotContains(t, string(auditData), testAdminPassword)
 
 	// Only the bcrypt hash may change: username, servers, and key check survive.
 	before.Admin.PasswordHash = ""
@@ -219,18 +289,56 @@ func TestReleaseManagerArchives(t *testing.T) {
 	for _, arch := range []string{"amd64", "arm64"} {
 		archive := filepath.Join(dist, fmt.Sprintf("hy2tun-manager_test_linux_%s.tar.gz", arch))
 		require.FileExists(t, archive)
-		listing, err := exec.Command("tar", "-tzf", archive).CombinedOutput()
-		require.NoError(t, err, "list archive %s: %s", archive, listing)
-		names := make(map[string]bool)
-		for _, line := range strings.Split(strings.TrimSpace(string(listing)), "\n") {
-			names[strings.TrimPrefix(strings.TrimSpace(line), "./")] = true
+
+		files := readTarGzFiles(t, archive)
+		names := make([]string, 0, len(files))
+		for name := range files {
+			names = append(names, name)
 		}
-		for _, want := range []string{"hy2tun-manager", "manager.example.yaml", "hy2tun-manager.service", "README.md"} {
-			require.True(t, names[want], "%s is missing from %s (got %v)", want, filepath.Base(archive), names)
-		}
-		require.False(t, names["hy2tund"], "manager archive must not contain server binaries")
-		require.False(t, names["hy2tun"], "manager archive must not contain client binaries")
+		sort.Strings(names)
+		require.Equal(t, []string{
+			"README.md",
+			"hy2tun-manager",
+			"hy2tun-manager.service",
+			"manager.example.yaml",
+		}, names, "manager archive must contain exactly the documented entries")
+
+		ef, err := elf.NewFile(bytes.NewReader(files["hy2tun-manager"]))
+		require.NoError(t, err, "manager binary in %s must be an ELF executable", filepath.Base(archive))
+		require.Equal(t, map[string]elf.Machine{
+			"amd64": elf.EM_X86_64,
+			"arm64": elf.EM_AARCH64,
+		}[arch], ef.Machine)
 	}
+}
+
+// readTarGzFiles returns the regular-file entries of an archive, keyed by a
+// normalized name without the leading "./" produced by tarring ".".
+func readTarGzFiles(t *testing.T, path string) map[string][]byte {
+	t.Helper()
+
+	file, err := os.Open(path)
+	require.NoError(t, err)
+	defer file.Close()
+	gz, err := gzip.NewReader(file)
+	require.NoError(t, err)
+	defer gz.Close()
+	reader := tar.NewReader(gz)
+	files := make(map[string][]byte)
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			break
+		}
+		require.NoError(t, err)
+		if header.Typeflag != tar.TypeReg {
+			continue
+		}
+		data, err := io.ReadAll(reader)
+		require.NoError(t, err)
+		files[strings.TrimPrefix(header.Name, "./")] = data
+	}
+	return files
 }
 
 func writeManagerState(t *testing.T, dir, password string) (statePath, keyPath string) {

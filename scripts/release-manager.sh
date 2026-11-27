@@ -90,12 +90,23 @@ package() {
 	chmod 0644 "$pkg/manager.example.yaml" "$pkg/hy2tun-manager.service" "$pkg/README.md"
 
 	name="hy2tun-manager_${VERSION}_${os}_${arch}"
+	archive="$DIST/$name.tar.gz"
+	tarfile="$WORK/$name.tar"
 	# Normalize ownership, modes, order, and timestamps so repeated builds of
-	# the same commit produce byte-identical archives. gzip -n omits its own
-	# timestamp header.
-	(cd "$pkg" && tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner -cf - .) |
-		gzip -n >"$DIST/$name.tar.gz"
-	echo "==> packaged $DIST/$name.tar.gz"
+	# the same commit produce byte-identical archives. Build the tar file
+	# first instead of piping it into gzip: POSIX sh has no pipefail, and a
+	# masked tar failure would otherwise publish a truncated archive.
+	if ! (cd "$pkg" && tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner -cf "$tarfile" .); then
+		echo "release-manager: tar failed for $name" >&2
+		exit 1
+	fi
+	if ! gzip -n -c "$tarfile" >"$archive"; then
+		rm -f "$archive"
+		echo "release-manager: gzip failed for $name" >&2
+		exit 1
+	fi
+	rm -f "$tarfile"
+	echo "==> packaged $archive"
 }
 
 build() {

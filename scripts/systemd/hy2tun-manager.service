@@ -7,8 +7,8 @@ Wants=network-online.target
 Type=simple
 # The manager holds upstream server administrator credentials. Run it as a
 # dedicated unprivileged account; the state directory is created for it.
-# Create the account first:
-#   useradd --system --home-dir /var/lib/hy2tun-manager \
+# Create the account and matching group first:
+#   useradd --system --user-group --home-dir /var/lib/hy2tun-manager \
 #     --shell /usr/sbin/nologin hy2tun-manager
 User=hy2tun-manager
 Group=hy2tun-manager

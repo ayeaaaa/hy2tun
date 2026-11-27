@@ -38,13 +38,19 @@ This archive contains:
 
 ```sh
 tar -xzf hy2tun-manager_<version>_linux_amd64.tar.gz
+sudo useradd --system --user-group --home-dir /var/lib/hy2tun-manager \
+  --shell /usr/sbin/nologin hy2tun-manager
 sudo install -m 0755 hy2tun-manager /usr/local/bin/hy2tun-manager
 sudo install -d -m 0755 /etc/hy2tun
 sudo install -m 0644 manager.example.yaml /etc/hy2tun/manager.yaml
 sudo install -m 0644 hy2tun-manager.service /etc/systemd/system/hy2tun-manager.service
-sudo useradd --system --home-dir /var/lib/hy2tun-manager \
-  --shell /usr/sbin/nologin hy2tun-manager
 sudo systemctl daemon-reload
+```
+
+Review `/etc/hy2tun/manager.yaml` before the first start, then enable the
+service:
+
+```sh
 sudo systemctl enable --now hy2tun-manager
 ```
 
@@ -87,13 +93,24 @@ password, stores its bcrypt hash in `state.json`, and prints the plaintext once
 to stderr (the journal). It is never written to the state file or audit log and
 is never printed again. An existing administrator is never silently reset.
 
+To choose that first password yourself instead of reading it from the journal,
+set `HY2TUN_MANAGER_INITIAL_PASSWORD` in the service environment for the first
+start only (for example through `systemctl edit hy2tun-manager` and an
+`Environment=` line, or an `EnvironmentFile=`). The variable is ignored when
+`state.json` already exists, so leaving it configured can never reset an
+existing administrator. Remove it after the first successful start; the
+generated-password path is the default when it is unset.
+
 Open the manager at `http://127.0.0.1:7600/` through an SSH tunnel for the first
 login, or through the HTTPS reverse proxy below. Log in as `admin`.
 
 ## Reset the administrator password
 
 The manager snapshots the administrator hash when its HTTP shell starts, so a
-password reset is a file change plus a service restart:
+password reset is a file change plus a service restart. The running service
+holds an exclusive state lock; `reset-admin` takes the same lock and **fails
+without changing anything while the service is running**. The required order is
+exactly:
 
 ```sh
 sudo systemctl stop hy2tun-manager
@@ -101,6 +118,10 @@ sudo -u hy2tun-manager /usr/local/bin/hy2tun-manager \
   -config /etc/hy2tun/manager.yaml -reset-admin
 sudo systemctl start hy2tun-manager
 ```
+
+Do not run `reset-admin` against a live manager. If it reports that the state
+is locked, stop the service and retry. The command refuses before prompting, so
+it cannot consume a password while the lock is unavailable.
 
 The equivalent subcommand form is also supported:
 
@@ -110,9 +131,12 @@ sudo -u hy2tun-manager /usr/local/bin/hy2tun-manager reset-admin \
 ```
 
 The command prompts twice without echoing, requires a matching password of at
-least eight characters, changes only `admin.password_hash`, and exits. Run it as
-the service user: running it as root would replace the 0600 state file with a
-root-owned file that the service could no longer update.
+least eight characters and at most 72 bytes (the bcrypt limit), appends an
+`admin.reset` audit entry, changes only `admin.password_hash` in the state file,
+and exits. Run it as the service user: running it as root would replace the
+0600 state file with a root-owned file that the service could no longer update.
+A reset while the service is running is rejected by the state lock, so the
+stop → reset → start sequence above is mandatory.
 
 A running manager that has not been restarted keeps its old hash snapshot and
 its in-memory sessions. After the restart, the new password is required and all
@@ -240,11 +264,14 @@ VERSION=1.0.0 ./scripts/release-manager.sh
 ```
 
 `release-manager.sh` builds only `linux/amd64` and `linux/arm64` with
-`CGO_ENABLED=0`, `-trimpath`, and stripped version/commit/date metadata. Its two
-archives are named `hy2tun-manager_<version>_linux_amd64.tar.gz` and
-`hy2tun-manager_<version>_linux_arm64.tar.gz`. `--dry-run` prints the planned
-archive paths without building. `make build` and `scripts/release.sh` continue
-to produce only the existing `hy2tund`/`hy2tun` artifacts.
+`CGO_ENABLED=0`, `-trimpath`, and `version.Version`, `version.Commit`, and
+`version.Date` supplied through `-ldflags`. Its two archives are named
+`hy2tun-manager_<version>_linux_amd64.tar.gz` and
+`hy2tun-manager_<version>_linux_arm64.tar.gz`. Each archive contains exactly
+`hy2tun-manager`, `manager.example.yaml`, `hy2tun-manager.service`, and
+`README.md`; it never includes `hy2tund` or `hy2tun`. `--dry-run` prints the
+planned archive paths without building. `make build` and `scripts/release.sh`
+continue to produce only the existing `hy2tund`/`hy2tun` artifacts.
 
 ## Troubleshooting
 

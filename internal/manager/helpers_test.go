@@ -14,6 +14,7 @@ import (
 func testStore(t *testing.T) *Store {
 	t.Helper()
 
+	t.Setenv(InitialAdminPasswordEnv, "")
 	oldWriter := initialAdminPasswordWriter
 	initialAdminPasswordWriter = io.Discard
 	t.Cleanup(func() { initialAdminPasswordWriter = oldWriter })

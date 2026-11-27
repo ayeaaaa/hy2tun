@@ -244,13 +244,13 @@
     <div class="settings-grid">
       <label class="field">
         <span class="field-label">新 HY2 密码</span>
-        <input class="input" type="password" name="auth" required minlength="8" autocomplete="new-password"
-               placeholder="至少 8 个字符" {{if not .Settings.Rotatable}}disabled{{end}}>
+        <input class="input" type="password" name="auth" required autocomplete="new-password"
+               placeholder="至少 8 个字节" {{if not .Settings.Rotatable}}disabled{{end}}>
       </label>
       <label class="field">
         <span class="field-label">新 control token</span>
-        <input class="input" type="password" name="control_token" required minlength="16" autocomplete="new-password"
-               placeholder="至少 16 个字符" {{if not .Settings.Rotatable}}disabled{{end}}>
+        <input class="input" type="password" name="control_token" required autocomplete="new-password"
+               placeholder="至少 16 个字节" {{if not .Settings.Rotatable}}disabled{{end}}>
       </label>
     </div>
     <label class="field">

@@ -54,6 +54,14 @@ func TestLoadConfigNormalizesBasePathAndRequiresFiles(t *testing.T) {
 	require.ErrorContains(t, err, "refresh_interval")
 }
 
+func TestLoadConfigRejectsUnknownFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "manager.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("listen: 127.0.0.1:7600\nstate_fil: /tmp/typo.json\n"), 0o600))
+	_, err := LoadConfig(path)
+	require.ErrorContains(t, err, "state_fil")
+}
+
 func TestLoadConfigRejectsSharedPaths(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "manager.yaml")
