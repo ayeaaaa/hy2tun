@@ -49,6 +49,10 @@ func NewUpstreamClient(record ServerRecord, password []byte) (*upstream.Client, 
 	}, password)
 }
 
+// ErrServerNotFound reports an inventory ID that does not exist. Handlers map
+// it to a 404 and Task 6 reuses it through WithClient.
+var ErrServerNotFound = errors.New("server not found")
+
 // ValidationError reports operator-supplied inventory input that must be
 // corrected before anything is persisted or sent upstream.
 type ValidationError struct {
@@ -504,6 +508,104 @@ func (i *Inventory) Refresh(ctx context.Context, id string) (ServerView, error) 
 	opLock.Lock()
 	defer opLock.Unlock()
 	return i.refreshLocked(ctx, id)
+}
+
+// WithClient invokes fn with the cached upstream client for one server while
+// holding that server's operation lock. The record, credential, and client
+// identity are re-read after the lock so a queued Update/Refresh cannot leave
+// the callback using a previous BaseURL, username, TLS setting, or password.
+// fn receives the request context; it must not retain the client after return.
+func (i *Inventory) WithClient(ctx context.Context, serverID string, fn func(context.Context, *upstream.Client) error) error {
+	if i == nil || i.store == nil {
+		return fmt.Errorf("manager inventory is not configured")
+	}
+	if fn == nil {
+		return &ValidationError{Message: "client operation callback is required"}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	opLock := i.operationLock(serverID)
+	opLock.Lock()
+	defer opLock.Unlock()
+
+	state := i.store.State()
+	record, ok := serverRecordFrom(state.Servers, serverID)
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrServerNotFound, serverID)
+	}
+	i.mu.Lock()
+	i.syncLocked(state.Servers)
+	entry := i.entries[serverID]
+	i.mu.Unlock()
+	if entry == nil {
+		return fmt.Errorf("%w: %s", ErrServerNotFound, serverID)
+	}
+
+	entry.mu.Lock()
+	removed := entry.removed
+	client := entry.client
+	identityCurrent := client != nil &&
+		entry.clientBaseURL == record.BaseURL &&
+		entry.clientUsername == record.UpstreamUsername &&
+		entry.clientTLSSkipVerify == record.TLSSkipVerify &&
+		entry.clientPasswordEnc == record.UpstreamPasswordEnc
+	entry.mu.Unlock()
+	if removed {
+		return fmt.Errorf("%w: %s", ErrServerNotFound, serverID)
+	}
+
+	created := false
+	if client != nil && !identityCurrent {
+		client.CloseIdleConnections()
+		entry.mu.Lock()
+		if entry.client == client {
+			entry.client = nil
+			entry.clientBaseURL = ""
+			entry.clientUsername = ""
+			entry.clientTLSSkipVerify = false
+			entry.clientPasswordEnc = ""
+		}
+		entry.mu.Unlock()
+		client = nil
+	}
+	if client == nil {
+		password, err := i.store.ServerPassword(serverID)
+		if err != nil {
+			return err
+		}
+		client, err = i.factory(record, password)
+		if err != nil {
+			return err
+		}
+		created = true
+	}
+
+	if err := fn(ctx, client); err != nil {
+		if created {
+			// The new client was never cached; release its transport
+			// resources instead of waiting for the garbage collector.
+			client.CloseIdleConnections()
+		}
+		return err
+	}
+
+	entry.mu.Lock()
+	if entry.removed {
+		entry.mu.Unlock()
+		if created {
+			client.CloseIdleConnections()
+		}
+		return fmt.Errorf("%w: %s", ErrServerNotFound, serverID)
+	}
+	entry.client = client
+	entry.clientBaseURL = record.BaseURL
+	entry.clientUsername = record.UpstreamUsername
+	entry.clientTLSSkipVerify = record.TLSSkipVerify
+	entry.clientPasswordEnc = record.UpstreamPasswordEnc
+	entry.mu.Unlock()
+	return nil
 }
 
 // refreshLocked performs one refresh while the caller holds operationLock(id).

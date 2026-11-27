@@ -41,6 +41,8 @@ type WebServer struct {
 	overviewTemplate *template.Template
 	serversTemplate  *template.Template
 	serverTemplate   *template.Template
+	clientsTemplate  *template.Template
+	clientTemplate   *template.Template
 
 	handler http.Handler
 }
@@ -112,6 +114,14 @@ func NewWebServer(store *Store, audit *AuditLog, cfg Config, log *slog.Logger) (
 	if err != nil {
 		return nil, fmt.Errorf("manager: parse server template: %w", err)
 	}
+	clientsTemplate, err := shared.ParsePage(managerAssets, "templates/layout.html", "templates/clients.html")
+	if err != nil {
+		return nil, fmt.Errorf("manager: parse clients template: %w", err)
+	}
+	clientTemplate, err := shared.ParsePage(managerAssets, "templates/layout.html", "templates/client.html")
+	if err != nil {
+		return nil, fmt.Errorf("manager: parse client template: %w", err)
+	}
 	staticFS, err := fs.Sub(managerAssets, "static")
 	if err != nil {
 		return nil, fmt.Errorf("manager: open static assets: %w", err)
@@ -130,6 +140,8 @@ func NewWebServer(store *Store, audit *AuditLog, cfg Config, log *slog.Logger) (
 		overviewTemplate: overviewTemplate,
 		serversTemplate:  serversTemplate,
 		serverTemplate:   serverTemplate,
+		clientsTemplate:  clientsTemplate,
+		clientTemplate:   clientTemplate,
 	}
 	server.handler = server.routes()
 	return server, nil
@@ -163,6 +175,8 @@ func (s *WebServer) routes() http.Handler {
 	// CSRF gates; destructive removal additionally requires the server name.
 	mux.Handle("GET /servers", s.requireAuth(http.HandlerFunc(s.handleServersPage)))
 	mux.Handle("GET /servers/{id}", s.requireAuth(http.HandlerFunc(s.handleServerPage)))
+	mux.Handle("GET /servers/{id}/clients", s.requireAuth(http.HandlerFunc(s.handleClientsPage)))
+	mux.Handle("GET /servers/{id}/clients/{clientID}", s.requireAuth(http.HandlerFunc(s.handleClientPage)))
 
 	mux.Handle("GET /api/servers", s.requireAuth(http.HandlerFunc(s.handleListServersAPI)))
 	mux.Handle("GET /api/servers/{id}", s.requireAuth(http.HandlerFunc(s.handleGetServerAPI)))
@@ -173,6 +187,12 @@ func (s *WebServer) routes() http.Handler {
 	mux.Handle("POST /api/servers/refresh-all", s.mutation(http.HandlerFunc(s.handleRefreshAllServers)))
 	mux.Handle("POST /api/servers/{id}/test", s.mutation(http.HandlerFunc(s.handleTestStoredServer)))
 	mux.Handle("POST /api/servers/{id}/refresh", s.mutation(http.HandlerFunc(s.handleRefreshServer)))
+
+	// Client mapping writes are full replacements authenticated by the
+	// upstream revision; exposure is a separate server-side state mutation and
+	// remains available while the client is offline.
+	mux.Handle("PUT /api/servers/{id}/clients/{clientID}/mappings", s.mutation(http.HandlerFunc(s.handlePushClientMappings)))
+	mux.Handle("PUT /api/servers/{id}/clients/{clientID}/mappings/{mappingID}/exposure", s.mutation(http.HandlerFunc(s.handleSetMappingExposure)))
 
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(s.static))))
 

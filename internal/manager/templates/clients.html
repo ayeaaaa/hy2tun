@@ -1,0 +1,67 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <p class="eyebrow"><a class="back-link" href="{{.BasePath}}servers/{{.Server.ID}}">{{.Server.Name}}</a></p>
+    <h1>客户端</h1>
+    <p class="muted">{{.Server.Name}} 的客户端与映射数量。状态在打开页面时从上游服务器实时读取。</p>
+  </div>
+  <div class="page-actions">
+    <span class="state-badge {{.Server.StateClass}}">{{.Server.StateLabel}}</span>
+    <a class="btn btn-quiet" href="{{.BasePath}}servers/{{.Server.ID}}">服务器详情</a>
+  </div>
+</div>
+
+{{if .LoadError}}
+<div class="alert" role="alert">
+  <strong>读取客户端失败：</strong>
+  <span class="wrap">{{.LoadError}}</span>
+  <a class="back-link" href="{{.BasePath}}servers/{{.Server.ID}}/clients">重试</a>
+</div>
+{{end}}
+
+<section class="panel" aria-labelledby="client-list-heading">
+  <div class="panel-section panel-heading">
+    <h2 id="client-list-heading">客户端列表</h2>
+    <p class="muted">共 {{len .Clients}} 个客户端；最近刷新：{{time .Server.LastRefresh}}</p>
+  </div>
+  {{if .Clients}}
+  <div class="table-wrap">
+    <table class="data-table client-table">
+      <thead>
+        <tr>
+          <th scope="col">客户端</th>
+          <th scope="col">状态</th>
+          <th scope="col">版本</th>
+          <th scope="col" class="num">配置版本</th>
+          <th scope="col" class="num">映射</th>
+          <th scope="col">最后在线</th>
+          <th scope="col">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Clients}}
+        <tr>
+          <td>
+            <a class="server-link" href="{{$.BasePath}}servers/{{$.Server.ID}}/clients/{{.PathID}}">{{.DisplayName}}</a>
+            <div class="muted mono wrap">{{.ID}}</div>
+          </td>
+          <td><span class="state-badge {{.StateClass}}">{{.OnlineLabel}}</span></td>
+          <td>{{if .Version}}{{.Version}}{{else}}—{{end}}</td>
+          <td class="num mono">r{{.Revision}}</td>
+          <td class="num">{{.MappingCount}}</td>
+          <td>{{time .LastSeen}}</td>
+          <td class="actions-cell">
+            <a class="btn btn-quiet btn-sm" href="{{$.BasePath}}servers/{{$.Server.ID}}/clients/{{.PathID}}">查看映射</a>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else if not .LoadError}}
+  <div class="panel-section empty-inline">
+    <p class="muted">该服务器还没有已注册的客户端。</p>
+  </div>
+  {{end}}
+</section>
+{{end}}

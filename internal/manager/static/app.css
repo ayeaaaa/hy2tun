@@ -645,3 +645,71 @@ a {
     padding: 1rem;
   }
 }
+
+/* Client mapping editor */
+
+.mapping-add-form {
+  padding: 0;
+}
+
+.mapping-add-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem 1.25rem;
+  margin: 0;
+  padding: 1.4rem;
+  border: 0;
+}
+
+.mapping-add-fields .form-actions {
+  grid-column: 1 / -1;
+}
+
+.mapping-add-fields[disabled] {
+  opacity: 0.65;
+}
+
+.mapping-table td {
+  vertical-align: top;
+}
+
+.mapping-table .input-compact {
+  width: 100%;
+  min-width: 6.5rem;
+  min-height: 34px;
+  padding: 0.4rem 0.55rem;
+  font-size: 0.82rem;
+}
+
+.mapping-table td:nth-child(2) .input-compact {
+  max-width: 8rem;
+}
+
+.mapping-table .actions-cell .btn + .btn {
+  margin-top: 0.35rem;
+  margin-left: 0;
+}
+
+.checkbox-compact {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  white-space: nowrap;
+}
+
+#client-mutation-error {
+  margin: 0 1.4rem 1rem;
+}
+
+@media (max-width: 900px) {
+  .mapping-add-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .mapping-add-fields {
+    grid-template-columns: 1fr;
+    padding: 1rem;
+  }
+}

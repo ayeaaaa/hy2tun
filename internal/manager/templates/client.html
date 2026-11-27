@@ -1,0 +1,209 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">
+      <a class="back-link" href="{{.BasePath}}servers">服务器清单</a>
+      <span class="muted">/</span>
+      <a class="back-link" href="{{.BasePath}}servers/{{.Server.ID}}/clients">{{.Server.Name}} 客户端</a>
+    </p>
+    <h1>{{.Client.DisplayName}}</h1>
+    <p class="muted mono wrap">{{.Client.ID}}</p>
+  </div>
+  <div class="page-actions">
+    <span class="state-badge {{.Client.StateClass}}">{{.Client.OnlineLabel}}</span>
+    <a class="btn btn-quiet" href="{{.BasePath}}servers/{{.Server.ID}}/clients/{{.Client.PathID}}">刷新页面</a>
+  </div>
+</div>
+
+{{if .LoadError}}
+<div class="alert" role="alert">
+  <strong>读取客户端详情失败：</strong>
+  <span class="wrap">{{.LoadError}}</span>
+  <a class="back-link" href="{{.BasePath}}servers/{{.Server.ID}}/clients/{{.Client.PathID}}">重试</a>
+</div>
+{{else}}
+
+{{if .Client.ReadOnly}}
+<div class="alert" role="status">
+  <strong>离线客户端不可编辑。</strong>
+  映射修改已禁用；暴露范围仍可调整（公网 / 仅本机），服务端会在客户端重新连接后应用。
+</div>
+{{end}}
+
+<section class="panel" aria-labelledby="client-summary-heading">
+  <div class="panel-section panel-heading">
+    <h2 id="client-summary-heading">客户端状态</h2>
+    <p class="muted">配置版本 r{{.Client.Revision}} · 最后在线：{{time .Client.LastSeen}}</p>
+  </div>
+  <div class="panel-section summary-grid">
+    <div class="summary-item">
+      <span class="summary-label">客户端 ID</span>
+      <span class="summary-value mono wrap">{{.Client.ID}}</span>
+    </div>
+    <div class="summary-item">
+      <span class="summary-label">版本</span>
+      <span class="summary-value">{{if .Client.Version}}{{.Client.Version}}{{else}}—{{end}}</span>
+    </div>
+    <div class="summary-item">
+      <span class="summary-label">配置版本</span>
+      <span class="summary-value mono">r{{.Client.Revision}}</span>
+    </div>
+    <div class="summary-item">
+      <span class="summary-label">实际传输</span>
+      <span class="summary-value">{{.Client.TransportLabel}}</span>
+    </div>
+    <div class="summary-item">
+      <span class="summary-label">映射</span>
+      <span class="summary-value">{{.Client.MappingCount}}</span>
+    </div>
+    <div class="summary-item">
+      <span class="summary-label">服务器最近刷新</span>
+      <span class="summary-value">{{time .Server.LastRefresh}}</span>
+    </div>
+  </div>
+</section>
+
+<section class="panel form-panel" aria-labelledby="add-mapping-heading">
+  <div class="panel-section panel-heading">
+    <h2 id="add-mapping-heading">新增映射</h2>
+    <p class="muted">新增本地映射会在同一次提交中附带 exposures；服务端先禁用创建、再设置暴露范围、最后启用。</p>
+  </div>
+  <form class="mapping-add-form" action="{{.BasePath}}api/servers/{{.Server.ID}}/clients/{{.Client.PathID}}/mappings"
+        method="post" data-mapping-add
+        data-endpoint="{{.BasePath}}api/servers/{{.Server.ID}}/clients/{{.Client.PathID}}/mappings">
+    <fieldset class="mapping-add-fields" {{if .Client.ReadOnly}}disabled{{end}}>
+      <label class="field">
+        <span class="field-label">类型</span>
+        <select class="input" data-mapping-add-field="type">
+          <option value="tcp">TCP</option>
+          <option value="udp">UDP</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label">远程端口（0 = 自动）</span>
+        <input class="input" type="number" min="0" max="65535" step="1" inputmode="numeric"
+               value="0" data-mapping-add-field="remote_port">
+      </label>
+      <label class="field">
+        <span class="field-label">本地地址</span>
+        <input class="input mono" type="text" required placeholder="127.0.0.1:22"
+               data-mapping-add-field="local_addr">
+      </label>
+      <label class="field">
+        <span class="field-label">备注</span>
+        <input class="input" type="text" maxlength="128" data-mapping-add-field="note">
+      </label>
+      <label class="field">
+        <span class="field-label">暴露范围</span>
+        <select class="input" data-mapping-add-field="exposure">
+          <option value="public">公网</option>
+          <option value="local">仅本机</option>
+        </select>
+      </label>
+      <label class="field checkbox-field">
+        <input type="checkbox" checked data-mapping-add-field="enabled">
+        <span>新增后立即启用</span>
+      </label>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit" {{if .Client.ReadOnly}}disabled{{end}}>新增映射</button>
+      </div>
+    </fieldset>
+  </form>
+</section>
+
+<section class="panel" aria-labelledby="mapping-list-heading">
+  <div class="panel-section panel-heading">
+    <h2 id="mapping-list-heading">映射</h2>
+    <p class="muted">映射更新是完整列表替换；保存后页面会重新读取服务端的最新配置版本。</p>
+    <button class="btn btn-primary" type="button" data-mapping-save-list
+            data-endpoint="{{.BasePath}}api/servers/{{.Server.ID}}/clients/{{.Client.PathID}}/mappings"
+            {{if .Client.ReadOnly}}disabled{{end}}>保存映射列表</button>
+  </div>
+  <div class="alert" id="client-mutation-error" role="alert" hidden>
+    <span data-mutation-error-text></span>
+    <a class="back-link" href="{{.BasePath}}servers/{{.Server.ID}}/clients/{{.Client.PathID}}">重新加载</a>
+  </div>
+  <div class="table-wrap">
+    <table class="data-table mapping-table"
+           data-mappings-table
+           data-base-revision="{{.Client.Revision}}"
+           data-endpoint="{{.BasePath}}api/servers/{{.Server.ID}}/clients/{{.Client.PathID}}/mappings">
+      <thead>
+        <tr>
+          <th scope="col">类型</th>
+          <th scope="col">远程端口</th>
+          <th scope="col">本地地址</th>
+          <th scope="col">备注</th>
+          <th scope="col">启用</th>
+          <th scope="col">暴露范围</th>
+          <th scope="col">状态</th>
+          <th scope="col">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{if .Mappings}}
+        {{range .Mappings}}
+        <tr data-mapping-id="{{.ID}}" data-mapping-enabled="{{.Enabled}}">
+          <td>
+            <select class="input input-compact" data-mapping-field="type" {{if $.Client.ReadOnly}}disabled{{end}}>
+              <option value="tcp" {{if eq .Type "tcp"}}selected{{end}}>TCP</option>
+              <option value="udp" {{if eq .Type "udp"}}selected{{end}}>UDP</option>
+            </select>
+            <div class="muted mono wrap">{{.ID}}</div>
+          </td>
+          <td>
+            <input class="input input-compact mono" type="number" min="0" max="65535" step="1"
+                   value="{{.RemotePort}}" data-mapping-field="remote_port" {{if $.Client.ReadOnly}}disabled{{end}}>
+            <div class="muted">{{.RemotePortLabel}}</div>
+          </td>
+          <td>
+            <input class="input input-compact mono" type="text" value="{{.LocalAddr}}"
+                   data-mapping-field="local_addr" {{if $.Client.ReadOnly}}disabled{{end}}>
+          </td>
+          <td>
+            <input class="input input-compact" type="text" maxlength="128" value="{{.Note}}"
+                   data-mapping-field="note" {{if $.Client.ReadOnly}}disabled{{end}}>
+          </td>
+          <td>
+            <label class="checkbox-field checkbox-compact">
+              <input type="checkbox" data-mapping-field="enabled" {{if .Enabled}}checked{{end}} {{if $.Client.ReadOnly}}disabled{{end}}>
+              <span>{{.EnabledLabel}}</span>
+            </label>
+          </td>
+          <td>
+            <select class="input input-compact" data-exposure-select data-mapping-id="{{.ID}}">
+              <option value="public" {{if .IsPublic}}selected{{end}}>公网</option>
+              <option value="local" {{if .IsLocal}}selected{{end}}>仅本机</option>
+            </select>
+            <button class="btn btn-quiet btn-sm" type="button" data-mapping-exposure
+                    data-endpoint="{{$.BasePath}}api/servers/{{$.Server.ID}}/clients/{{$.Client.PathID}}/mappings/{{.PathID}}/exposure">应用暴露</button>
+          </td>
+          <td>
+            <span class="state-badge {{statusClass .Status}}">{{statusLabel .Status}}</span>
+            {{if .AssignedPort}}<div class="muted mono">端口 {{.AssignedPort}}</div>{{end}}
+            {{if .HasError}}<div class="error-text mono wrap">{{.Error}}</div>{{end}}
+          </td>
+          <td class="actions-cell">
+            <button class="btn btn-danger btn-sm" type="button" data-mapping-delete
+                    data-confirm="确定删除映射 {{.ID}}？删除会立即断开该映射的现有连接。"
+                    {{if $.Client.ReadOnly}}disabled{{end}}>删除</button>
+            <button class="btn btn-quiet btn-sm" type="button" data-mapping-toggle
+                    {{if $.Client.ReadOnly}}disabled{{end}}>{{if .Enabled}}禁用{{else}}启用{{end}}</button>
+          </td>
+        </tr>
+        {{end}}
+        {{else}}
+        <tr>
+          <td colspan="8">
+            <div class="empty-inline">
+              <p class="muted">该客户端还没有映射。</p>
+            </div>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</section>
+{{end}}
+{{end}}
