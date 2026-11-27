@@ -3,6 +3,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 brand="$root/assets/brand"
+docs="$root/docs/assets"
 server="$root/internal/webui/serverui/static"
 client="$root/internal/webui/clientui/static"
 luci_icons="$root/scripts/openwrt/luci-app-hy2tun/htdocs/luci-static/resources/icons"
@@ -67,9 +68,13 @@ install -d -m 755 "$luci_icons"
 render_png "$brand/mark.svg" 32x32 "$tmpdir/hy2tun-luci.png"
 install -m 644 "$tmpdir/hy2tun-luci.png" "$luci_icons/hy2tun.png"
 
-# Social preview must be exactly 1200x630.
+# Social preview must be exactly 1200x630. The design asset matrix names both
+# og-1200x630.png and social-preview.png; docs/assets is the operator copy.
 render_png "$brand/og-1200x630.svg" '1200x630!' "$tmpdir/social-preview.png"
+install -d -m 755 "$docs"
 install -m 644 "$tmpdir/social-preview.png" "$brand/social-preview.png"
+install -m 644 "$tmpdir/social-preview.png" "$brand/og-1200x630.png"
+install -m 644 "$tmpdir/social-preview.png" "$docs/social-preview.png"
 
 # favicon.svg is the rounded badge mark itself.
 install -m 644 "$brand/mark.svg" "$tmpdir/favicon.svg"

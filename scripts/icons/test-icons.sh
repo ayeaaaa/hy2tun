@@ -3,6 +3,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 brand="$root/assets/brand"
+docs="$root/docs/assets"
 server="$root/internal/webui/serverui/static"
 client="$root/internal/webui/clientui/static"
 luci_icon="$root/scripts/openwrt/luci-app-hy2tun/htdocs/luci-static/resources/icons/hy2tun.png"
@@ -14,9 +15,11 @@ fail() {
 
 # Master sources.
 for f in mark.svg mark-dark.svg mark-mono.svg app-icon.svg \
-         lockup-light.svg lockup-dark.svg og-1200x630.svg social-preview.png; do
+         lockup-light.svg lockup-dark.svg og-1200x630.svg og-1200x630.png \
+         social-preview.png; do
   test -s "$brand/$f" || fail "missing assets/brand/$f"
 done
+test -s "$docs/social-preview.png" || fail "missing docs/assets/social-preview.png"
 
 # Web assets must exist in both independently embedded static trees.
 for f in mark.svg mark-dark.svg favicon.svg favicon-16.png favicon-32.png favicon.ico \
@@ -30,15 +33,20 @@ cmp -s "$brand/mark-dark.svg" "$server/mark-dark.svg" || fail "server mark-dark.
 cmp -s "$brand/mark.svg" "$server/favicon.svg" || fail "favicon.svg must be the rounded badge mark"
 
 # Raster dimensions.
-[ "$(identify -format '%wx%h' "$brand/social-preview.png")" = "1200x630" ] ||
-  fail "social-preview.png must be 1200x630"
-
 check_png_size() {
   path=$1
   want=$2
   got=$(identify -format '%wx%h' "$path")
   [ "$got" = "$want" ] || fail "expected $want for ${path#"$root"/}, got $got"
 }
+check_png_size "$brand/og-1200x630.png" 1200x630
+check_png_size "$brand/social-preview.png" 1200x630
+check_png_size "$docs/social-preview.png" 1200x630
+cmp -s "$brand/social-preview.png" "$brand/og-1200x630.png" ||
+  fail "og-1200x630.png must match social-preview.png"
+cmp -s "$brand/social-preview.png" "$docs/social-preview.png" ||
+  fail "docs/assets/social-preview.png must match social-preview.png"
+
 check_png_size "$server/favicon-16.png" 16x16
 check_png_size "$server/favicon-32.png" 32x32
 check_png_size "$server/apple-touch-icon.png" 180x180
@@ -108,17 +116,28 @@ grep -q '#0f1511' "$brand/mark-dark.svg" || fail "mark-dark.svg missing dark sym
 if grep -q '<text' "$brand/app-icon.svg"; then
   fail "app-icon.svg must not contain text"
 fi
+# Lockups and the OG asset must carry outlined glyphs, not live text that
+# depends on viewer fonts. Each mark contributes one <path>; the outlined
+# wordmark adds one, and the OG tagline adds another.
+count_paths() {
+  grep -o '<path' "$1" | wc -l | tr -d ' '
+}
 for f in lockup-light.svg lockup-dark.svg; do
   grep -q 'hy2tun' "$brand/$f" || fail "$f missing hy2tun wordmark"
-  grep -q 'font-family="DejaVu Sans"' "$brand/$f" || fail "$f must use DejaVu Sans"
-  grep -q 'font-weight="600"' "$brand/$f" || fail "$f must use font-weight 600"
+  if grep -q '<text' "$brand/$f"; then
+    fail "$f must not contain live <text>"
+  fi
+  [ "$(count_paths "$brand/$f")" -ge 2 ] ||
+    fail "$f missing outlined wordmark path"
 done
 grep -q 'hy2tun' "$brand/og-1200x630.svg" || fail "og-1200x630.svg missing wordmark"
 grep -q 'Reverse tunnel · HY2 + TCP' "$brand/og-1200x630.svg" ||
   fail "og-1200x630.svg missing tagline"
-for size in $(grep -o 'font-size="[0-9]*"' "$brand/og-1200x630.svg" | sed 's/[^0-9]//g'); do
-  [ "$size" -ge 24 ] || fail "og-1200x630.svg contains text below 24px"
-done
+if grep -q '<text' "$brand/og-1200x630.svg"; then
+  fail "og-1200x630.svg must not contain live <text>"
+fi
+[ "$(count_paths "$brand/og-1200x630.svg")" -ge 3 ] ||
+  fail "og-1200x630.svg missing outlined wordmark or tagline path"
 
 # The manifest must be valid JSON with the required identity and icons.
 python3 - "$server/site.webmanifest" <<'PY'
