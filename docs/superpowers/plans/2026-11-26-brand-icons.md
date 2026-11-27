@@ -50,7 +50,7 @@
 - Produces SVG/PNG source assets in `assets/brand/` and a reproducible generation script.
 - `scripts/icons/build-icons.sh` must be idempotent and only write into `assets/brand/` and the Web/Windows destinations named in later tasks.
 
-- [ ] **Step 1: Write the asset verification test first**
+- [x] **Step 1: Write the asset verification test first**
 
 Create `scripts/icons/test-icons.sh` that fails while assets are absent and later asserts:
 
@@ -75,7 +75,7 @@ done
 
 Run it and confirm it fails with a missing-asset message.
 
-- [ ] **Step 2: Author the master SVG geometry**
+- [x] **Step 2: Author the master SVG geometry**
 
 Use a 512×512 viewBox. The master `mark.svg` uses a 40px inset rounded badge (`x=40 y=40 width=432 height=432 rx=96`) filled `#2f6b52`. Draw the symbol as a white arch from `(160,365)` up to `(160,275)`, over the top to `(352,275)`, down to `(352,365)`, with `stroke-width="44"` and round caps; add white circles at `(160,365)` and `(352,365)` with `r=34`. Keep 12% safe padding.
 
@@ -87,7 +87,7 @@ Create variants by changing only the palette/background:
 - `lockup-light.svg` / `lockup-dark.svg`: horizontal mark + `hy2tun` wordmark using `font-family="DejaVu Sans"`, `font-weight="600"`, with the wordmark color from the palette.
 - `og-1200x630.svg`: surface background, mark at left, `hy2tun` wordmark, tagline `Reverse tunnel · HY2 + TCP`; no text below 24px.
 
-- [ ] **Step 3: Implement the generation script**
+- [x] **Step 3: Implement the generation script**
 
 `scripts/icons/build-icons.sh` must:
 
@@ -100,7 +100,7 @@ Create variants by changing only the palette/background:
 
 Use `convert -background none` for transparency, and `-resize`/`-define icon:auto-resize` for the ICO. Do not generate the Web copies in a way that changes bytes between runs.
 
-- [ ] **Step 4: Run the generation and verify assets**
+- [x] **Step 4: Run the generation and verify assets**
 
 Run:
 
@@ -111,7 +111,7 @@ scripts/icons/test-icons.sh
 
 Expected: all assets exist; `social-preview.png` is 1200×630; all Web PNGs decode; no missing files.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add assets/brand scripts/icons internal/webui/serverui/static internal/webui/clientui/static
@@ -135,7 +135,7 @@ git commit -m "feat(brand): add tunnel mark and generated icon assets"
 - Produces identical icon metadata and mark rendering in both consoles.
 - `brand-mark` remains an 18×18 visual element but is now an image/SVG, not a CSS pseudo-element.
 
-- [ ] **Step 1: Add failing page assertions**
+- [x] **Step 1: Add failing page assertions**
 
 Add a serverui test asserting the rendered `/login` or authenticated page contains:
 
@@ -149,7 +149,7 @@ require.Contains(t, body, `class="brand-mark"`)
 
 Add the same assertions for the client login page/authenticated page. The test must fail before template changes.
 
-- [ ] **Step 2: Add the head links and mark markup**
+- [x] **Step 2: Add the head links and mark markup**
 
 In both `layout.html` files add, in the existing `<head>`:
 
@@ -170,7 +170,7 @@ Replace the empty `<span class="brand-mark" aria-hidden="true"></span>` with a d
 </picture>
 ```
 
-- [ ] **Step 3: Update the CSS**
+- [x] **Step 3: Update the CSS**
 
 In both `app.css` files, remove the `background` and `::after` rules from `.brand-mark`; keep it 18×18 and non-shrinking:
 
@@ -185,7 +185,7 @@ In both `app.css` files, remove the `background` and `::after` rules from `.bran
 
 Ensure the existing `.brand` gap/structure remains unchanged.
 
-- [ ] **Step 4: Run Web tests and static checks**
+- [x] **Step 4: Run Web tests and static checks**
 
 ```sh
 go test ./internal/webui/serverui ./internal/webui/clientui -count=1
@@ -195,7 +195,7 @@ node --check internal/webui/clientui/static/app.js
 
 Expected: PASS; the rendered page contains all icon links and the mark.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add internal/webui/serverui/templates/layout.html internal/webui/clientui/templates/layout.html internal/webui/serverui/static/app.css internal/webui/clientui/static/app.css internal/webui/serverui/handlers_test.go internal/webui/clientui/handlers_test.go
@@ -220,7 +220,7 @@ git commit -m "feat(web): use hy2tun brand icons in both consoles"
 - Both command packages embed the same icon and resource ID.
 - `scripts/icons/build-icons.sh` regenerates `.ico` and `.syso` from the SVG master.
 
-- [ ] **Step 1: Add failing Windows asset checks**
+- [x] **Step 1: Add failing Windows asset checks**
 
 Extend `scripts/icons/test-icons.sh` to assert:
 
@@ -234,7 +234,7 @@ file "$root/cmd/hy2tund/hy2tund_windows_amd64.syso" | grep -E 'COFF|object' >/de
 
 Run it; expect failure.
 
-- [ ] **Step 2: Add the Windows resource files**
+- [x] **Step 2: Add the Windows resource files**
 
 Create `hy2tun.rc`:
 
@@ -244,7 +244,7 @@ Create `hy2tun.rc`:
 
 Create `hy2tund.rc` with the same icon reference. Generate the multi-size `.ico` from `app-icon.svg` with 16/24/32/48/64/128/256 layers.
 
-- [ ] **Step 3: Generate `.syso` resources**
+- [x] **Step 3: Generate `.syso` resources**
 
 In `scripts/icons/build-icons.sh`, generate:
 
@@ -255,7 +255,7 @@ x86_64-w64-mingw32-windres -I assets/brand/windows -i assets/brand/windows/hy2tu
 
 Run the script; verify the `.syso` files are non-empty COFF objects.
 
-- [ ] **Step 4: Verify Windows builds and resources**
+- [x] **Step 4: Verify Windows builds and resources**
 
 ```sh
 GOOS=windows GOARCH=amd64 go build ./...
@@ -264,7 +264,7 @@ scripts/icons/test-icons.sh
 
 Expected: PASS; both Windows commands build and both `.syso` files exist. Inspect the `.exe` with `strings`/resource viewer if available; otherwise record that the resource object was linked.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add assets/brand/windows cmd/hy2tun/hy2tun_windows_amd64.syso cmd/hy2tund/hy2tund_windows_amd64.syso scripts/icons
@@ -290,7 +290,7 @@ git commit -m "feat(windows): embed hy2tun application icon"
 - The controller sets an icon on the existing Services entry when the running LuCI theme supports per-entry icons; older themes must ignore the field without error.
 - No theme-specific CSS/JS.
 
-- [ ] **Step 1: Add failing package assertions**
+- [x] **Step 1: Add failing package assertions**
 
 Extend `scripts/openwrt/test-ipk.sh` to assert the LuCI IPK contains:
 
@@ -300,7 +300,7 @@ grep -q './www/luci-static/resources/icons/hy2tun.png' "$work/luci/files.txt"
 
 Extend `scripts/icons/test-icons.sh` to assert the LuCI source PNG is exactly 32×32 after generation. Extend the Lua harness (`test-luci-controller.lua`) so its `entry` stub captures `icon`, and assert the page route has `icon == "icons/hy2tun.png"` after `controller.index()`. Run tests; expect failure.
 
-- [ ] **Step 2: Generate and package the 32px icon**
+- [x] **Step 2: Generate and package the 32px icon**
 
 In `scripts/icons/build-icons.sh`, render the full-color rounded badge mark to the LuCI source path at 32×32. Update `build-luci-ipk.sh` to install the LuCI static asset into the package's `/www` root (the source `htdocs` prefix is a LuCI source convention, not an install path):
 
@@ -310,7 +310,7 @@ install -m 644 "$src/htdocs/luci-static/resources/icons/hy2tun.png" \
 	"$pkg/www/luci-static/resources/icons/hy2tun.png"
 ```
 
-- [ ] **Step 3: Set the menu icon best-effort**
+- [x] **Step 3: Set the menu icon best-effort**
 
 In `hy2tun.lua`, assign the icon to the existing `admin/services/hy2tun` entry without changing its title/order/dependency:
 
@@ -322,7 +322,7 @@ page.icon = "icons/hy2tun.png"
 
 The icon path is relative to `/luci-static/resources/`, so the installed file is `/www/luci-static/resources/icons/hy2tun.png`. If an installed legacy LuCI schema ignores the extra field, the entry must still load. Do not add per-theme CSS/JS.
 
-- [ ] **Step 4: Run OpenWrt checks**
+- [x] **Step 4: Run OpenWrt checks**
 
 ```sh
 scripts/openwrt/test-ipk.sh
@@ -331,7 +331,7 @@ scripts/openwrt/test-luci-controller.sh
 
 Expected: PASS; the icon path is present in the IPK, and the controller still loads.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add scripts/openwrt scripts/icons
@@ -354,7 +354,7 @@ git commit -m "feat(openwrt): ship hy2tun LuCI icon"
 - `assets/brand/README.md` documents source files, regeneration, and the LuCI theme limitation.
 - README shows the mark/wordmark without adding unsupported product claims.
 
-- [ ] **Step 1: Add the social preview and documentation**
+- [x] **Step 1: Add the social preview and documentation**
 
 Copy `assets/brand/social-preview.png` to `docs/assets/social-preview.png`. Add a short `assets/brand/README.md` covering:
 
@@ -366,7 +366,7 @@ Copy `assets/brand/social-preview.png` to `docs/assets/social-preview.png`. Add 
 
 Add the mark/lockup to the README intro if it fits the existing layout; keep the change small and do not add marketing claims.
 
-- [ ] **Step 2: Run whole-project verification**
+- [x] **Step 2: Run whole-project verification**
 
 ```sh
 scripts/icons/test-icons.sh
@@ -381,7 +381,7 @@ git diff --check
 
 Expected: all pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```sh
 git add assets/brand docs/assets README.md README.zh-CN.md

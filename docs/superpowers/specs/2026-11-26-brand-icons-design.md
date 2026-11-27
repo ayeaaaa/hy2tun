@@ -1,7 +1,7 @@
 # hy2tun brand icons design
 
 - Date: 2026-11-26
-- Status: draft for approval
+- Status: approved
 - Scope: master mark, Web favicons/PWA icons, Web topbar mark, Windows executable icons, OpenWrt/LuCI menu icon, social preview image
 
 ## 1. Intent

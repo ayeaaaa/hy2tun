@@ -57,10 +57,16 @@ install -m 644 "$tmpdir/hy2tun.ico" "$windows/hy2tun.ico"
 
 # Go auto-links these objects only for GOOS=windows GOARCH=amd64. The resource
 # scripts reference hy2tun.ico, resolved relative to the -I search directory.
+# Compile both objects first, then install them together so a failed windres
+# run cannot leave one tracked .syso updated and the other stale.
 "$windres" -I "$windows" -i "$windows/hy2tun.rc" \
-  -o "$root/cmd/hy2tun/hy2tun_windows_amd64.syso"
+  -o "$tmpdir/hy2tun_windows_amd64.syso"
 "$windres" -I "$windows" -i "$windows/hy2tund.rc" \
-  -o "$root/cmd/hy2tund/hy2tund_windows_amd64.syso"
+  -o "$tmpdir/hy2tund_windows_amd64.syso"
+install -m 644 "$tmpdir/hy2tun_windows_amd64.syso" \
+  "$root/cmd/hy2tun/hy2tun_windows_amd64.syso"
+install -m 644 "$tmpdir/hy2tund_windows_amd64.syso" \
+  "$root/cmd/hy2tund/hy2tund_windows_amd64.syso"
 
 # LuCI serves per-entry menu icons from /luci-static/resources/icons. The
 # package build maps this htdocs source tree onto /www.
@@ -75,6 +81,7 @@ install -d -m 755 "$docs"
 install -m 644 "$tmpdir/social-preview.png" "$brand/social-preview.png"
 install -m 644 "$tmpdir/social-preview.png" "$brand/og-1200x630.png"
 install -m 644 "$tmpdir/social-preview.png" "$docs/social-preview.png"
+install -m 644 "$tmpdir/social-preview.png" "$docs/og-1200x630.png"
 
 # favicon.svg is the rounded badge mark itself.
 install -m 644 "$brand/mark.svg" "$tmpdir/favicon.svg"

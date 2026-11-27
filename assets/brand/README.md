@@ -30,7 +30,8 @@ text.
 
 - `assets/brand/social-preview.png` and the identical
   `assets/brand/og-1200x630.png` (both 1200x630), plus the identical
-  `docs/assets/social-preview.png` operator copy;
+  `docs/assets/social-preview.png` and `docs/assets/og-1200x630.png` operator
+  copies;
 - Web favicons, Apple touch icon, PWA icons, `favicon.svg`,
   `site.webmanifest`, and copies of `mark.svg` / `mark-dark.svg` in both
   `internal/webui/serverui/static/` and `internal/webui/clientui/static/`;
@@ -60,13 +61,16 @@ SVG sources need no font package or font tooling at build or render time.
 The package always ships the 32x32 PNG and sets the menu entry's icon. Themes
 that support per-entry menu icons display it; legacy themes that render only
 category icons show the normal Services icon. This is expected. No
-theme-specific CSS or JavaScript is added to force the icon.
+theme-specific CSS or JavaScript is added to force the icon. The shipped icon
+intentionally uses the full-color rounded badge (the approved Task 4 plan),
+while `mark-mono.svg` remains available for monochrome use.
 
 ## Social preview
 
-`assets/brand/social-preview.png`, `assets/brand/og-1200x630.png`, and
-`docs/assets/social-preview.png` are the same 1200x630 render. The
-`docs/assets` copy is the operator-uploadable file.
+`assets/brand/social-preview.png`, `assets/brand/og-1200x630.png`,
+`docs/assets/social-preview.png`, and `docs/assets/og-1200x630.png` are the
+same 1200x630 render. The `docs/assets` copies are operator-uploadable;
+`og-1200x630.png` is the name used in the design asset matrix.
 
 Uploading the GitHub repository social preview is manual: repository
 **Settings → General → Social preview → Upload image**. GitHub does not expose

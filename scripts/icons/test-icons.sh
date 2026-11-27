@@ -13,6 +13,9 @@ fail() {
   exit 1
 }
 
+command -v python3 >/dev/null 2>&1 ||
+  fail "python3 is required to validate site.webmanifest but was not found in PATH"
+
 # Master sources.
 for f in mark.svg mark-dark.svg mark-mono.svg app-icon.svg \
          lockup-light.svg lockup-dark.svg og-1200x630.svg og-1200x630.png \
@@ -20,6 +23,7 @@ for f in mark.svg mark-dark.svg mark-mono.svg app-icon.svg \
   test -s "$brand/$f" || fail "missing assets/brand/$f"
 done
 test -s "$docs/social-preview.png" || fail "missing docs/assets/social-preview.png"
+test -s "$docs/og-1200x630.png" || fail "missing docs/assets/og-1200x630.png"
 
 # Web assets must exist in both independently embedded static trees.
 for f in mark.svg mark-dark.svg favicon.svg favicon-16.png favicon-32.png favicon.ico \
@@ -42,10 +46,13 @@ check_png_size() {
 check_png_size "$brand/og-1200x630.png" 1200x630
 check_png_size "$brand/social-preview.png" 1200x630
 check_png_size "$docs/social-preview.png" 1200x630
+check_png_size "$docs/og-1200x630.png" 1200x630
 cmp -s "$brand/social-preview.png" "$brand/og-1200x630.png" ||
   fail "og-1200x630.png must match social-preview.png"
 cmp -s "$brand/social-preview.png" "$docs/social-preview.png" ||
   fail "docs/assets/social-preview.png must match social-preview.png"
+cmp -s "$brand/social-preview.png" "$docs/og-1200x630.png" ||
+  fail "docs/assets/og-1200x630.png must match social-preview.png"
 
 check_png_size "$server/favicon-16.png" 16x16
 check_png_size "$server/favicon-32.png" 32x32
@@ -81,6 +88,17 @@ for size in 16x16 24x24 32x32 48x48 64x64 128x128 256x256; do
 done
 [ "$(printf '%s\n' "$windows_ico_sizes" | wc -l | tr -d ' ')" = "7" ] ||
   fail "hy2tun.ico must contain exactly 16/24/32/48/64/128/256 layers"
+# Every layer is the full-bleed app icon, so none may carry transparency.
+windows_ico_opacity=$(identify -format '%[opaque]\n' "$brand/windows/hy2tun.ico")
+layer=0
+while IFS= read -r opaque; do
+  layer=$((layer + 1))
+  if [ "$opaque" != "true" ]; then
+    fail "hy2tun.ico layer $layer must be fully opaque"
+  fi
+done <<EOF
+$windows_ico_opacity
+EOF
 grep -qx '1 ICON "hy2tun.ico"' "$brand/windows/hy2tun.rc" ||
   fail "hy2tun.rc must reference the hy2tun.ico icon as resource ID 1"
 grep -qx '1 ICON "hy2tun.ico"' "$brand/windows/hy2tund.rc" ||
@@ -127,8 +145,8 @@ for f in lockup-light.svg lockup-dark.svg; do
   if grep -q '<text' "$brand/$f"; then
     fail "$f must not contain live <text>"
   fi
-  [ "$(count_paths "$brand/$f")" -ge 2 ] ||
-    fail "$f missing outlined wordmark path"
+  [ "$(count_paths "$brand/$f")" -eq 2 ] ||
+    fail "$f must contain exactly 2 outlined paths (mark and wordmark)"
 done
 grep -q 'hy2tun' "$brand/og-1200x630.svg" || fail "og-1200x630.svg missing wordmark"
 grep -q 'Reverse tunnel · HY2 + TCP' "$brand/og-1200x630.svg" ||
@@ -136,8 +154,8 @@ grep -q 'Reverse tunnel · HY2 + TCP' "$brand/og-1200x630.svg" ||
 if grep -q '<text' "$brand/og-1200x630.svg"; then
   fail "og-1200x630.svg must not contain live <text>"
 fi
-[ "$(count_paths "$brand/og-1200x630.svg")" -ge 3 ] ||
-  fail "og-1200x630.svg missing outlined wordmark or tagline path"
+[ "$(count_paths "$brand/og-1200x630.svg")" -eq 3 ] ||
+  fail "og-1200x630.svg must contain exactly 3 outlined paths (mark, wordmark, tagline)"
 
 # The manifest must be valid JSON with the required identity and icons.
 python3 - "$server/site.webmanifest" <<'PY'
