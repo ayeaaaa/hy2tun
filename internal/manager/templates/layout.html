@@ -1,0 +1,36 @@
+{{define "layout"}}
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="csrf-header" content="{{.CSRFHeader}}">
+  <meta name="csrf-value" content="{{.CSRFValue}}">
+  <title>{{.Title}} · hy2tun 管理器</title>
+  <link rel="stylesheet" href="{{.BasePath}}static/app.css">
+</head>
+<body class="{{if .Username}}app-body{{else}}login-body{{end}}" data-base-path="{{.BasePath}}">
+  {{if .Username}}
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="{{.BasePath}}" aria-label="hy2tun 管理器首页">
+        <span class="brand-dot" aria-hidden="true"></span>
+        <span class="brand-name">hy2tun</span>
+        <span class="brand-sub">管理器</span>
+      </a>
+      <div class="topbar-actions">
+        <span class="user">{{.Username}}</span>
+        <button class="btn btn-quiet" type="button" data-logout>退出登录</button>
+      </div>
+    </div>
+  </header>
+  {{end}}
+  <main class="page">
+    {{template "content" .}}
+  </main>
+  <div class="notice" id="notice" role="status" aria-live="polite" hidden></div>
+  <script src="{{.BasePath}}static/app.js" defer></script>
+</body>
+</html>
+{{end}}

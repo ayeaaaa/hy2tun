@@ -1,0 +1,23 @@
+{{define "content"}}
+<section class="login-shell">
+  <div class="login-card">
+    <p class="eyebrow">hy2tun 管理器</p>
+    <h1>登录管理控制台</h1>
+    <p class="muted">使用管理器管理员账号访问服务器控制平面。</p>
+    <div class="alert" id="login-error" role="alert" hidden></div>
+    <form class="login-form" method="post" action="{{.BasePath}}api/login" data-login-form>
+      <label class="field">
+        <span class="field-label">用户名</span>
+        <input class="input" type="text" name="username" autocomplete="username" required autofocus>
+      </label>
+      <label class="field">
+        <span class="field-label">密码</span>
+        <input class="input" type="password" name="password" autocomplete="current-password" required>
+      </label>
+      <button class="btn btn-primary btn-block" type="submit">登录</button>
+    </form>
+    <noscript><p class="muted">登录需要启用 JavaScript。</p></noscript>
+    <p class="login-foot muted">首次启动的管理员密码只在启动日志中输出一次。</p>
+  </div>
+</section>
+{{end}}
