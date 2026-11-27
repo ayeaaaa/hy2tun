@@ -8,6 +8,7 @@
   <div class="page-actions">
     <span class="state-badge {{.Server.StateClass}}">{{.Server.StateLabel}}</span>
     <a class="btn btn-quiet" href="{{.BasePath}}servers/{{.Server.ID}}/clients">客户端与映射</a>
+    <a class="btn btn-quiet" href="{{.BasePath}}servers/{{.Server.ID}}/settings">服务器设置</a>
     <button class="btn btn-quiet" type="button"
             data-action="{{.BasePath}}api/servers/{{.Server.ID}}/refresh" data-method="POST">刷新</button>
   </div>
@@ -19,6 +20,12 @@
   <span class="wrap">{{.Server.LastError}}</span>
 </div>
 {{end}}
+
+<nav class="settings-tabs server-tabs" aria-label="服务器视图">
+  <a class="is-active" href="{{.BasePath}}servers/{{.Server.ID}}" aria-current="page">概览</a>
+  <a href="{{.BasePath}}servers/{{.Server.ID}}/clients">客户端与映射</a>
+  <a href="{{.BasePath}}servers/{{.Server.ID}}/settings">服务器设置</a>
+</nav>
 
 <section class="panel" aria-labelledby="server-summary-heading">
   <div class="panel-section panel-heading">

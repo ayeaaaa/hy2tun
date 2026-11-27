@@ -535,6 +535,270 @@
     });
   });
 
+  // Server settings forms. Every mutation is explicit; failures leave the
+  // operator's non-secret input untouched. Passwords and tokens are cleared
+  // only after the manager confirms the upstream change.
+  const credentialStatusLabel = (status) => {
+    switch (String(status || "").toLowerCase()) {
+      case "synced":
+        return "已同步";
+      case "pending":
+        return "待同步";
+      case "unsupported":
+        return "不支持推送";
+      case "timeout":
+        return "超时";
+      case "unknown":
+        return "未知";
+      default:
+        return status || "未知";
+    }
+  };
+
+  const credentialStatusClass = (status) => {
+    switch (String(status || "").toLowerCase()) {
+      case "synced":
+        return "ok";
+      case "pending":
+        return "warn";
+      case "unsupported":
+      case "timeout":
+        return "bad";
+      default:
+        return "muted";
+    }
+  };
+
+  const splitPortList = (value) => String(value || "")
+    .split(/[\s,]+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  const settingsFormField = (form, name) => form.elements.namedItem(name);
+
+  const settingsPayload = (form, kind) => {
+    switch (kind) {
+      case "mode": {
+        const select = settingsFormField(form, "mode");
+        if (!select || !select.value) {
+          showNotice("请选择传输模式。", "error");
+          return null;
+        }
+        return { mode: select.value };
+      }
+      case "ports": {
+        const allow = settingsFormField(form, "allow");
+        const deny = settingsFormField(form, "deny");
+        const autoRange = settingsFormField(form, "auto_range");
+        const reserve = settingsFormField(form, "offline_reserve_seconds");
+        const seconds = Number(reserve ? reserve.value : 0);
+        if (!Number.isInteger(seconds) || seconds < 1) {
+          showNotice("离线预留时间至少需要 1 秒。", "error");
+          return null;
+        }
+        return {
+          allow: splitPortList(allow ? allow.value : ""),
+          deny: splitPortList(deny ? deny.value : ""),
+          auto_range: autoRange ? autoRange.value.trim() : "",
+          offline_reserve_seconds: seconds,
+        };
+      }
+      case "web": {
+        const username = settingsFormField(form, "username");
+        const newPassword = settingsFormField(form, "new_password");
+        const confirmPassword = settingsFormField(form, "confirm_password");
+        const next = newPassword ? newPassword.value : "";
+        const confirm = confirmPassword ? confirmPassword.value : "";
+        if (!username || !username.value.trim()) {
+          showNotice("Web 管理员用户名不能为空。", "error");
+          return null;
+        }
+        if (Array.from(next).length < 8) {
+          showNotice("新密码至少需要 8 个字符。", "error");
+          return null;
+        }
+        if (next !== confirm) {
+          showNotice("两次输入的新密码不一致。", "error");
+          return null;
+        }
+        return {
+          username: username.value.trim(),
+          new_password: next,
+          confirm_password: confirm,
+        };
+      }
+      case "proxy": {
+        const trust = settingsFormField(form, "trust_proxy");
+        return { trust_proxy: Boolean(trust && trust.checked) };
+      }
+      case "rotate": {
+        const auth = settingsFormField(form, "auth");
+        const token = settingsFormField(form, "control_token");
+        const syncMode = settingsFormField(form, "sync_mode");
+        const authValue = auth ? auth.value : "";
+        const tokenValue = token ? token.value : "";
+        if (authValue.length < 8) {
+          showNotice("新的 HY2 密码至少需要 8 个字符。", "error");
+          return null;
+        }
+        if (tokenValue.length < 16) {
+          showNotice("新的 control token 至少需要 16 个字符。", "error");
+          return null;
+        }
+        const sync = syncMode ? syncMode.value : "auto";
+        if (sync !== "auto" && sync !== "manual") {
+          showNotice("同步方式必须是 auto 或 manual。", "error");
+          return null;
+        }
+        return { auth: authValue, control_token: tokenValue, sync_mode: sync };
+      }
+      default:
+        return null;
+    }
+  };
+
+  const setDisplayText = (selector, value) => {
+    document.querySelectorAll(selector).forEach((element) => {
+      element.textContent = value;
+    });
+  };
+
+  const generationText = (value) => {
+    const generation = Number(value);
+    return Number.isInteger(generation) && generation > 0 ? String(generation) : "—";
+  };
+
+  const applySettingsSnapshot = (settings) => {
+    if (!settings || typeof settings !== "object") {
+      return;
+    }
+    setDisplayText("[data-settings-web-username]", settings.web_username || "—");
+    if (settings.credentials) {
+      setDisplayText("[data-settings-generation]", generationText(settings.credentials.generation));
+      setDisplayText(
+        "[data-settings-previous-generation]",
+        settings.credentials.previous_generation > 0
+          ? generationText(settings.credentials.previous_generation)
+          : "—",
+      );
+      setDisplayText(
+        "[data-settings-current-auth]",
+        settings.credentials.current_auth_masked ? "********" : "—",
+      );
+      setDisplayText(
+        "[data-settings-current-token]",
+        settings.credentials.current_control_token_masked ? "********" : "—",
+      );
+    }
+  };
+
+  const clearSettingsSecrets = (form, kind) => {
+    if (kind !== "web" && kind !== "rotate") {
+      return;
+    }
+    form.querySelectorAll('input[type="password"]').forEach((input) => {
+      input.value = "";
+    });
+  };
+
+  const renderRotationResults = (data) => {
+    const container = document.querySelector("[data-rotation-results]");
+    const tbody = document.querySelector("[data-rotation-results-body]");
+    if (!container || !tbody || !Array.isArray(data.results) || data.results.length === 0) {
+      return;
+    }
+    tbody.replaceChildren();
+    data.results.forEach((result) => {
+      const row = document.createElement("tr");
+
+      const clientCell = document.createElement("td");
+      const name = document.createElement("div");
+      name.textContent = result.Name || result.ClientID || "";
+      const id = document.createElement("div");
+      id.className = "muted mono wrap";
+      id.textContent = result.ClientID || "";
+      clientCell.append(name, id);
+      row.appendChild(clientCell);
+
+      const generationCell = document.createElement("td");
+      generationCell.className = "mono";
+      generationCell.textContent = generationText(result.Generation);
+      row.appendChild(generationCell);
+
+      const statusCell = document.createElement("td");
+      const badge = document.createElement("span");
+      badge.className = `state-badge ${credentialStatusClass(result.Status)}`;
+      badge.textContent = credentialStatusLabel(result.Status);
+      statusCell.appendChild(badge);
+      row.appendChild(statusCell);
+
+      const errorCell = document.createElement("td");
+      if (result.Error) {
+        const error = document.createElement("span");
+        error.className = "error-text mono wrap";
+        error.textContent = result.Error;
+        errorCell.appendChild(error);
+      } else {
+        errorCell.textContent = "—";
+      }
+      row.appendChild(errorCell);
+
+      tbody.appendChild(row);
+    });
+    container.hidden = false;
+  };
+
+  document.querySelectorAll("[data-settings-form]").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!form.reportValidity()) {
+        return;
+      }
+      const kind = form.dataset.settingsKind || "";
+      const payload = settingsPayload(form, kind);
+      if (!payload) {
+        return;
+      }
+      if (form.dataset.confirm && !window.confirm(form.dataset.confirm)) {
+        return;
+      }
+      const button = form.querySelector("button[type='submit']");
+      if (button) {
+        button.disabled = true;
+      }
+      try {
+        const response = await sendJSON(form.action, form.dataset.method || "POST", payload);
+        if (handleUnauthorized(response)) {
+          return;
+        }
+        const data = await responseData(response);
+        if (!response.ok) {
+          const message = data && data.error ? data.error : "保存设置失败，请稍后再试。";
+          showNotice(message, "error");
+          return;
+        }
+        clearSettingsSecrets(form, kind);
+        applySettingsSnapshot(data || {});
+        renderRotationResults(data || {});
+        if (data && data.warning) {
+          showNotice(data.warning, "warn");
+          return;
+        }
+        if (kind === "mode" || kind === "ports" || kind === "proxy" || kind === "revoke") {
+          window.location.reload();
+          return;
+        }
+        showNotice("设置已保存。", "info");
+      } catch (_error) {
+        showNotice("无法连接到管理器，请检查网络。", "error");
+      } finally {
+        if (button) {
+          button.disabled = false;
+        }
+      }
+    });
+  });
+
   function newMappingID() {
     const bytes = new Uint8Array(6);
     if (window.crypto && typeof window.crypto.getRandomValues === "function") {

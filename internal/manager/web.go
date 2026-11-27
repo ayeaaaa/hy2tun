@@ -43,6 +43,7 @@ type WebServer struct {
 	serverTemplate   *template.Template
 	clientsTemplate  *template.Template
 	clientTemplate   *template.Template
+	settingsTemplate *template.Template
 
 	handler http.Handler
 }
@@ -122,6 +123,10 @@ func NewWebServer(store *Store, audit *AuditLog, cfg Config, log *slog.Logger) (
 	if err != nil {
 		return nil, fmt.Errorf("manager: parse client template: %w", err)
 	}
+	settingsTemplate, err := shared.ParsePage(managerAssets, "templates/layout.html", "templates/server_settings.html")
+	if err != nil {
+		return nil, fmt.Errorf("manager: parse server settings template: %w", err)
+	}
 	staticFS, err := fs.Sub(managerAssets, "static")
 	if err != nil {
 		return nil, fmt.Errorf("manager: open static assets: %w", err)
@@ -142,6 +147,7 @@ func NewWebServer(store *Store, audit *AuditLog, cfg Config, log *slog.Logger) (
 		serverTemplate:   serverTemplate,
 		clientsTemplate:  clientsTemplate,
 		clientTemplate:   clientTemplate,
+		settingsTemplate: settingsTemplate,
 	}
 	server.handler = server.routes()
 	return server, nil
@@ -177,6 +183,7 @@ func (s *WebServer) routes() http.Handler {
 	mux.Handle("GET /servers/{id}", s.requireAuth(http.HandlerFunc(s.handleServerPage)))
 	mux.Handle("GET /servers/{id}/clients", s.requireAuth(http.HandlerFunc(s.handleClientsPage)))
 	mux.Handle("GET /servers/{id}/clients/{clientID}", s.requireAuth(http.HandlerFunc(s.handleClientPage)))
+	mux.Handle("GET /servers/{id}/settings", s.requireAuth(http.HandlerFunc(s.handleServerSettingsPage)))
 
 	mux.Handle("GET /api/servers", s.requireAuth(http.HandlerFunc(s.handleListServersAPI)))
 	mux.Handle("GET /api/servers/{id}", s.requireAuth(http.HandlerFunc(s.handleGetServerAPI)))
@@ -193,6 +200,17 @@ func (s *WebServer) routes() http.Handler {
 	// remains available while the client is offline.
 	mux.Handle("PUT /api/servers/{id}/clients/{clientID}/mappings", s.mutation(http.HandlerFunc(s.handlePushClientMappings)))
 	mux.Handle("PUT /api/servers/{id}/clients/{clientID}/mappings/{mappingID}/exposure", s.mutation(http.HandlerFunc(s.handleSetMappingExposure)))
+
+	// Server settings and credential operations. The Web administrator update
+	// uses the manager's stored current password and re-authenticates after
+	// upstream acceptance. Revoke requires an explicit confirmation.
+	mux.Handle("GET /api/servers/{id}/settings", s.requireAuth(http.HandlerFunc(s.handleGetServerSettingsAPI)))
+	mux.Handle("PUT /api/servers/{id}/settings/mode", s.mutation(http.HandlerFunc(s.handleUpdateServerMode)))
+	mux.Handle("PUT /api/servers/{id}/settings/ports", s.mutation(http.HandlerFunc(s.handleUpdateServerPorts)))
+	mux.Handle("PUT /api/servers/{id}/settings/web", s.mutation(http.HandlerFunc(s.handleUpdateServerWebAdmin)))
+	mux.Handle("PUT /api/servers/{id}/settings/trust-proxy", s.mutation(http.HandlerFunc(s.handleUpdateServerTrustProxy)))
+	mux.Handle("PUT /api/servers/{id}/settings/credentials", s.mutation(http.HandlerFunc(s.handleRotateServerCredentials)))
+	mux.Handle("POST /api/servers/{id}/settings/credentials/revoke", s.mutation(http.HandlerFunc(s.handleRevokeServerCredentials)))
 
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(s.static))))
 

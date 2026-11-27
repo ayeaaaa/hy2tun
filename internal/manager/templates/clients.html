@@ -19,6 +19,12 @@
 </div>
 {{end}}
 
+<nav class="settings-tabs server-tabs" aria-label="服务器视图">
+  <a href="{{.BasePath}}servers/{{.Server.ID}}">概览</a>
+  <a class="is-active" href="{{.BasePath}}servers/{{.Server.ID}}/clients" aria-current="page">客户端与映射</a>
+  <a href="{{.BasePath}}servers/{{.Server.ID}}/settings">服务器设置</a>
+</nav>
+
 <section class="panel" aria-labelledby="client-list-heading">
   <div class="panel-section panel-heading">
     <h2 id="client-list-heading">客户端列表</h2>

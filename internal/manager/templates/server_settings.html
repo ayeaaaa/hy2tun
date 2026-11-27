@@ -1,0 +1,377 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">
+      <a class="back-link" href="{{.BasePath}}servers">服务器清单</a>
+      <span class="muted">/</span>
+      <a class="back-link" href="{{.BasePath}}servers/{{.Server.ID}}">{{.Server.Name}}</a>
+    </p>
+    <h1>服务器设置</h1>
+    <p class="muted">热更新设置会立即写入上游服务器。敏感值只写不读，当前值始终打码显示。</p>
+  </div>
+  <div class="page-actions">
+    <span class="state-badge {{.Server.StateClass}}">{{.Server.StateLabel}}</span>
+    <a class="btn btn-quiet" href="{{.BasePath}}servers/{{.Server.ID}}/clients">客户端与映射</a>
+    <a class="btn btn-quiet" href="{{.BasePath}}servers/{{.Server.ID}}/settings">刷新设置</a>
+  </div>
+</div>
+
+{{if .LoadError}}
+<div class="alert" role="alert">
+  <strong>读取服务器设置失败：</strong>
+  <span class="wrap">{{.LoadError}}</span>
+  <a class="back-link" href="{{.BasePath}}servers/{{.Server.ID}}/settings">重试</a>
+</div>
+{{end}}
+
+{{if .Error}}
+<div class="alert" role="alert">
+  <strong>操作失败：</strong>
+  <span class="wrap">{{.Error}}</span>
+</div>
+{{end}}
+
+{{if .Warning}}
+<div class="alert" role="status">
+  <strong>需要确认：</strong>
+  <span class="wrap">{{.Warning}}</span>
+</div>
+{{end}}
+
+{{if .Notice}}
+<div class="alert alert-ok" role="status">{{.Notice}}</div>
+{{end}}
+
+{{if .HasSettings}}
+<nav class="settings-tabs" aria-label="设置分区">
+  <a href="#settings-summary">当前设置</a>
+  <a href="#settings-mode">传输模式</a>
+  <a href="#settings-ports">端口策略</a>
+  <a href="#settings-web">Web 管理员</a>
+  <a href="#settings-proxy">代理信任</a>
+  <a href="#settings-credentials">HY2 凭据</a>
+</nav>
+
+<section class="panel settings-panel" id="settings-summary" aria-labelledby="settings-summary-heading">
+  <div class="panel-section panel-heading">
+    <h2 id="settings-summary-heading">当前设置</h2>
+    <p class="muted">读取时间：{{time .LoadedAt}}</p>
+  </div>
+  <div class="panel-section summary-grid">
+    <div class="summary-item">
+      <span class="summary-label">传输模式</span>
+      <span class="summary-value">{{.Settings.ModeLabel}}</span>
+    </div>
+    <div class="summary-item">
+      <span class="summary-label">Web 管理员</span>
+      <span class="summary-value mono" data-settings-web-username>{{.Settings.WebUsername}}</span>
+    </div>
+    <div class="summary-item">
+      <span class="summary-label">Web 密码</span>
+      <span class="summary-value">{{.Settings.WebPasswordLabel}}</span>
+    </div>
+    <div class="summary-item">
+      <span class="summary-label">认证方式</span>
+      <span class="summary-value">{{.Settings.AuthTypeLabel}}</span>
+    </div>
+    <div class="summary-item">
+      <span class="summary-label">代理信任</span>
+      <span class="summary-value">{{.Settings.TrustProxyLabel}}</span>
+    </div>
+    <div class="summary-item">
+      <span class="summary-label">当前凭据代际</span>
+      <span class="summary-value mono" data-settings-generation>{{.Settings.GenerationLabel}}</span>
+    </div>
+    <div class="summary-item">
+      <span class="summary-label">上一代凭据代际</span>
+      <span class="summary-value mono" data-settings-previous-generation>{{.Settings.PreviousGenerationLabel}}</span>
+    </div>
+    <div class="summary-item">
+      <span class="summary-label">服务器最近刷新</span>
+      <span class="summary-value">{{time .Server.LastRefresh}}</span>
+    </div>
+  </div>
+</section>
+
+<section class="panel settings-panel" id="settings-mode" aria-labelledby="settings-mode-heading">
+  <div class="panel-section panel-heading">
+    <h2 id="settings-mode-heading">传输模式</h2>
+    <p class="muted">切换会断开现有连接，不会自动回滚。</p>
+  </div>
+  <form class="settings-form" action="{{.BasePath}}api/servers/{{.Server.ID}}/settings/mode" method="post"
+        data-settings-form data-settings-kind="mode" data-method="PUT">
+    <label class="field">
+      <span class="field-label">模式</span>
+      <select class="input" name="mode" required>
+        <option value="hy2" {{if eq .Form.Mode "hy2"}}selected{{end}}>HY2</option>
+        <option value="tcp" {{if eq .Form.Mode "tcp"}}selected{{end}}>TCP（UDP over TCP）</option>
+        <option value="hy2+tcp" {{if eq .Form.Mode "hy2+tcp"}}selected{{end}}>HY2 + TCP（自动回退）</option>
+      </select>
+    </label>
+    <div class="alert" role="note">TCP 模式会把 UDP 映射封装为 UDP over TCP，可能丢失 UDP 数据包。</div>
+    <div class="form-actions">
+      <button class="btn btn-primary" type="submit">应用传输模式</button>
+    </div>
+  </form>
+</section>
+
+<section class="panel settings-panel" id="settings-ports" aria-labelledby="settings-ports-heading">
+  <div class="panel-section panel-heading">
+    <h2 id="settings-ports-heading">端口策略</h2>
+    <p class="muted">已运行的映射不会因移出白名单而关闭；新注册会立即使用新策略。</p>
+  </div>
+  <form class="settings-form" action="{{.BasePath}}api/servers/{{.Server.ID}}/settings/ports" method="post"
+        data-settings-form data-settings-kind="ports" data-method="PUT">
+    <label class="field">
+      <span class="field-label">允许端口（逗号或换行分隔）</span>
+      <textarea class="input textarea" name="allow" rows="3" placeholder="例如 443, 8000-8100；留空表示由上游决定">{{.Form.AllowText}}</textarea>
+    </label>
+    <label class="field">
+      <span class="field-label">拒绝端口（逗号或换行分隔）</span>
+      <textarea class="input textarea" name="deny" rows="2" placeholder="例如 22, 9000-9100">{{.Form.DenyText}}</textarea>
+    </label>
+    <div class="settings-grid">
+      <label class="field">
+        <span class="field-label">自动分配范围</span>
+        <input class="input" type="text" name="auto_range" value="{{.Form.AutoRange}}" placeholder="例如 20000-29999">
+      </label>
+      <label class="field">
+        <span class="field-label">离线预留（秒）</span>
+        <input class="input" type="number" name="offline_reserve_seconds" min="1" step="1" required
+               value="{{.Form.OfflineReserveSeconds}}">
+        <span class="muted">当前：{{.Settings.ReserveLabel}}</span>
+      </label>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" type="submit">保存端口策略</button>
+    </div>
+  </form>
+</section>
+
+<section class="panel settings-panel" id="settings-web" aria-labelledby="settings-web-heading">
+  <div class="panel-section panel-heading">
+    <h2 id="settings-web-heading">Web 管理员</h2>
+    <p class="muted">管理器使用已保存的上游密码作为当前密码，并在保存后立即用新凭据重新登录。</p>
+  </div>
+  <form class="settings-form" action="{{.BasePath}}api/servers/{{.Server.ID}}/settings/web" method="post"
+        data-settings-form data-settings-kind="web" data-method="PUT"
+        data-confirm="确定更改上游服务器的 Web 管理员？保存后管理器会立即使用新凭据重新登录；如果重新登录失败，服务器会被标记为认证失败。"
+        autocomplete="off">
+    <label class="field">
+      <span class="field-label">用户名</span>
+      <input class="input" type="text" name="username" required maxlength="64" autocomplete="username"
+             value="{{.Form.WebUsername}}">
+    </label>
+    <div class="settings-grid">
+      <label class="field">
+        <span class="field-label">新密码</span>
+        <input class="input" type="password" name="new_password" required minlength="8" maxlength="72"
+               autocomplete="new-password">
+      </label>
+      <label class="field">
+        <span class="field-label">确认新密码</span>
+        <input class="input" type="password" name="confirm_password" required minlength="8" maxlength="72"
+               autocomplete="new-password">
+      </label>
+    </div>
+    <p class="muted">当前上游密码不会显示，也不会提交到浏览器。</p>
+    <div class="form-actions">
+      <button class="btn btn-primary" type="submit">更新 Web 管理员</button>
+    </div>
+  </form>
+</section>
+
+<section class="panel settings-panel" id="settings-proxy" aria-labelledby="settings-proxy-heading">
+  <div class="panel-section panel-heading">
+    <h2 id="settings-proxy-heading">代理信任</h2>
+    <p class="muted">仅当上游反向代理会覆盖 X-Forwarded-For / X-Real-IP 时启用。</p>
+  </div>
+  <form class="settings-form" action="{{.BasePath}}api/servers/{{.Server.ID}}/settings/trust-proxy" method="post"
+        data-settings-form data-settings-kind="proxy" data-method="PUT">
+    <label class="checkbox-field">
+      <input type="checkbox" name="trust_proxy" {{if .Form.TrustProxy}}checked{{end}}>
+      <span>信任反向代理提供的客户端来源地址</span>
+    </label>
+    <div class="alert" role="note">如果代理不会覆盖这些请求头，启用后客户端可以伪造来源 IP，绕过登录限速。</div>
+    <div class="form-actions">
+      <button class="btn btn-primary" type="submit">保存代理信任</button>
+    </div>
+  </form>
+</section>
+
+<section class="panel settings-panel" id="settings-credentials" aria-labelledby="settings-credentials-heading">
+  <div class="panel-section panel-heading">
+    <h2 id="settings-credentials-heading">HY2 凭据</h2>
+    <p class="muted">凭据默认打码；新凭据只写不读。轮换后旧代际在撤销前继续有效。</p>
+  </div>
+  <div class="panel-section summary-grid">
+    <div class="summary-item">
+      <span class="summary-label">当前代际</span>
+      <span class="summary-value mono" data-settings-generation>{{.Settings.GenerationLabel}}</span>
+    </div>
+    <div class="summary-item">
+      <span class="summary-label">上一代际</span>
+      <span class="summary-value mono" data-settings-previous-generation>{{.Settings.PreviousGenerationLabel}}</span>
+    </div>
+    <div class="summary-item">
+      <span class="summary-label">当前 HY2 密码</span>
+      <span class="summary-value mono secret-value" data-settings-current-auth>{{.Settings.CurrentAuthMask}}</span>
+    </div>
+    <div class="summary-item">
+      <span class="summary-label">当前 control token</span>
+      <span class="summary-value mono secret-value" data-settings-current-token>{{.Settings.CurrentControlTokenMask}}</span>
+    </div>
+    <div class="summary-item">
+      <span class="summary-label">上一代 HY2 密码</span>
+      <span class="summary-value mono secret-value">{{.Settings.PreviousAuthMask}}</span>
+    </div>
+    <div class="summary-item">
+      <span class="summary-label">上一代 control token</span>
+      <span class="summary-value mono secret-value">{{.Settings.PreviousControlTokenMask}}</span>
+    </div>
+  </div>
+
+  {{if not .Settings.Rotatable}}
+  <div class="panel-section">
+    <div class="alert" role="note">当前上游认证方式不是 password，无法在线轮换凭据。</div>
+  </div>
+  {{end}}
+
+  <form class="settings-form" action="{{.BasePath}}api/servers/{{.Server.ID}}/settings/credentials" method="post"
+        data-settings-form data-settings-kind="rotate" data-method="PUT"
+        data-confirm="轮换会生成新的 HY2 凭据并推送给在线客户端；旧凭据在撤销前仍然有效。确定继续？"
+        autocomplete="off">
+    <div class="settings-grid">
+      <label class="field">
+        <span class="field-label">新 HY2 密码</span>
+        <input class="input" type="password" name="auth" required minlength="8" autocomplete="new-password"
+               placeholder="至少 8 个字符" {{if not .Settings.Rotatable}}disabled{{end}}>
+      </label>
+      <label class="field">
+        <span class="field-label">新 control token</span>
+        <input class="input" type="password" name="control_token" required minlength="16" autocomplete="new-password"
+               placeholder="至少 16 个字符" {{if not .Settings.Rotatable}}disabled{{end}}>
+      </label>
+    </div>
+    <label class="field">
+      <span class="field-label">同步方式</span>
+      <select class="input" name="sync_mode" {{if not .Settings.Rotatable}}disabled{{end}}>
+        <option value="auto" {{if eq .Form.SyncMode "auto"}}selected{{end}}>自动推送（等待在线客户端确认）</option>
+        <option value="manual" {{if eq .Form.SyncMode "manual"}}selected{{end}}>手动同步（客户端稍后自行更新）</option>
+      </select>
+    </label>
+    <div class="alert" role="note">自动推送最多等待每个客户端 5 秒；未确认的客户端保持待同步。旧客户端不支持推送时会显示“不支持推送”。</div>
+    <div class="form-actions">
+      <button class="btn btn-primary" type="submit" {{if not .Settings.Rotatable}}disabled{{end}}>保存并轮换</button>
+    </div>
+  </form>
+
+  <div class="panel-section settings-inline">
+    <button class="btn btn-danger" type="button"
+            data-action="{{.BasePath}}api/servers/{{.Server.ID}}/settings/credentials/revoke?confirm=revoke"
+            data-method="POST"
+            data-confirm="确定撤销上一代凭据？使用旧代际的客户端会立即断开，且无法恢复。"
+            {{if not .Settings.HasPreviousGeneration}}disabled{{end}}>撤销旧凭据</button>
+    <span class="muted">撤销后上一代密码和 token 立即失效。</span>
+  </div>
+
+  <div class="panel-section" id="rotation-results" data-rotation-results {{if not .Rotation}}hidden{{end}}>
+    <h3>本次轮换结果</h3>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th scope="col">客户端</th>
+            <th scope="col">代际</th>
+            <th scope="col">状态</th>
+            <th scope="col">错误</th>
+          </tr>
+        </thead>
+        <tbody data-rotation-results-body>
+          {{if .Rotation}}
+          {{range .Rotation.Results}}
+          <tr>
+            <td>
+              <div>{{.DisplayName}}</div>
+              <div class="muted mono wrap">{{.ClientID}}</div>
+            </td>
+            <td class="mono">{{.GenerationLabel}}</td>
+            <td><span class="state-badge {{.StatusClass}}">{{.StatusLabel}}</span></td>
+            <td>{{if .HasError}}<span class="error-text mono wrap">{{.Error}}</span>{{else}}—{{end}}</td>
+          </tr>
+          {{end}}
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel-section">
+    <h3>客户端同步状态</h3>
+    <div class="table-wrap">
+      <table class="data-table credential-table">
+        <thead>
+          <tr>
+            <th scope="col">客户端</th>
+            <th scope="col">在线</th>
+            <th scope="col">代际</th>
+            <th scope="col">状态</th>
+            <th scope="col">最后在线</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{if .ClientRows}}
+          {{range .ClientRows}}
+          <tr>
+            <td>
+              <div>{{.DisplayName}}</div>
+              <div class="muted mono wrap">{{.ClientID}}</div>
+            </td>
+            <td><span class="state-badge {{.StateClass}}">{{.OnlineLabel}}</span></td>
+            <td class="mono">{{.GenerationLabel}}</td>
+            <td>
+              <span class="state-badge {{.StatusClass}}">{{.StatusLabel}}</span>
+              {{if .HasError}}<span class="error-text mono wrap">{{.Error}}</span>{{end}}
+            </td>
+            <td>{{time .LastSeen}}</td>
+          </tr>
+          {{end}}
+          {{else}}
+          <tr><td colspan="5"><span class="muted">该服务器还没有已注册的客户端。</span></td></tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="panel settings-panel" aria-labelledby="settings-readonly-heading">
+  <div class="panel-section panel-heading">
+    <h2 id="settings-readonly-heading">只读项</h2>
+    <p class="muted">这些值需要编辑上游配置文件并重启 hy2tund 才能更改。</p>
+  </div>
+  <div class="panel-section summary-grid">
+    {{range .Settings.ReadOnly}}
+    <div class="summary-item">
+      <span class="summary-label">{{.Label}}</span>
+      <span class="summary-value mono wrap">{{if .Value}}{{.Value}}{{else}}—{{end}}</span>
+    </div>
+    {{else}}
+    <div class="summary-item">
+      <span class="summary-label">配置</span>
+      <span class="summary-value">—</span>
+    </div>
+    {{end}}
+  </div>
+</section>
+{{else}}
+<section class="panel panel-section">
+  <h2>设置暂不可用</h2>
+  <p class="muted">无法从上游服务器读取当前设置。请先修复连接或认证问题，然后刷新此页面。</p>
+  <div class="form-actions">
+    <a class="btn btn-quiet" href="{{.BasePath}}servers/{{.Server.ID}}/settings">重试</a>
+    <a class="btn btn-quiet" href="{{.BasePath}}servers/{{.Server.ID}}">返回服务器详情</a>
+  </div>
+</section>
+{{end}}
+{{end}}
