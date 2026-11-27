@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -52,7 +53,7 @@ func (l *AuditLog) Append(entry AuditEntry) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	file, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	file, created, err := openAuditFile(l.path)
 	if err != nil {
 		return fmt.Errorf("open audit log %s: %w", l.path, err)
 	}
@@ -71,5 +72,27 @@ func (l *AuditLog) Append(entry AuditEntry) error {
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close audit log %s: %w", l.path, err)
 	}
+	if created {
+		if err := syncDirFn(filepath.Dir(l.path)); err != nil {
+			return fmt.Errorf("sync audit log directory %s: %w", filepath.Dir(l.path), err)
+		}
+	}
 	return nil
+}
+
+// openAuditFile creates the audit file if needed and reports whether this call
+// created it. O_EXCL makes the created flag race-safe.
+func openAuditFile(path string) (*os.File, bool, error) {
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err == nil {
+		return file, true, nil
+	}
+	if !os.IsExist(err) {
+		return nil, false, err
+	}
+	file, err = os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, false, err
+	}
+	return file, false, nil
 }

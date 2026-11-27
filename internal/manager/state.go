@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -24,7 +25,14 @@ const (
 	managerKeyFileMode     = 0o600
 	managerStateFileMode   = 0o600
 	managerStateFileSuffix = ".tmp-"
+	managerKeyCheckValue   = "hy2tun-manager-key-check"
 )
+
+// ErrStateCommitted reports that the state file rename succeeded but the
+// directory fsync failed. The new state is authoritative and has been
+// published in memory, but its survival across a machine crash is not
+// guaranteed.
+var ErrStateCommitted = errors.New("manager state committed but directory sync failed")
 
 // Package-level seams let tests inject a known first-run password and capture
 // the one-time output without touching the production defaults.
@@ -54,9 +62,12 @@ type ServerRecord struct {
 }
 
 // State is the full JSON document persisted in the manager state file.
+// KeyCheck is an encrypted sentinel that detects a mismatched manager key even
+// when no server passwords have been stored yet.
 type State struct {
-	Admin   AdminRecord    `json:"admin"`
-	Servers []ServerRecord `json:"servers"`
+	Admin    AdminRecord    `json:"admin"`
+	Servers  []ServerRecord `json:"servers"`
+	KeyCheck string         `json:"key_check,omitempty"`
 }
 
 // Store owns the manager state and encryption key. All mutations go through
@@ -68,10 +79,10 @@ type Store struct {
 	state     State
 }
 
-// OpenStore loads or creates the manager state and encryption key. A missing
-// key is only generated when the state is also being created for the first
-// time; an existing state with no key fails closed instead of silently
-// replacing the encryption key.
+// OpenStore loads or creates the manager state and encryption key. State and
+// key are a matched pair: if exactly one of them exists, startup fails closed
+// rather than silently replacing a key or generating a fresh administrator.
+// Both missing means first run; both present means normal startup.
 func OpenStore(statePath, keyPath string) (*Store, error) {
 	if strings.TrimSpace(statePath) == "" {
 		return nil, fmt.Errorf("manager state path is empty")
@@ -80,15 +91,22 @@ func OpenStore(statePath, keyPath string) (*Store, error) {
 		return nil, fmt.Errorf("manager key path is empty")
 	}
 
-	stateExists := true
-	if _, err := os.Stat(statePath); err != nil {
-		if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("inspect manager state %s: %w", statePath, err)
-		}
-		stateExists = false
+	stateExists, err := pathExists(statePath)
+	if err != nil {
+		return nil, fmt.Errorf("inspect manager state %s: %w", statePath, err)
+	}
+	keyExists, err := pathExists(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("inspect manager key %s: %w", keyPath, err)
+	}
+	switch {
+	case stateExists && !keyExists:
+		return nil, fmt.Errorf("manager key %s is missing while state %s exists; restore manager.key and state.json together (refusing to replace the encryption key)", keyPath, statePath)
+	case !stateExists && keyExists:
+		return nil, fmt.Errorf("manager state %s is missing while manager key %s exists; restore state.json (refusing to create a fresh administrator)", statePath, keyPath)
 	}
 
-	key, err := loadOrCreateManagerKey(keyPath, stateExists)
+	key, err := loadOrCreateManagerKey(keyPath)
 	if err != nil {
 		return nil, err
 	}
@@ -103,6 +121,10 @@ func OpenStore(statePath, keyPath string) (*Store, error) {
 		if err != nil {
 			return nil, fmt.Errorf("hash initial admin password: %w", err)
 		}
+		keyCheck, err := EncryptSecret(key, []byte(managerKeyCheckValue))
+		if err != nil {
+			return nil, fmt.Errorf("create manager key check: %w", err)
+		}
 		passwordWriter := initialAdminPasswordWriter
 		if passwordWriter == nil {
 			passwordWriter = os.Stderr
@@ -111,10 +133,11 @@ func OpenStore(statePath, keyPath string) (*Store, error) {
 			return nil, fmt.Errorf("print initial admin password: %w", err)
 		}
 		store.state = State{
-			Admin:   AdminRecord{Username: adminUsername, PasswordHash: string(hash)},
-			Servers: []ServerRecord{},
+			Admin:    AdminRecord{Username: adminUsername, PasswordHash: string(hash)},
+			Servers:  []ServerRecord{},
+			KeyCheck: keyCheck,
 		}
-		if err := store.saveLocked(store.state); err != nil {
+		if _, err := store.saveLocked(store.state); err != nil {
 			return nil, fmt.Errorf("initialize manager state %s: %w", statePath, err)
 		}
 		return store, nil
@@ -131,6 +154,12 @@ func OpenStore(statePath, keyPath string) (*Store, error) {
 	if err := validateState(state); err != nil {
 		return nil, fmt.Errorf("invalid manager state %s: %w", statePath, err)
 	}
+	if state.KeyCheck != "" {
+		check, err := DecryptSecret(key, state.KeyCheck)
+		if err != nil || string(check) != managerKeyCheckValue {
+			return nil, fmt.Errorf("manager state %s: key check failed; manager.key does not match this state (restore state.json and manager.key together)", statePath)
+		}
+	}
 	for _, server := range state.Servers {
 		if server.UpstreamPasswordEnc == "" {
 			continue
@@ -138,6 +167,9 @@ func OpenStore(statePath, keyPath string) (*Store, error) {
 		if _, err := DecryptSecret(key, server.UpstreamPasswordEnc); err != nil {
 			return nil, fmt.Errorf("manager state %s: cannot decrypt upstream password for server %q: %w (restore state.json and manager.key together)", statePath, server.ID, err)
 		}
+	}
+	if err := ensureFileMode(statePath, managerStateFileMode); err != nil {
+		return nil, fmt.Errorf("secure manager state %s: %w", statePath, err)
 	}
 	store.state = state
 	return store, nil
@@ -151,7 +183,10 @@ func (s *Store) State() State {
 }
 
 // Update mutates a copy of the state and atomically persists it. If the
-// mutation or the write fails, the in-memory state is left unchanged.
+// mutation or the rename fails, the in-memory state is left unchanged. When
+// the rename succeeds but the directory fsync fails, the new state is
+// published and ErrStateCommitted is returned: disk and memory agree, but the
+// commit's crash durability is uncertain.
 func (s *Store) Update(mutate func(*State) error) error {
 	if mutate == nil {
 		return fmt.Errorf("manager state update function is nil")
@@ -166,10 +201,13 @@ func (s *Store) Update(mutate func(*State) error) error {
 	if err := validateState(next); err != nil {
 		return fmt.Errorf("manager state: %w", err)
 	}
-	if err := s.saveLocked(next); err != nil {
+	committed, err := s.saveLocked(next)
+	if committed {
+		s.state = next
+	}
+	if err != nil {
 		return err
 	}
-	s.state = next
 	return nil
 }
 
@@ -221,7 +259,10 @@ func (s *Store) ServerPassword(id string) ([]byte, error) {
 
 func cloneState(state State) State {
 	cloned := state
-	cloned.Servers = append([]ServerRecord(nil), state.Servers...)
+	if state.Servers != nil {
+		cloned.Servers = make([]ServerRecord, len(state.Servers))
+		copy(cloned.Servers, state.Servers)
+	}
 	return cloned
 }
 
@@ -263,42 +304,36 @@ func validateState(state State) error {
 	return nil
 }
 
-func (s *Store) saveLocked(state State) error {
+func (s *Store) saveLocked(state State) (bool, error) {
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode manager state: %w", err)
+		return false, fmt.Errorf("encode manager state: %w", err)
 	}
 	data = append(data, '\n')
-	if err := writeFileAtomic(s.statePath, data); err != nil {
-		return fmt.Errorf("write manager state %s: %w", s.statePath, err)
+	committed, err := writeFileAtomic(s.statePath, data)
+	if err != nil {
+		return committed, fmt.Errorf("write manager state %s: %w", s.statePath, err)
 	}
-	return nil
+	return true, nil
 }
 
 // loadOrCreateManagerKey reads a 32-byte hex-encoded key, creating it with
-// mode 0600 on first use. When state already exists, a missing key is a fatal
-// error: generating a new one would make existing ciphertext unreadable.
-func loadOrCreateManagerKey(path string, stateExists bool) ([]byte, error) {
+// mode 0600 on first use. Callers only reach creation when both state.json and
+// manager.key are absent; OpenStore rejects a lone key or lone state.
+func loadOrCreateManagerKey(path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if err == nil {
 		key, err := decodeManagerKey(data)
 		if err != nil {
 			return nil, fmt.Errorf("load manager key %s: %w", path, err)
 		}
-		if info, statErr := os.Stat(path); statErr != nil {
-			return nil, fmt.Errorf("inspect manager key %s: %w", path, statErr)
-		} else if info.Mode().Perm() != managerKeyFileMode {
-			if chmodErr := os.Chmod(path, managerKeyFileMode); chmodErr != nil {
-				return nil, fmt.Errorf("secure manager key %s: %w", path, chmodErr)
-			}
+		if err := ensureFileMode(path, managerKeyFileMode); err != nil {
+			return nil, fmt.Errorf("secure manager key %s: %w", path, err)
 		}
 		return key, nil
 	}
 	if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("read manager key %s: %w", path, err)
-	}
-	if stateExists {
-		return nil, fmt.Errorf("manager key %s is missing while state exists; restore manager.key and state.json together (refusing to replace the encryption key)", path)
 	}
 
 	key := make([]byte, secretKeySize)
@@ -338,7 +373,7 @@ func loadOrCreateManagerKey(path string, stateExists bool) ([]byte, error) {
 		_ = os.Remove(path)
 		return nil, fmt.Errorf("close manager key %s: %w", path, err)
 	}
-	if err := syncDir(filepath.Dir(path)); err != nil {
+	if err := syncDirFn(filepath.Dir(path)); err != nil {
 		return nil, fmt.Errorf("sync manager key directory: %w", err)
 	}
 	return key, nil
@@ -370,39 +405,44 @@ func generateAdminPassword() (string, error) {
 }
 
 // writeFileAtomic writes data to path through a temporary file in the same
-// directory, fsyncs it, and renames it into place with mode 0600.
-func writeFileAtomic(path string, data []byte) error {
+// directory, fsyncs it, and renames it into place with mode 0600. The rename
+// is the commit point: the returned committed flag is true as soon as the
+// rename succeeds, even if the following directory fsync fails.
+func writeFileAtomic(path string, data []byte) (committed bool, err error) {
 	dir := filepath.Dir(path)
 	file, err := os.CreateTemp(dir, "."+filepath.Base(path)+managerStateFileSuffix)
 	if err != nil {
-		return err
+		return false, err
 	}
 	tmpName := file.Name()
 	defer os.Remove(tmpName)
 
 	if err := file.Chmod(managerStateFileMode); err != nil {
 		_ = file.Close()
-		return err
+		return false, err
 	}
 	if _, err := file.Write(data); err != nil {
 		_ = file.Close()
-		return err
+		return false, err
 	}
 	if err := file.Sync(); err != nil {
 		_ = file.Close()
-		return err
+		return false, err
 	}
 	if err := file.Close(); err != nil {
-		return err
+		return false, err
 	}
 	if err := os.Rename(tmpName, path); err != nil {
-		return err
+		return false, err
 	}
-	if err := syncDir(dir); err != nil {
-		return err
+	if err := syncDirFn(dir); err != nil {
+		return true, fmt.Errorf("%w: %v", ErrStateCommitted, err)
 	}
-	return nil
+	return true, nil
 }
+
+// syncDirFn is replaceable so tests can inject directory-sync failures.
+var syncDirFn = syncDir
 
 // syncDir flushes a directory entry so a rename survives a crash. Windows
 // does not support syncing directory handles; the rename is still atomic.
@@ -419,4 +459,30 @@ func syncDir(dir string) error {
 		return err
 	}
 	return nil
+}
+
+// pathExists reports whether path exists without treating any other stat error
+// as absence.
+func pathExists(path string) (bool, error) {
+	_, err := os.Stat(path)
+	switch {
+	case err == nil:
+		return true, nil
+	case os.IsNotExist(err):
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+// ensureFileMode tightens a file to mode if it is currently broader.
+func ensureFileMode(path string, mode os.FileMode) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm() == mode {
+		return nil
+	}
+	return os.Chmod(path, mode)
 }

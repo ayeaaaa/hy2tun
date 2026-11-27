@@ -3,6 +3,7 @@ package manager
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -90,23 +91,52 @@ func LoadConfig(path string) (Config, error) {
 	}
 
 	cfg.Listen = strings.TrimSpace(cfg.Listen)
+	cfg.BasePath = strings.TrimSpace(cfg.BasePath)
+	cfg.StateFile = strings.TrimSpace(cfg.StateFile)
+	cfg.KeyFile = strings.TrimSpace(cfg.KeyFile)
+	cfg.AuditFile = strings.TrimSpace(cfg.AuditFile)
 	if cfg.Listen == "" {
 		return Config{}, fmt.Errorf("manager config %s: listen must not be empty", path)
 	}
-	if strings.TrimSpace(cfg.StateFile) == "" {
+	if cfg.StateFile == "" {
 		return Config{}, fmt.Errorf("manager config %s: state_file must not be empty", path)
 	}
-	if strings.TrimSpace(cfg.KeyFile) == "" {
+	if cfg.KeyFile == "" {
 		return Config{}, fmt.Errorf("manager config %s: key_file must not be empty", path)
 	}
-	if strings.TrimSpace(cfg.AuditFile) == "" {
+	if cfg.AuditFile == "" {
 		return Config{}, fmt.Errorf("manager config %s: audit_file must not be empty", path)
 	}
 	if cfg.RefreshInterval < minRefreshInterval {
 		return Config{}, fmt.Errorf("manager config %s: refresh_interval must be at least %s", path, minRefreshInterval)
 	}
+	if err := validateConfigPaths(cfg); err != nil {
+		return Config{}, fmt.Errorf("manager config %s: %w", path, err)
+	}
 	cfg.BasePath = normalizeBasePath(cfg.BasePath)
 	return cfg, nil
+}
+
+// validateConfigPaths rejects configurations where two roles would share a
+// file, which would let state writes corrupt the key or audit log.
+func validateConfigPaths(cfg Config) error {
+	paths := []struct {
+		name string
+		path string
+	}{
+		{"state_file", cfg.StateFile},
+		{"key_file", cfg.KeyFile},
+		{"audit_file", cfg.AuditFile},
+	}
+	seen := make(map[string]string, len(paths))
+	for _, entry := range paths {
+		cleaned := filepath.Clean(entry.path)
+		if previous, exists := seen[cleaned]; exists {
+			return fmt.Errorf("%s and %s must not point to the same file", previous, entry.name)
+		}
+		seen[cleaned] = entry.name
+	}
+	return nil
 }
 
 // normalizeBasePath makes a reverse-proxy prefix consistently start and end

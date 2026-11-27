@@ -2,8 +2,11 @@ package manager
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +15,39 @@ import (
 )
 
 func TestStoreRoundTripsEncryptedServerAndRejectsTamper(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	keyPath := filepath.Join(dir, "manager.key")
+	store, err := OpenStore(statePath, keyPath)
+	require.NoError(t, err)
+	require.NoError(t, store.Update(func(s *State) error {
+		s.Servers = append(s.Servers, ServerRecord{
+			ID: "srv_1", Name: "us", BaseURL: "https://us.example/hy2tund",
+			UpstreamUsername: "admin",
+		})
+		return nil
+	}))
+	require.Equal(t, "us", store.State().Servers[0].Name)
+	require.NoError(t, store.SetServerPassword("srv_1", []byte("stored-pw")))
+	require.Equal(t, 0o600, fileMode(t, statePath))
+	require.Equal(t, 0o600, fileMode(t, keyPath))
+
+	// An unrelated store must reject mutations for a record it does not know.
+	otherStatePath := filepath.Join(dir, "other.json")
+	otherKeyPath := filepath.Join(dir, "other.key")
+	other, err := OpenStore(otherStatePath, otherKeyPath)
+	require.NoError(t, err)
+	require.ErrorContains(t, other.SetServerPassword("srv_1", []byte("pw")), "unknown server")
+
+	// The same state paired with the unrelated key must fail at startup.
+	stateData, err := os.ReadFile(statePath)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(otherStatePath, stateData, 0o600))
+	_, err = OpenStore(otherStatePath, otherKeyPath)
+	require.ErrorContains(t, err, "key check failed")
+}
+
+func TestStoreStateReturnsDeepCopy(t *testing.T) {
 	dir := t.TempDir()
 	store, err := OpenStore(filepath.Join(dir, "state.json"), filepath.Join(dir, "manager.key"))
 	require.NoError(t, err)
@@ -22,14 +58,67 @@ func TestStoreRoundTripsEncryptedServerAndRejectsTamper(t *testing.T) {
 		})
 		return nil
 	}))
-	require.Equal(t, "us", store.State().Servers[0].Name)
-	require.Equal(t, 0o600, fileMode(t, filepath.Join(dir, "state.json")))
-	require.Equal(t, 0o600, fileMode(t, filepath.Join(dir, "manager.key")))
 
-	// A different key must not decrypt existing records.
-	other, err := OpenStore(filepath.Join(dir, "other.json"), filepath.Join(dir, "other.key"))
+	snapshot := store.State()
+	snapshot.Admin.Username = "mutated"
+	snapshot.Servers[0].Name = "mutated"
+	snapshot.Servers = append(snapshot.Servers, ServerRecord{ID: "srv_2", Name: "eu"})
+
+	current := store.State()
+	require.Equal(t, "admin", current.Admin.Username)
+	require.Len(t, current.Servers, 1)
+	require.Equal(t, "us", current.Servers[0].Name)
+}
+
+func TestCloneStatePreservesEmptyNonNilServers(t *testing.T) {
+	cloned := cloneState(State{Servers: []ServerRecord{}})
+	require.NotNil(t, cloned.Servers)
+	require.Empty(t, cloned.Servers)
+}
+
+func TestUpdatePublishesStateWhenDirectorySyncFailsAfterRename(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	keyPath := filepath.Join(dir, "manager.key")
+	store, err := OpenStore(statePath, keyPath)
 	require.NoError(t, err)
-	require.ErrorContains(t, other.SetServerPassword("srv_1", []byte("pw")), "unknown server")
+
+	originalSyncDir := syncDirFn
+	syncDirFn = func(string) error { return errors.New("injected directory sync failure") }
+	t.Cleanup(func() { syncDirFn = originalSyncDir })
+
+	err = store.Update(func(s *State) error {
+		s.Servers = append(s.Servers, ServerRecord{
+			ID: "srv_1", Name: "us", BaseURL: "https://us.example/hy2tund",
+			UpstreamUsername: "admin",
+		})
+		return nil
+	})
+	require.ErrorIs(t, err, ErrStateCommitted)
+	require.Len(t, store.State().Servers, 1, "a successful rename must publish the new state")
+	require.Equal(t, "srv_1", store.State().Servers[0].ID)
+
+	onDisk, err := os.ReadFile(statePath)
+	require.NoError(t, err)
+	var diskState State
+	require.NoError(t, json.Unmarshal(onDisk, &diskState))
+	require.Len(t, diskState.Servers, 1)
+
+	// A later successful update must build on the committed state, not the
+	// pre-failure in-memory snapshot.
+	syncDirFn = originalSyncDir
+	require.NoError(t, store.Update(func(s *State) error {
+		s.Servers = append(s.Servers, ServerRecord{
+			ID: "srv_2", Name: "eu", BaseURL: "https://eu.example/hy2tund",
+			UpstreamUsername: "admin",
+		})
+		return nil
+	}))
+	require.Len(t, store.State().Servers, 2)
+
+	reopened, err := OpenStore(statePath, keyPath)
+	require.NoError(t, err)
+	require.Len(t, reopened.State().Servers, 2)
 }
 
 func TestOpenStoreCreatesAdminAndPrintsPasswordOnce(t *testing.T) {
@@ -98,6 +187,61 @@ func TestStorePasswordRoundTripPersistsCiphertext(t *testing.T) {
 	require.ErrorContains(t, err, "unknown server")
 }
 
+func TestStateFileContainsNeitherPlaintextPasswordNorKey(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	keyPath := filepath.Join(dir, "manager.key")
+
+	store, err := OpenStore(statePath, keyPath)
+	require.NoError(t, err)
+	require.NoError(t, store.Update(func(s *State) error {
+		s.Servers = append(s.Servers, ServerRecord{
+			ID: "srv_1", Name: "us", BaseURL: "https://us.example/hy2tund",
+			UpstreamUsername: "admin",
+		})
+		return nil
+	}))
+	const plaintext = "unique-upstream-password"
+	require.NoError(t, store.SetServerPassword("srv_1", []byte(plaintext)))
+
+	stateData, err := os.ReadFile(statePath)
+	require.NoError(t, err)
+	keyData, err := os.ReadFile(keyPath)
+	require.NoError(t, err)
+	require.Contains(t, string(stateData), "upstream_password_enc")
+	require.NotContains(t, string(stateData), plaintext)
+	require.NotContains(t, string(stateData), strings.TrimSpace(string(keyData)))
+}
+
+func TestStoreRejectsTamperedCiphertextOnLoad(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	keyPath := filepath.Join(dir, "manager.key")
+
+	store, err := OpenStore(statePath, keyPath)
+	require.NoError(t, err)
+	require.NoError(t, store.Update(func(s *State) error {
+		s.Servers = append(s.Servers, ServerRecord{
+			ID: "srv_1", Name: "us", BaseURL: "https://us.example/hy2tund",
+			UpstreamUsername: "admin",
+		})
+		return nil
+	}))
+	require.NoError(t, store.SetServerPassword("srv_1", []byte("upstream-pw")))
+
+	data, err := os.ReadFile(statePath)
+	require.NoError(t, err)
+	var state State
+	require.NoError(t, json.Unmarshal(data, &state))
+	state.Servers[0].UpstreamPasswordEnc = flipLastHexByte(t, state.Servers[0].UpstreamPasswordEnc)
+	tampered, err := json.MarshalIndent(state, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(statePath, append(tampered, '\n'), 0o600))
+
+	_, err = OpenStore(statePath, keyPath)
+	require.ErrorContains(t, err, "cannot decrypt upstream password")
+}
+
 func TestOpenStoreFailsClosedOnCorruptStateAndMissingKey(t *testing.T) {
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "state.json")
@@ -124,9 +268,9 @@ func TestOpenStoreFailsClosedOnCorruptStateAndMissingKey(t *testing.T) {
 	require.NoError(t, os.WriteFile(statePath, valid, 0o600))
 	require.NoError(t, os.Remove(keyPath))
 	_, err = OpenStore(statePath, keyPath)
-	require.ErrorContains(t, err, "missing while state exists")
+	require.ErrorContains(t, err, "missing while state")
 
-	// A different key file must make the existing ciphertext undecryptable.
+	// A different key file must be rejected at startup.
 	otherDir := t.TempDir()
 	otherStatePath := filepath.Join(otherDir, "state.json")
 	otherKeyPath := filepath.Join(otherDir, "manager.key")
@@ -134,7 +278,62 @@ func TestOpenStoreFailsClosedOnCorruptStateAndMissingKey(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(otherStatePath, valid, 0o600))
 	_, err = OpenStore(otherStatePath, otherKeyPath)
-	require.ErrorContains(t, err, "cannot decrypt upstream password")
+	require.ErrorContains(t, err, "key check failed")
+}
+
+func TestOpenStoreFailsClosedWhenStateMissingButKeyExists(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	keyPath := filepath.Join(dir, "manager.key")
+
+	_, err := OpenStore(statePath, keyPath)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(statePath))
+
+	_, err = OpenStore(statePath, keyPath)
+	require.ErrorContains(t, err, "missing while manager key")
+	require.NoFileExists(t, statePath)
+}
+
+func TestOpenStoreKeyCheckDetectsWrongKeyWithoutServerPasswords(t *testing.T) {
+	dir := t.TempDir()
+	firstDir := filepath.Join(dir, "first")
+	secondDir := filepath.Join(dir, "second")
+	require.NoError(t, os.MkdirAll(firstDir, 0o700))
+	require.NoError(t, os.MkdirAll(secondDir, 0o700))
+
+	firstStatePath := filepath.Join(firstDir, "state.json")
+	firstKeyPath := filepath.Join(firstDir, "manager.key")
+	_, err := OpenStore(firstStatePath, firstKeyPath)
+	require.NoError(t, err)
+
+	secondStatePath := filepath.Join(secondDir, "state.json")
+	secondKeyPath := filepath.Join(secondDir, "manager.key")
+	_, err = OpenStore(secondStatePath, secondKeyPath)
+	require.NoError(t, err)
+
+	firstState, err := os.ReadFile(firstStatePath)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(secondStatePath, firstState, 0o600))
+
+	_, err = OpenStore(secondStatePath, secondKeyPath)
+	require.ErrorContains(t, err, "key check failed")
+}
+
+func TestStateFileTightensPermissionsOnLoad(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	keyPath := filepath.Join(dir, "manager.key")
+
+	_, err := OpenStore(statePath, keyPath)
+	require.NoError(t, err)
+	require.NoError(t, os.Chmod(statePath, 0o644))
+	require.NoError(t, os.Chmod(keyPath, 0o644))
+
+	_, err = OpenStore(statePath, keyPath)
+	require.NoError(t, err)
+	require.Equal(t, 0o600, fileMode(t, statePath))
+	require.Equal(t, 0o600, fileMode(t, keyPath))
 }
 
 func fileMode(t *testing.T, path string) int {

@@ -2,6 +2,7 @@ package manager
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,4 +40,28 @@ func TestAuditFileIsPrivateAndAppendsOneLinePerEntry(t *testing.T) {
 	require.Equal(t, "mapping.update", entry.Action)
 	require.Equal(t, "srv_1", entry.ServerID)
 	require.False(t, entry.Time.IsZero())
+}
+
+func TestAuditAppendSyncsDirectoryOnCreateAndFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+
+	originalSyncDir := syncDirFn
+	syncDirFn = func(string) error { return errors.New("injected directory sync failure") }
+	t.Cleanup(func() { syncDirFn = originalSyncDir })
+
+	err := NewAuditLog(path).Append(AuditEntry{Action: "server.add", Result: "ok"})
+	require.ErrorContains(t, err, "sync audit log directory")
+
+	// The line was written before the directory sync failed; a handler would
+	// treat the error as fail-closed and not perform the mutation.
+	data, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	require.Contains(t, string(data), `"action":"server.add"`)
+
+	syncDirFn = originalSyncDir
+	require.NoError(t, NewAuditLog(path).Append(AuditEntry{Action: "server.edit", Result: "ok"}))
+	data, err = os.ReadFile(path)
+	require.NoError(t, err)
+	require.Len(t, strings.Split(strings.TrimSpace(string(data)), "\n"), 2)
 }
