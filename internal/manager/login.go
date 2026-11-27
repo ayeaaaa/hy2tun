@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -31,6 +32,29 @@ type LoginHandler struct {
 	// it only behind a proxy that overwrites those headers.
 	TrustProxy bool
 	Log        *slog.Logger
+
+	adminMu sync.RWMutex
+}
+
+// SetAdmin updates the live administrator credentials after an accepted
+// password change. Existing manager sessions are revoked by the caller.
+func (h *LoginHandler) SetAdmin(username, passwordHash string) {
+	if h == nil {
+		return
+	}
+	h.adminMu.Lock()
+	h.Username = username
+	h.PasswordHash = passwordHash
+	h.adminMu.Unlock()
+}
+
+func (h *LoginHandler) adminCredentials() (string, string) {
+	if h == nil {
+		return "", ""
+	}
+	h.adminMu.RLock()
+	defer h.adminMu.RUnlock()
+	return h.Username, h.PasswordHash
 }
 
 // NewLoginHandler returns the manager login endpoint handler.
@@ -70,15 +94,16 @@ func (h *LoginHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid login request")
 		return
 	}
-	if h.Sessions == nil || h.PasswordHash == "" {
+	adminUsername, adminHash := h.adminCredentials()
+	if h.Sessions == nil || adminHash == "" {
 		writeJSONError(w, http.StatusInternalServerError, "login is not configured")
 		return
 	}
 
 	// Compare both fields in constant time and always run bcrypt so a failed
 	// login does not reveal whether the username or the password was wrong.
-	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(h.Username)) == 1
-	passOK := bcrypt.CompareHashAndPassword([]byte(h.PasswordHash), []byte(password)) == nil
+	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(adminUsername)) == 1
+	passOK := bcrypt.CompareHashAndPassword([]byte(adminHash), []byte(password)) == nil
 	if !userOK || !passOK {
 		if h.Limiter != nil {
 			h.Limiter.Failure(ip)
@@ -93,12 +118,12 @@ func (h *LoginHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.Limiter != nil {
 		h.Limiter.Success(ip)
 	}
-	if err := h.Sessions.Issue(w, r, h.Username); err != nil {
+	if err := h.Sessions.Issue(w, r, adminUsername); err != nil {
 		h.log().Error("issue manager session", "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "could not create session")
 		return
 	}
-	h.log().Debug("manager login succeeded", "ip", ip, "username", h.Username)
+	h.log().Debug("manager login succeeded", "ip", ip, "username", adminUsername)
 	w.WriteHeader(http.StatusNoContent)
 }
 

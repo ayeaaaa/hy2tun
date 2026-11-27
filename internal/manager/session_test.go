@@ -53,6 +53,29 @@ func TestManagerSessionCookieAttributesAndSecureScheme(t *testing.T) {
 	require.True(t, rr.Result().Cookies()[0].Secure)
 }
 
+func TestManagerSessionRevokeAllInvalidatesExistingSessions(t *testing.T) {
+	sessions, err := NewSessionManager([]byte("0123456789abcdef0123456789abcdef"), time.Hour)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rr := httptest.NewRecorder()
+	require.NoError(t, sessions.Issue(rr, req, "admin"))
+	cookie := rr.Result().Cookies()[0]
+
+	authed := httptest.NewRequest(http.MethodGet, "/", nil)
+	authed.AddCookie(cookie)
+	require.True(t, sessions.Valid(authed))
+
+	sessions.RevokeAll()
+	require.False(t, sessions.Valid(authed))
+
+	rr = httptest.NewRecorder()
+	require.NoError(t, sessions.Issue(rr, req, "admin"))
+	fresh := httptest.NewRequest(http.MethodGet, "/", nil)
+	fresh.AddCookie(rr.Result().Cookies()[0])
+	require.True(t, sessions.Valid(fresh))
+}
+
 func TestManagerSessionClearRevokesCookieAndUsername(t *testing.T) {
 	sessions, err := NewSessionManager([]byte("0123456789abcdef0123456789abcdef"), time.Hour)
 	require.NoError(t, err)

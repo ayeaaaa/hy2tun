@@ -41,7 +41,7 @@ manager 只保存：
 
 manager 使用独立版本和发布标签：
 
-<https://github.com/ayeaaaa/hy2tun/releases/tag/hy2tun-manager-v0.1.2>
+<https://github.com/ayeaaaa/hy2tun/releases/tag/hy2tun-manager-v0.1.3>
 
 归档包含：
 
@@ -55,7 +55,7 @@ manager 使用独立版本和发布标签：
 ## 安装
 
 ```sh
-tar -xzf hy2tun-manager_0.1.2_linux_amd64.tar.gz
+tar -xzf hy2tun-manager_0.1.3_linux_amd64.tar.gz
 sudo useradd --system --user-group --home-dir /var/lib/hy2tun-manager \
   --shell /usr/sbin/nologin hy2tun-manager
 sudo install -m 0755 hy2tun-manager /usr/local/bin/hy2tun-manager
@@ -162,9 +162,13 @@ location /hy2tun-manager/ {
 - 服务端设置页可修改模式、端口策略、Web 管理员和 trust-proxy。
 - 凭据页可轮换/撤销服务端凭据，并查看每台在线客户端的同步结果。
 
-## 重置管理员密码
+## 修改或重置管理员密码
 
-运行中的 manager 持有状态锁，必须先停止服务：
+登录后点击顶栏的 **修改密码**，填写当前密码、新密码（至少 8 个字符、最多
+72 字节）和确认密码。修改成功后 manager 会更新登录哈希、让所有已登录的
+manager 会话失效，并跳转回登录页；请使用新密码重新登录。
+
+如果无法登录，使用离线重置。运行中的 manager 持有状态锁，必须先停止服务：
 
 ```sh
 sudo systemctl stop hy2tun-manager
@@ -188,7 +192,7 @@ sudo systemctl start hy2tun-manager
 
 ```sh
 make build-manager
-VERSION=0.1.2 ./scripts/release-manager.sh
+VERSION=0.1.3 ./scripts/release-manager.sh
 ```
 
 只构建 Linux amd64/arm64。发布脚本不会修改 `hy2tund`/`hy2tun` 的现有发布矩阵。

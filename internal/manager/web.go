@@ -34,10 +34,12 @@ type WebServer struct {
 	static    fs.FS
 	inventory *Inventory
 
-	sessions *SessionManager
-	login    *LoginHandler
+	sessions        *SessionManager
+	login           *LoginHandler
+	passwordLimiter *shared.LoginLimiter
 
 	loginTemplate    *template.Template
+	accountTemplate  *template.Template
 	overviewTemplate *template.Template
 	serversTemplate  *template.Template
 	serverTemplate   *template.Template
@@ -103,6 +105,10 @@ func NewWebServer(store *Store, audit *AuditLog, cfg Config, log *slog.Logger) (
 	if err != nil {
 		return nil, fmt.Errorf("manager: parse login template: %w", err)
 	}
+	accountTemplate, err := shared.ParsePage(managerAssets, "templates/layout.html", "templates/account.html")
+	if err != nil {
+		return nil, fmt.Errorf("manager: parse account template: %w", err)
+	}
 	overviewTemplate, err := shared.ParsePage(managerAssets, "templates/layout.html", "templates/overview.html")
 	if err != nil {
 		return nil, fmt.Errorf("manager: parse overview template: %w", err)
@@ -141,7 +147,9 @@ func NewWebServer(store *Store, audit *AuditLog, cfg Config, log *slog.Logger) (
 		static:           staticFS,
 		sessions:         sessions,
 		login:            login,
+		passwordLimiter:  shared.NewLoginLimiter(5, time.Minute, time.Minute),
 		loginTemplate:    loginTemplate,
+		accountTemplate:  accountTemplate,
 		overviewTemplate: overviewTemplate,
 		serversTemplate:  serversTemplate,
 		serverTemplate:   serverTemplate,
@@ -176,6 +184,8 @@ func (s *WebServer) routes() http.Handler {
 	mux.Handle("POST /api/logout", shared.RequireCSRF(http.HandlerFunc(s.handleLogout)))
 
 	mux.Handle("GET /{$}", s.requireAuth(http.HandlerFunc(s.handleOverviewPage)))
+	mux.Handle("GET /account", s.requireAuth(http.HandlerFunc(s.handleAccountPage)))
+	mux.Handle("PUT /api/account/password", s.mutation(http.HandlerFunc(s.handleChangePassword)))
 
 	// Inventory pages and JSON APIs. All mutations keep the Task 2 auth and
 	// CSRF gates; destructive removal additionally requires the server name.

@@ -130,13 +130,19 @@ The container must run on a Linux host because the Compose service uses host
 networking and the manager is a Linux-only release. Do not run multiple manager
 containers against the same state directory; the process lock is per container.
 
-## Reset the administrator password
+## Change or reset the administrator password
 
-The manager snapshots the administrator hash when its HTTP shell starts, so a
-password reset is a file change plus a service restart. The running service
-holds an exclusive state lock; `reset-admin` takes the same lock and **fails
-without changing anything while the service is running**. The required order is
-exactly:
+While logged in, open **修改密码** in the top bar. Enter the current password,
+a new password of at least eight characters (at most 72 bytes), and confirm it.
+On success the manager updates its live login hash, invalidates every existing
+manager session, and redirects you to the login page. Log in again with the new
+password.
+
+If you are locked out, use the offline reset path. The manager snapshots the
+administrator hash when its HTTP shell starts, so an offline reset is a file
+change plus a service restart. The running service holds an exclusive state
+lock; `reset-admin` takes the same lock and **fails without changing anything
+while the service is running**. The required order is exactly:
 
 ```sh
 sudo systemctl stop hy2tun-manager

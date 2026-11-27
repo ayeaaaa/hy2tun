@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"hy2tun/internal/webui/shared"
@@ -38,15 +39,17 @@ type SessionManager struct {
 	ttl    time.Duration
 	now    func() time.Time
 
-	mu      sync.Mutex
-	revoked map[string]time.Time
+	mu         sync.Mutex
+	revoked    map[string]time.Time
+	generation atomic.Uint64
 }
 
 type managerSessionClaims struct {
-	SessionID string `json:"sid"`
-	Subject   string `json:"sub"`
-	IssuedAt  int64  `json:"iat"`
-	ExpiresAt int64  `json:"exp"`
+	SessionID  string `json:"sid"`
+	Subject    string `json:"sub"`
+	Generation uint64 `json:"gen"`
+	IssuedAt   int64  `json:"iat"`
+	ExpiresAt  int64  `json:"exp"`
 }
 
 // NewSessionManager returns a manager using secret. The secret must be at
@@ -86,10 +89,11 @@ func (m *SessionManager) Issue(w http.ResponseWriter, r *http.Request, username 
 		return fmt.Errorf("manager: generate session ID: %w", err)
 	}
 	claims := managerSessionClaims{
-		SessionID: base64.RawURLEncoding.EncodeToString(sessionIDBytes[:]),
-		Subject:   username,
-		IssuedAt:  now.Unix(),
-		ExpiresAt: now.Add(m.ttl).Unix(),
+		SessionID:  base64.RawURLEncoding.EncodeToString(sessionIDBytes[:]),
+		Subject:    username,
+		Generation: m.generation.Load(),
+		IssuedAt:   now.Unix(),
+		ExpiresAt:  now.Add(m.ttl).Unix(),
 	}
 	payload, err := json.Marshal(claims)
 	if err != nil {
@@ -126,6 +130,15 @@ func (m *SessionManager) Username(r *http.Request) string {
 		return ""
 	}
 	return claims.Subject
+}
+
+// RevokeAll invalidates every previously issued manager session. It is used
+// after the administrator password changes; a new login issues a token with the
+// incremented generation.
+func (m *SessionManager) RevokeAll() {
+	if m != nil {
+		m.generation.Add(1)
+	}
 }
 
 // Clear revokes the request's session in memory and writes an expired cookie.
@@ -201,6 +214,7 @@ func (m *SessionManager) signedClaims(r *http.Request) (*managerSessionClaims, b
 	now := m.now()
 	if claims.SessionID == "" ||
 		claims.Subject == "" ||
+		claims.Generation != m.generation.Load() ||
 		claims.ExpiresAt <= now.Unix() ||
 		claims.ExpiresAt <= claims.IssuedAt ||
 		claims.IssuedAt > now.Add(time.Minute).Unix() {
