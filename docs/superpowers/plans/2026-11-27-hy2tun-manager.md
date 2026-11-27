@@ -473,9 +473,11 @@ git commit -m "feat(manager): aggregate server inventory and refresh"
 - Create: `internal/manager/views_clients.go`
 - Create: `internal/manager/templates/clients.html`
 - Create: `internal/manager/templates/client.html`
+- Modify: `internal/manager/inventory.go`
 - Test: `internal/manager/handlers_clients_test.go`
 
 **Interfaces:**
+- `Inventory.WithClient(ctx, serverID string, fn func(context.Context, *upstream.Client) error) error` acquires the per-server operation lock, re-reads the record, creates/reuses the identity-checked upstream client, and invokes `fn` while the lock is held. Return a not-found/validation error for an unknown server. Task 6 reuses this method.
 - `GET /servers/{id}/clients` renders the selected server's client table.
 - `GET /servers/{id}/clients/{clientID}` renders mapping detail.
 - `PUT /api/servers/{id}/clients/{clientID}/mappings` accepts `{base_revision, mappings, exposures}` and forwards the same shape.
