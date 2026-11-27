@@ -4,6 +4,19 @@
 
 All notable changes to this project are documented here.
 
+## v1.7.4 - 2026-11-27
+
+### Added
+
+- Added a unified twin-node tunnel brand identity across the server and client
+  Web consoles, Windows executables, OpenWrt/LuCI package, README, and the
+  1200x630 social preview.
+- Both Web consoles now ship SVG/PNG favicons, Apple touch and PWA icons, a
+  web manifest, and light/dark topbar marks. Windows executables embed the new
+  application icon, and the LuCI package includes a 32x32 menu icon.
+
+This release is visual-only; protocol and configuration are unchanged.
+
 ## v1.7.3 - 2026-11-26
 
 ### Changed
