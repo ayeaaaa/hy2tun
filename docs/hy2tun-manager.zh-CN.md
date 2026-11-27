@@ -92,15 +92,18 @@ trust_proxy: false
 
 ## 首次登录
 
-首次启动会在 journal 中打印一次 20 字符管理员密码：
+首次登录用户名和密码都是 `admin`。首次启动只会把 `admin` 的 bcrypt 哈希写入
+`state.json`；请首次登录后立即按下面的重置流程修改密码，不要长期保留默认密码。
+
+查看服务状态：
 
 ```sh
+sudo systemctl status hy2tun-manager
 sudo journalctl -u hy2tun-manager -n 50
 ```
 
-用户名是 `admin`。密码只保存 bcrypt 哈希，不会写入状态文件或审计日志。
 也可以首次启动前通过 systemd 环境变量
-`HY2TUN_MANAGER_INITIAL_PASSWORD` 指定初始密码；已有状态时该变量会被忽略。
+`HY2TUN_MANAGER_INITIAL_PASSWORD` 指定其他初始密码；已有状态时该变量会被忽略。
 
 ## 添加上游服务端
 

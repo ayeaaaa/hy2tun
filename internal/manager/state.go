@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -20,13 +19,12 @@ import (
 )
 
 const (
-	adminUsername          = "admin"
-	adminPasswordLength    = 20
-	adminPasswordAlphabet  = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-	managerKeyFileMode     = 0o600
-	managerStateFileMode   = 0o600
-	managerStateFileSuffix = ".tmp-"
-	managerKeyCheckValue   = "hy2tun-manager-key-check"
+	adminUsername               = "admin"
+	defaultInitialAdminPassword = "admin"
+	managerKeyFileMode          = 0o600
+	managerStateFileMode        = 0o600
+	managerStateFileSuffix      = ".tmp-"
+	managerKeyCheckValue        = "hy2tun-manager-key-check"
 
 	// InitialAdminPasswordEnv supplies the first-run administrator password.
 	// It is ignored after state.json exists, so an existing administrator can
@@ -43,10 +41,9 @@ const (
 // guaranteed.
 var ErrStateCommitted = errors.New("manager state committed but directory sync failed")
 
-// Package-level seams let tests inject a known first-run password and capture
-// the one-time output without touching the production defaults.
+// Package-level seam lets tests capture the one-time output without touching
+// the production defaults.
 var (
-	initialAdminPasswordGenerator = generateAdminPassword
 	// initialAdminPasswordWriter defaults to os.Stderr at call time so tests
 	// can redirect the process stderr or supply their own buffer.
 	initialAdminPasswordWriter io.Writer
@@ -236,8 +233,8 @@ func OpenStore(statePath, keyPath string) (*Store, error) {
 
 // initialAdminPassword returns the first-run administrator password. The
 // initial-password environment variable is consulted only while state.json is
-// missing; the generated password is the fallback and is printed once by the
-// caller. Environment-supplied passwords are validated before hashing.
+// missing; without it the fixed bootstrap password is used and printed once by
+// the caller. Environment-supplied passwords are validated before hashing.
 func initialAdminPassword() (password string, fromEnv bool, err error) {
 	if value, ok := os.LookupEnv(InitialAdminPasswordEnv); ok && value != "" {
 		if utf8.RuneCountInString(value) < minAdminPasswordRunes {
@@ -248,11 +245,7 @@ func initialAdminPassword() (password string, fromEnv bool, err error) {
 		}
 		return value, true, nil
 	}
-	password, err = initialAdminPasswordGenerator()
-	if err != nil {
-		return "", false, fmt.Errorf("generate initial admin password: %w", err)
-	}
-	return password, false, nil
+	return defaultInitialAdminPassword, false, nil
 }
 
 // ensureParentDir creates the parent directory of path when it does not exist.
@@ -593,20 +586,6 @@ func decodeManagerKey(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("key must be %d bytes, got %d", secretKeySize, len(key))
 	}
 	return key, nil
-}
-
-func generateAdminPassword() (string, error) {
-	limit := big.NewInt(int64(len(adminPasswordAlphabet)))
-	var builder strings.Builder
-	builder.Grow(adminPasswordLength)
-	for i := 0; i < adminPasswordLength; i++ {
-		index, err := rand.Int(rand.Reader, limit)
-		if err != nil {
-			return "", err
-		}
-		builder.WriteByte(adminPasswordAlphabet[index.Int64()])
-	}
-	return builder.String(), nil
 }
 
 // writeFileAtomic writes data to path through a temporary file in the same

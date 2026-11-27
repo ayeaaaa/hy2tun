@@ -127,23 +127,20 @@ func TestOpenStoreCreatesAdminAndPrintsPasswordOnce(t *testing.T) {
 	keyPath := filepath.Join(dir, "manager.key")
 
 	t.Setenv(InitialAdminPasswordEnv, "")
-	oldGenerator := initialAdminPasswordGenerator
 	oldWriter := initialAdminPasswordWriter
 	var output bytes.Buffer
-	initialAdminPasswordGenerator = func() (string, error) { return "test-initial-password", nil }
 	initialAdminPasswordWriter = &output
 	t.Cleanup(func() {
-		initialAdminPasswordGenerator = oldGenerator
 		initialAdminPasswordWriter = oldWriter
 	})
 
 	store, err := OpenStore(statePath, keyPath)
 	require.NoError(t, err)
-	require.Contains(t, output.String(), "initial admin password: test-initial-password")
+	require.Contains(t, output.String(), "initial admin password: admin")
 
 	state := store.State()
 	require.Equal(t, "admin", state.Admin.Username)
-	require.NoError(t, bcrypt.CompareHashAndPassword([]byte(state.Admin.PasswordHash), []byte("test-initial-password")))
+	require.NoError(t, bcrypt.CompareHashAndPassword([]byte(state.Admin.PasswordHash), []byte("admin")))
 
 	output.Reset()
 	reopened, err := OpenStore(statePath, keyPath)

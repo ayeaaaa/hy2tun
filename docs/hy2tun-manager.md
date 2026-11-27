@@ -84,25 +84,24 @@ trust_proxy: false
   login rate limiting would trust attacker-controlled headers or share one
   bucket for every user.
 
-Check the service and read the one-time initial password from the journal:
+Check the service:
 
 ```sh
 sudo systemctl status hy2tun-manager
 sudo journalctl -u hy2tun-manager -n 50
 ```
 
-On the first start only, the manager generates a 20-character administrator
-password, stores its bcrypt hash in `state.json`, and prints the plaintext once
-to stderr (the journal). It is never written to the state file or audit log and
-is never printed again. An existing administrator is never silently reset.
+The first login is `admin` / `admin`. On the first start only, the manager
+stores the bcrypt hash of this fixed bootstrap password in `state.json`. Change
+it immediately after the first login through the reset flow below; do not leave
+the manager reachable with the default password.
 
-To choose that first password yourself instead of reading it from the journal,
-set `HY2TUN_MANAGER_INITIAL_PASSWORD` in the service environment for the first
+To use a different bootstrap password instead, set
+`HY2TUN_MANAGER_INITIAL_PASSWORD` in the service environment for the first
 start only (for example through `systemctl edit hy2tun-manager` and an
 `Environment=` line, or an `EnvironmentFile=`). The variable is ignored when
 `state.json` already exists, so leaving it configured can never reset an
-existing administrator. Remove it after the first successful start; the
-generated-password path is the default when it is unset.
+existing administrator.
 
 Open the manager at `http://127.0.0.1:7600/` through an SSH tunnel for the first
 login, or through the HTTPS reverse proxy below. Log in as `admin`.
