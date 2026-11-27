@@ -133,21 +133,6 @@ func (f *fakeSettingsUpstream) setFailure(kind string, status int, code, message
 	}
 }
 
-func (f *fakeSettingsUpstream) failure(kind string) (fakeSettingsFailure, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	failure, ok := f.failures[kind]
-	return failure, ok
-}
-
-func (f *fakeSettingsUpstream) loginsForTest() []fakeSettingsLogin {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]fakeSettingsLogin, len(f.logins))
-	copy(out, f.logins)
-	return out
-}
-
 func (f *fakeSettingsUpstream) loginAttempts() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -223,12 +208,6 @@ func (f *fakeSettingsUpstream) revokePayloads() []string {
 	out := make([]string, len(f.revokeBodies))
 	copy(out, f.revokeBodies)
 	return out
-}
-
-func (f *fakeSettingsUpstream) snapshot() managerupstream.Settings {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.settings
 }
 
 func (f *fakeSettingsUpstream) handle(w http.ResponseWriter, r *http.Request) {

@@ -196,12 +196,6 @@ func (f *fakeClientUpstream) setOnline(clientID string, online bool) {
 	f.clients[clientID] = client
 }
 
-func (f *fakeClientUpstream) logins() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.loginCount
-}
-
 func (f *fakeClientUpstream) clientGets() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
