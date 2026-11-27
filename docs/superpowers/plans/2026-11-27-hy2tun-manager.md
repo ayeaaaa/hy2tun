@@ -219,7 +219,7 @@ git commit -m "feat(manager): add config, encrypted state, and audit log"
 - `SessionManager.Valid(r *http.Request) bool`
 - `SessionManager.Clear(w http.ResponseWriter, r *http.Request)`
 - `NewLoginHandler(sessions *SessionManager, limiter *shared.LoginLimiter, username string, passwordHash string) *LoginHandler`
-- `NewWebServer(store *Store, audit *AuditLog, inventory *Inventory, cfg Config, log *slog.Logger) (*WebServer, error)` creates the manager HTTP handler. Task 2 may pass a nil inventory for the shell; Task 4 supplies it.
+- `NewWebServer(store *Store, audit *AuditLog, cfg Config, log *slog.Logger) (*WebServer, error)` creates the manager HTTP handler. The shell has no inventory dependency yet; Task 4 adds inventory to `WebServer` and wires it in Task 7.
 - The manager cookie is `hy2tun_manager_session`; it must never use `hy2tun_session`.
 
 - [ ] **Step 1: Write failing tests**
@@ -250,7 +250,7 @@ func TestManagerSessionUsesDistinctCookieAndRejectsTamper(t *testing.T) {
 ```go
 func TestLoginAndCrossOriginMutationRejected(t *testing.T) {
     store := testStore(t) // creates admin/admin hash with test password
-    web, err := NewWebServer(store, testAudit(t), nil, testConfig(), slog.Default())
+    web, err := NewWebServer(store, testAudit(t), testConfig(), slog.Default())
     require.NoError(t, err)
     ts := httptest.NewServer(web.Handler())
     defer ts.Close()
@@ -386,6 +386,7 @@ git commit -m "feat(manager): add upstream server API adapter"
 - Create: `internal/manager/views_servers.go`
 - Create: `internal/manager/templates/servers.html`
 - Create: `internal/manager/templates/server.html`
+- Modify: `internal/manager/web.go`
 - Test: `internal/manager/inventory_test.go`
 - Test: `internal/manager/handlers_servers_test.go`
 
@@ -399,6 +400,7 @@ git commit -m "feat(manager): add upstream server API adapter"
 - `Inventory.RefreshAll(ctx)`
 - `Inventory.List() []ServerView`
 - `Inventory.Get(id string) (ServerView, bool)`
+- `WebServer.SetInventory(*Inventory)` wires the Task 4 inventory into the shell; Task 7 calls it during composition.
 - `ServerView` contains configured name/base URL, state (`online`, `auth_error`, `unreachable`, `unsupported`), version, mode, clients count, mappings count, last refresh, last error.
 
 - [ ] **Step 1: Write failing tests**
@@ -442,6 +444,7 @@ func TestInventoryRejectsDuplicateNameAndUnreachableServer(t *testing.T) {
 - Refresh one server with a 15s context; one in-flight refresh per server via mutex/state.
 - Background `RefreshAll` every configured interval; bounded concurrency, one request per server.
 - On login failure, set `auth_error`; on transport failure, set `unreachable`; never remove inventory.
+- `WebServer.SetInventory` stores the inventory used by the new Page handlers. The shell itself remains usable with a nil inventory.
 - Server list/overview page shows state, version, mode, client count, mapping count, last refresh, and last error.
 - Add/edit forms are write-only for passwords; remove uses a confirmation page/button.
 
@@ -638,7 +641,7 @@ Expected: command/release tests fail before implementation.
 
 - [ ] **Step 3: Implement wiring, release, and docs**
 
-- Wire config, store, audit, inventory, and WebServer in `main.go`; handle `SIGTERM` with `http.Server.Shutdown`.
+- Wire config, store, audit, inventory, and WebServer in `main.go`; call `WebServer.SetInventory(inventory)` and handle `SIGTERM` with `http.Server.Shutdown`.
 - Implement `-reset-admin` with a write-only new password flag or prompt; it must not reset on normal startup.
 - Add `build-manager` target without changing existing `build`.
 - Add `scripts/release-manager.sh` that uses `CGO_ENABLED=0`, `-trimpath -ldflags "-s -w -X hy2tun/internal/version.Version=$VERSION..."`, only linux/amd64 and linux/arm64, and a `--dry-run` that prints planned outputs without building.
