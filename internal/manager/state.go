@@ -235,6 +235,96 @@ func (s *Store) SetServerPassword(id string, plaintext []byte) error {
 	})
 }
 
+// AddServer encrypts the upstream password and appends the record in the same
+// state update, so a server is never persisted without a usable credential.
+func (s *Store) AddServer(record ServerRecord, password []byte) error {
+	if len(password) == 0 {
+		return fmt.Errorf("upstream password is empty")
+	}
+	s.mu.RLock()
+	key := append([]byte(nil), s.key...)
+	s.mu.RUnlock()
+
+	encoded, err := EncryptSecret(key, password)
+	if err != nil {
+		return fmt.Errorf("encrypt upstream password: %w", err)
+	}
+	record.UpstreamPasswordEnc = encoded
+	return s.Update(func(state *State) error {
+		for _, existing := range state.Servers {
+			if existing.ID == record.ID {
+				return fmt.Errorf("duplicate server id %q", record.ID)
+			}
+			if existing.Name == record.Name {
+				return fmt.Errorf("duplicate server name %q", record.Name)
+			}
+		}
+		state.Servers = append(state.Servers, record)
+		return nil
+	})
+}
+
+// UpdateServer replaces the editable fields of an existing record. A nil
+// password keeps the stored ciphertext; a non-nil password is encrypted and
+// replaces it. CreatedAt and the server ID are immutable.
+func (s *Store) UpdateServer(record ServerRecord, password []byte) error {
+	var encoded string
+	if password != nil {
+		s.mu.RLock()
+		key := append([]byte(nil), s.key...)
+		s.mu.RUnlock()
+		var err error
+		encoded, err = EncryptSecret(key, password)
+		if err != nil {
+			return fmt.Errorf("encrypt upstream password: %w", err)
+		}
+	}
+	return s.Update(func(state *State) error {
+		for i := range state.Servers {
+			existing := &state.Servers[i]
+			if existing.ID != record.ID {
+				continue
+			}
+			for j := range state.Servers {
+				if j != i && state.Servers[j].Name == record.Name {
+					return fmt.Errorf("duplicate server name %q", record.Name)
+				}
+			}
+			existing.Name = record.Name
+			existing.BaseURL = record.BaseURL
+			existing.UpstreamUsername = record.UpstreamUsername
+			existing.TLSSkipVerify = record.TLSSkipVerify
+			existing.UpdatedAt = time.Now().UTC()
+			if password != nil {
+				existing.UpstreamPasswordEnc = encoded
+			}
+			return nil
+		}
+		return fmt.Errorf("unknown server %q", record.ID)
+	})
+}
+
+// RemoveServer removes one inventory record and returns the removed value. It
+// never contacts the upstream server.
+func (s *Store) RemoveServer(id string) (ServerRecord, error) {
+	var removed ServerRecord
+	err := s.Update(func(state *State) error {
+		for i := range state.Servers {
+			if state.Servers[i].ID != id {
+				continue
+			}
+			removed = state.Servers[i]
+			state.Servers = append(state.Servers[:i], state.Servers[i+1:]...)
+			return nil
+		}
+		return fmt.Errorf("unknown server %q", id)
+	})
+	if err != nil {
+		return ServerRecord{}, err
+	}
+	return removed, nil
+}
+
 // ServerPassword decrypts a server's upstream password for an in-memory
 // upstream session. Callers must never render or log the returned bytes.
 func (s *Store) ServerPassword(id string) ([]byte, error) {

@@ -43,6 +43,37 @@
     return "请求失败，请稍后再试。";
   };
 
+  const handleUnauthorized = (response) => {
+    if (response.status === 401) {
+      window.location.assign(`${basePath}login`);
+      return true;
+    }
+    return false;
+  };
+
+  const formPayload = (form) => {
+    const payload = {};
+    new FormData(form).forEach((value, key) => {
+      payload[key] = String(value);
+    });
+    form.querySelectorAll('input[type="checkbox"][name]').forEach((input) => {
+      payload[input.name] = input.checked;
+    });
+    return payload;
+  };
+
+  const sendJSON = (url, method, payload) =>
+    fetch(url, {
+      method,
+      credentials: "same-origin",
+      headers: {
+        ...csrfHeaders(),
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
   const loginForm = document.querySelector("[data-login-form]");
   if (loginForm) {
     loginForm.addEventListener("submit", async (event) => {
@@ -111,4 +142,113 @@
       }
     });
   }
+
+  // Server add/edit forms are progressive enhancement: without JavaScript the
+  // form does not submit a mutation (mutations need the CSRF header anyway).
+  document.querySelectorAll("[data-json-form]").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!form.reportValidity()) {
+        return;
+      }
+      const button = form.querySelector("button[type='submit']");
+      if (button) {
+        button.disabled = true;
+      }
+      try {
+        const response = await sendJSON(
+          form.action,
+          form.dataset.method || "POST",
+          formPayload(form),
+        );
+        if (handleUnauthorized(response)) {
+          return;
+        }
+        if (!response.ok) {
+          showNotice(await responseError(response), "error");
+          return;
+        }
+        window.location.assign(form.dataset.success || `${basePath}servers`);
+      } catch (_error) {
+        showNotice("无法连接到管理器，请检查网络。", "error");
+      } finally {
+        if (button) {
+          button.disabled = false;
+        }
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-test-connection]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const form = button.closest("form");
+      if (!form || !form.reportValidity()) {
+        return;
+      }
+      button.disabled = true;
+      try {
+        const response = await sendJSON(
+          form.dataset.testUrl,
+          "POST",
+          formPayload(form),
+        );
+        if (handleUnauthorized(response)) {
+          return;
+        }
+        if (!response.ok) {
+          showNotice(await responseError(response), "error");
+          return;
+        }
+        const data = await response.json();
+        const version = data.version ? `版本 ${data.version}` : "已登录";
+        const clients =
+          typeof data.client_count === "number"
+            ? `，${data.client_count} 个在线客户端`
+            : "";
+        showNotice(`连接成功：${version}${clients}。`, "info");
+      } catch (_error) {
+        showNotice("无法连接到管理器，请检查网络。", "error");
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const confirmation = button.dataset.confirm;
+      if (confirmation && !window.confirm(confirmation)) {
+        return;
+      }
+      button.disabled = true;
+      try {
+        const response = await fetch(button.dataset.action, {
+          method: button.dataset.method || "POST",
+          credentials: "same-origin",
+          headers: {
+            ...csrfHeaders(),
+            Accept: "application/json",
+          },
+        });
+        if (handleUnauthorized(response)) {
+          return;
+        }
+        if (!response.ok) {
+          showNotice(await responseError(response), "error");
+          return;
+        }
+        if (button.dataset.notice) {
+          showNotice(button.dataset.notice, "info");
+        }
+        if (button.dataset.success) {
+          window.location.assign(button.dataset.success);
+          return;
+        }
+        window.location.reload();
+      } catch (_error) {
+        showNotice("无法连接到管理器，请检查网络。", "error");
+        button.disabled = false;
+      }
+    });
+  });
 })();

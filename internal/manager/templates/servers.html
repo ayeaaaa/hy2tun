@@ -1,0 +1,111 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">服务器清单</p>
+    <h1>管理服务器</h1>
+    <p class="muted">添加、测试、刷新或从管理器中移除 hy2tund 服务器。移除不会影响上游服务器或客户端配置。</p>
+  </div>
+  <div class="page-actions">
+    <a class="btn btn-quiet" href="{{.BasePath}}">返回总览</a>
+  </div>
+</div>
+
+{{if not .InventoryConfigured}}
+<section class="panel placeholder-panel">
+  <div class="empty-state">
+    <span class="empty-mark" aria-hidden="true"></span>
+    <h2>服务器清单未配置</h2>
+    <p class="muted">管理器外壳已可用，但服务器清单组件尚未接入。</p>
+  </div>
+</section>
+{{else}}
+<section class="panel form-panel" aria-labelledby="add-server-heading">
+  <div class="panel-section panel-heading">
+    <h2 id="add-server-heading">添加服务器</h2>
+    <p class="muted">凭据只以加密形式保存，页面不会回显上游密码。</p>
+  </div>
+  <form class="server-form" action="{{.BasePath}}api/servers" method="post"
+        data-json-form data-method="POST" data-success="{{.BasePath}}servers"
+        data-test-url="{{.BasePath}}api/servers/test">
+    <label class="field">
+      <span class="field-label">显示名称</span>
+      <input class="input" type="text" name="name" required maxlength="64" autocomplete="off" placeholder="例如：us">
+    </label>
+    <label class="field">
+      <span class="field-label">Base URL</span>
+      <input class="input" type="url" name="base_url" required autocomplete="off" placeholder="https://us.example.net/hy2tund">
+    </label>
+    <label class="field">
+      <span class="field-label">上游管理员用户名</span>
+      <input class="input" type="text" name="username" required autocomplete="username">
+    </label>
+    <label class="field">
+      <span class="field-label">上游管理员密码</span>
+      <input class="input" type="password" name="password" required autocomplete="new-password" placeholder="只写，不会回显">
+    </label>
+    <label class="field checkbox-field">
+      <input type="checkbox" name="tls_skip_verify">
+      <span>跳过上游 TLS 证书校验（危险，仅在受控网络中临时使用）</span>
+    </label>
+    <div class="form-actions">
+      <button class="btn btn-primary" type="submit">添加服务器</button>
+      <button class="btn btn-quiet" type="button" data-test-connection>测试连接</button>
+    </div>
+  </form>
+</section>
+
+<section class="panel" aria-labelledby="server-list-heading">
+  <div class="panel-section panel-heading">
+    <h2 id="server-list-heading">已配置服务器</h2>
+    <p class="muted">共 {{len .Servers}} 台。</p>
+  </div>
+  {{if .Servers}}
+  <div class="table-wrap">
+    <table class="data-table server-table">
+      <thead>
+        <tr>
+          <th scope="col">名称</th>
+          <th scope="col">地址</th>
+          <th scope="col">状态</th>
+          <th scope="col">版本</th>
+          <th scope="col">模式</th>
+          <th scope="col" class="num">客户端</th>
+          <th scope="col" class="num">映射</th>
+          <th scope="col">最近刷新</th>
+          <th scope="col">最近错误</th>
+          <th scope="col">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Servers}}
+        <tr>
+          <td><a class="server-link" href="{{$.BasePath}}servers/{{.ID}}">{{.Name}}</a></td>
+          <td class="mono wrap">{{.BaseURL}}</td>
+          <td><span class="state-badge {{.StateClass}}">{{.StateLabel}}</span></td>
+          <td>{{if .Version}}{{.Version}}{{else}}—{{end}}</td>
+          <td>{{.ModeLabel}}</td>
+          <td class="num">{{.ClientCount}}</td>
+          <td class="num">{{.MappingCount}}</td>
+          <td>{{time .LastRefresh}}</td>
+          <td class="error-cell">{{if .HasLastError}}<span class="error-text" title="{{.LastError}}">{{.LastError}}</span>{{else}}—{{end}}</td>
+          <td class="actions-cell">
+            <a class="btn btn-quiet btn-sm" href="{{$.BasePath}}servers/{{.ID}}">查看</a>
+            <button class="btn btn-quiet btn-sm" type="button"
+                    data-action="{{$.BasePath}}api/servers/{{.ID}}/refresh" data-method="POST">刷新</button>
+            <button class="btn btn-danger btn-sm" type="button"
+                    data-action="{{$.BasePath}}api/servers/{{.ID}}?confirm={{urlquery .Name}}" data-method="DELETE"
+                    data-confirm="确定从管理器清单中移除服务器“{{.Name}}”？此操作不会影响上游服务器或客户端配置。">移除</button>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="panel-section empty-inline">
+    <p class="muted">还没有配置服务器。</p>
+  </div>
+  {{end}}
+</section>
+{{end}}
+{{end}}

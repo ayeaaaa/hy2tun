@@ -395,3 +395,253 @@ a {
     gap: 0.35rem;
   }
 }
+/* Server inventory */
+
+.page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.back-link {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.back-link:hover {
+  text-decoration: underline;
+}
+
+.panel-section {
+  padding: 1.25rem 1.4rem;
+}
+
+.panel-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-heading .muted {
+  font-size: 0.82rem;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.86rem;
+}
+
+.data-table th,
+.data-table td {
+  padding: 0.75rem 0.9rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.data-table thead th {
+  color: var(--text-muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.data-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.data-table tbody tr:hover {
+  background: var(--surface-muted);
+}
+
+.data-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+}
+
+.wrap {
+  overflow-wrap: anywhere;
+}
+
+.error-cell {
+  max-width: 18rem;
+}
+
+.error-text {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--danger);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.server-link {
+  color: var(--accent);
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.server-link:hover {
+  text-decoration: underline;
+}
+
+.state-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0.15rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.state-badge.ok {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.state-badge.warn {
+  border-color: color-mix(in srgb, #b37a27 45%, var(--border));
+  background: color-mix(in srgb, #b37a27 12%, var(--surface));
+  color: #b37a27;
+}
+
+.state-badge.bad {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.btn-sm {
+  min-height: 30px;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.78rem;
+}
+
+.btn-danger {
+  border-color: var(--danger);
+  background: transparent;
+  color: var(--danger);
+}
+
+.btn-danger:hover {
+  background: var(--danger-soft);
+}
+
+.actions-cell {
+  white-space: nowrap;
+}
+
+.actions-cell .btn + .btn {
+  margin-left: 0.3rem;
+}
+
+.form-panel {
+  margin-bottom: 1.4rem;
+}
+
+.server-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem 1.25rem;
+  padding: 1.4rem;
+}
+
+.server-form .checkbox-field,
+.server-form .form-actions {
+  grid-column: 1 / -1;
+}
+
+.checkbox-field {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.checkbox-field input {
+  width: 1rem;
+  height: 1rem;
+  margin-top: 0.15rem;
+  accent-color: var(--accent);
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 1rem 1.5rem;
+}
+
+.summary-item {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.summary-label {
+  color: var(--text-muted);
+  font-size: 0.74rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.summary-value {
+  font-size: 0.94rem;
+  font-weight: 600;
+}
+
+.empty-actions {
+  margin-top: 1rem;
+}
+
+.empty-inline {
+  padding: 1.4rem;
+}
+
+@media (max-width: 640px) {
+  .server-form {
+    grid-template-columns: 1fr;
+  }
+
+  .page-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .panel-section {
+    padding: 1rem;
+  }
+
+  .server-form {
+    padding: 1rem;
+  }
+}

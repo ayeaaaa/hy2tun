@@ -5,13 +5,69 @@
     <h1>服务器清单</h1>
     <p class="muted">从一个位置查看并管理 hy2tund 服务器。</p>
   </div>
+  <div class="page-actions">
+    <a class="btn btn-quiet" href="{{.BasePath}}servers">管理服务器</a>
+    {{if .InventoryConfigured}}
+    <button class="btn btn-quiet" type="button" data-action="{{.BasePath}}api/servers/refresh-all" data-method="POST">刷新全部</button>
+    {{end}}
+  </div>
 </div>
 
+{{if not .InventoryConfigured}}
 <section class="panel placeholder-panel" aria-labelledby="inventory-heading">
   <div class="empty-state">
     <span class="empty-mark" aria-hidden="true"></span>
     <h2 id="inventory-heading">服务器清单</h2>
-    <p class="muted">服务器清单将在后续任务中接入。当前版本已启用单管理员登录、会话和 CSRF 保护的 Web 外壳。</p>
+    <p class="muted">服务器清单尚未接入。当前版本已启用单管理员登录、会话和 CSRF 保护的 Web 外壳。</p>
   </div>
 </section>
+{{else if not .Servers}}
+<section class="panel placeholder-panel" aria-labelledby="inventory-heading">
+  <div class="empty-state">
+    <span class="empty-mark" aria-hidden="true"></span>
+    <h2 id="inventory-heading">还没有配置服务器</h2>
+    <p class="muted">添加第一台 hy2tund 服务器后，这里会显示在线状态、版本、客户端与映射数量。</p>
+    <p class="empty-actions"><a class="btn btn-primary" href="{{.BasePath}}servers">添加服务器</a></p>
+  </div>
+</section>
+{{else}}
+<section class="panel" aria-labelledby="inventory-heading">
+  <div class="panel-section panel-heading">
+    <h2 id="inventory-heading">服务器清单</h2>
+    <p class="muted">状态会定期刷新，也可以手动刷新。</p>
+  </div>
+  <div class="table-wrap">
+    <table class="data-table server-table">
+      <thead>
+        <tr>
+          <th scope="col">名称</th>
+          <th scope="col">地址</th>
+          <th scope="col">状态</th>
+          <th scope="col">版本</th>
+          <th scope="col">模式</th>
+          <th scope="col" class="num">客户端</th>
+          <th scope="col" class="num">映射</th>
+          <th scope="col">最近刷新</th>
+          <th scope="col">最近错误</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Servers}}
+        <tr>
+          <td><a class="server-link" href="{{$.BasePath}}servers/{{.ID}}">{{.Name}}</a></td>
+          <td class="mono wrap">{{.BaseURL}}</td>
+          <td><span class="state-badge {{.StateClass}}">{{.StateLabel}}</span></td>
+          <td>{{if .Version}}{{.Version}}{{else}}—{{end}}</td>
+          <td>{{.ModeLabel}}</td>
+          <td class="num">{{.ClientCount}}</td>
+          <td class="num">{{.MappingCount}}</td>
+          <td>{{time .LastRefresh}}</td>
+          <td class="error-cell">{{if .HasLastError}}<span class="error-text" title="{{.LastError}}">{{.LastError}}</span>{{else}}—{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</section>
+{{end}}
 {{end}}
