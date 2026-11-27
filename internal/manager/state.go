@@ -255,7 +255,7 @@ func (s *Store) AddServer(record ServerRecord, password []byte) error {
 			if existing.ID == record.ID {
 				return fmt.Errorf("duplicate server id %q", record.ID)
 			}
-			if existing.Name == record.Name {
+			if strings.EqualFold(strings.TrimSpace(existing.Name), strings.TrimSpace(record.Name)) {
 				return fmt.Errorf("duplicate server name %q", record.Name)
 			}
 		}
@@ -286,7 +286,7 @@ func (s *Store) UpdateServer(record ServerRecord, password []byte) error {
 				continue
 			}
 			for j := range state.Servers {
-				if j != i && state.Servers[j].Name == record.Name {
+				if j != i && strings.EqualFold(strings.TrimSpace(state.Servers[j].Name), strings.TrimSpace(record.Name)) {
 					return fmt.Errorf("duplicate server name %q", record.Name)
 				}
 			}
@@ -380,10 +380,11 @@ func validateState(state State) error {
 		if strings.TrimSpace(server.Name) == "" {
 			return fmt.Errorf("servers[%d].name must not be empty", i)
 		}
-		if _, exists := names[server.Name]; exists {
+		nameKey := strings.ToLower(strings.TrimSpace(server.Name))
+		if _, exists := names[nameKey]; exists {
 			return fmt.Errorf("duplicate server name %q", server.Name)
 		}
-		names[server.Name] = struct{}{}
+		names[nameKey] = struct{}{}
 		if strings.TrimSpace(server.BaseURL) == "" {
 			return fmt.Errorf("servers[%d].base_url must not be empty", i)
 		}

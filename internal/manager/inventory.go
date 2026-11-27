@@ -98,7 +98,7 @@ type ServerView struct {
 	State            string    `json:"state"`
 	Version          string    `json:"version,omitempty"`
 	Mode             string    `json:"mode,omitempty"`
-	ClientCount      int       `json:"client_count"`
+	ClientCount      int       `json:"client_count"` // online clients from GET /api/overview
 	MappingCount     int       `json:"mapping_count"`
 	LastRefresh      time.Time `json:"last_refresh"`
 	LastError        string    `json:"last_error,omitempty"`
@@ -106,16 +106,20 @@ type ServerView struct {
 	UpdatedAt        time.Time `json:"updated_at"`
 }
 
-// serverRuntime is the in-memory cache and refresh serialization for one
-// inventory entry. view is protected by mu; the upstream client is serialized
-// internally by the adapter and is reused across refreshes to keep its cookie
-// jar. refreshMu guarantees at most one in-flight refresh per server.
+// serverRuntime is the in-memory cache for one inventory entry. view is
+// protected by mu. The cached upstream client is reused across refreshes to
+// keep its cookie jar, but its identity fields let a refresh detect a record
+// or credential change (including a direct Store update) and recreate it.
 type serverRuntime struct {
-	refreshMu sync.Mutex
-	mu        sync.Mutex
-	view      ServerView
-	client    *upstream.Client
-	removed   bool
+	mu   sync.Mutex
+	view ServerView
+	// client and its identity must be updated under mu.
+	client              *upstream.Client
+	clientBaseURL       string
+	clientUsername      string
+	clientTLSSkipVerify bool
+	clientPasswordEnc   string
+	removed             bool
 }
 
 // Inventory owns the configured server records and their display cache. The
@@ -129,6 +133,13 @@ type Inventory struct {
 
 	mu      sync.Mutex
 	entries map[string]*serverRuntime
+
+	// opLocks are keyed by server ID, not by serverRuntime: Update replaces the
+	// runtime pointer, and a refresh that snapshotted the old pointer must still
+	// serialize with that replacement. Every operation that mutates a server's
+	// record or replaces its runtime holds this lock, as does Refresh.
+	opMu    sync.Mutex
+	opLocks map[string]*sync.Mutex
 
 	refreshTimeout time.Duration
 	now            func() time.Time
@@ -150,6 +161,7 @@ func NewInventory(store *Store, audit *AuditLog, factory ClientFactory, log *slo
 		factory:        factory,
 		log:            log,
 		entries:        make(map[string]*serverRuntime),
+		opLocks:        make(map[string]*sync.Mutex),
 		refreshTimeout: serverRefreshTimeout,
 		now:            time.Now,
 	}
@@ -159,6 +171,24 @@ func NewInventory(store *Store, audit *AuditLog, factory ClientFactory, log *slo
 		inventory.mu.Unlock()
 	}
 	return inventory
+}
+
+// operationLock returns the per-server-ID mutex shared by Refresh, Add, Update,
+// and Remove. The map outlives individual serverRuntime pointers deliberately;
+// removing an ID never allows a new server with that ID, so retaining the lock
+// cannot deadlock a future entry.
+func (i *Inventory) operationLock(id string) *sync.Mutex {
+	i.opMu.Lock()
+	defer i.opMu.Unlock()
+	if i.opLocks == nil {
+		i.opLocks = make(map[string]*sync.Mutex)
+	}
+	lock := i.opLocks[id]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		i.opLocks[id] = lock
+	}
+	return lock
 }
 
 // List returns the fleet in display-name order. It reconciles the cache with
@@ -252,14 +282,20 @@ func (i *Inventory) Add(ctx context.Context, request AddServerRequest) (ServerVi
 	}
 	probeView.ID = record.ID
 
-	// Audit is appended before the local mutation: an audit outage blocks the
-	// inventory change. The second append is best effort if persistence then
-	// fails, so the trail never silently loses the attempt.
+	// Hold the per-ID operation lock from the durable store write through the
+	// initial refresh, so no refresh can observe a half-created runtime.
+	opLock := i.operationLock(record.ID)
+	opLock.Lock()
+	defer opLock.Unlock()
+
+	// The pending append is the fail-closed gate: if it cannot be durably
+	// written, the inventory record is not created. The final result is written
+	// only after the store commit succeeds.
 	if err := i.appendAudit(ctx, AuditEntry{
 		ServerID:   record.ID,
 		ServerName: record.Name,
 		Action:     "server.add",
-		Result:     "ok",
+		Result:     "pending",
 	}); err != nil {
 		return probeView, err
 	}
@@ -271,14 +307,20 @@ func (i *Inventory) Add(ctx context.Context, request AddServerRequest) (ServerVi
 			Result:     "error",
 			Message:    err.Error(),
 		})
-		return probeView, err
+		return probeView, validationFromStoreError(err)
 	}
+	i.appendAuditBestEffort(ctx, AuditEntry{
+		ServerID:   record.ID,
+		ServerName: record.Name,
+		Action:     "server.add",
+		Result:     "ok",
+	})
 
 	i.mu.Lock()
 	i.entries[id] = &serverRuntime{view: probeView}
 	i.mu.Unlock()
 
-	refreshed, refreshErr := i.Refresh(ctx, id)
+	refreshed, refreshErr := i.refreshLocked(ctx, id)
 	if refreshErr != nil {
 		i.log.Debug("initial server refresh failed", "server", id, "error", refreshErr)
 		return i.viewOr(probeView), nil
@@ -293,6 +335,13 @@ func (i *Inventory) Update(ctx context.Context, id string, request UpdateServerR
 	if i == nil || i.store == nil {
 		return fmt.Errorf("manager inventory is not configured")
 	}
+	// Serialize the entire read/test/replace sequence with Refresh and other
+	// updates for this server ID. The lock is keyed by ID so it survives the
+	// runtime replacement below.
+	opLock := i.operationLock(id)
+	opLock.Lock()
+	defer opLock.Unlock()
+
 	record, ok := i.serverRecord(id)
 	if !ok {
 		return fmt.Errorf("unknown server %q", id)
@@ -324,7 +373,7 @@ func (i *Inventory) Update(ctx context.Context, id string, request UpdateServerR
 		ServerID:   record.ID,
 		ServerName: updated.Name,
 		Action:     "server.update",
-		Result:     "ok",
+		Result:     "pending",
 	}); err != nil {
 		return err
 	}
@@ -341,8 +390,14 @@ func (i *Inventory) Update(ctx context.Context, id string, request UpdateServerR
 			Result:     "error",
 			Message:    err.Error(),
 		})
-		return err
+		return validationFromStoreError(err)
 	}
+	i.appendAuditBestEffort(ctx, AuditEntry{
+		ServerID:   record.ID,
+		ServerName: updated.Name,
+		Action:     "server.update",
+		Result:     "ok",
+	})
 
 	identityChanged := record.BaseURL != updated.BaseURL ||
 		record.UpstreamUsername != updated.UpstreamUsername ||
@@ -376,7 +431,7 @@ func (i *Inventory) Update(ctx context.Context, id string, request UpdateServerR
 	i.entries[id] = &serverRuntime{view: nextView}
 	i.mu.Unlock()
 
-	if _, err := i.Refresh(ctx, id); err != nil {
+	if _, err := i.refreshLocked(ctx, id); err != nil {
 		i.log.Debug("server refresh after update failed", "server", id, "error", err)
 	}
 	return nil
@@ -445,57 +500,93 @@ func (i *Inventory) Refresh(ctx context.Context, id string) (ServerView, error) 
 	if i == nil || i.store == nil {
 		return ServerView{}, fmt.Errorf("manager inventory is not configured")
 	}
-	record, ok := i.serverRecord(id)
+	opLock := i.operationLock(id)
+	opLock.Lock()
+	defer opLock.Unlock()
+	return i.refreshLocked(ctx, id)
+}
+
+// refreshLocked performs one refresh while the caller holds operationLock(id).
+// It re-reads both the inventory record and credential after the lock, so an
+// Update that replaced the runtime cannot leave this refresh using the previous
+// server's BaseURL/username. Cached-client identity is checked the same way so a
+// direct Store.UpdateServer or Store.SetServerPassword caller also recovers.
+func (i *Inventory) refreshLocked(ctx context.Context, id string) (ServerView, error) {
+	state := i.store.State()
+	record, ok := serverRecordFrom(state.Servers, id)
 	if !ok {
 		return ServerView{}, fmt.Errorf("unknown server %q", id)
 	}
 	i.mu.Lock()
-	i.syncLocked(i.store.State().Servers)
+	i.syncLocked(state.Servers)
 	entry := i.entries[id]
 	i.mu.Unlock()
 	if entry == nil {
 		return ServerView{}, fmt.Errorf("unknown server %q", id)
 	}
 
-	entry.refreshMu.Lock()
-	defer entry.refreshMu.Unlock()
-
 	entry.mu.Lock()
 	removed := entry.removed
 	client := entry.client
+	clientBaseURL := entry.clientBaseURL
+	clientUsername := entry.clientUsername
+	clientTLSSkipVerify := entry.clientTLSSkipVerify
+	clientPasswordEnc := entry.clientPasswordEnc
 	entry.mu.Unlock()
 	if removed {
 		return ServerView{}, fmt.Errorf("server %q was removed", id)
 	}
 
-	// Read the credential after obtaining the per-server lock so a completed
-	// update cannot race this refresh with the previous password.
 	password, err := i.store.ServerPassword(id)
 	if err != nil {
-		return i.refreshFailure(entry, false, err)
+		return i.refreshFailure(entry, err)
+	}
+
+	if client != nil &&
+		(clientBaseURL != record.BaseURL ||
+			clientUsername != record.UpstreamUsername ||
+			clientTLSSkipVerify != record.TLSSkipVerify ||
+			clientPasswordEnc != record.UpstreamPasswordEnc) {
+		client.CloseIdleConnections()
+		entry.mu.Lock()
+		if entry.client == client {
+			entry.client = nil
+			entry.clientBaseURL = ""
+			entry.clientUsername = ""
+			entry.clientTLSSkipVerify = false
+			entry.clientPasswordEnc = ""
+		}
+		entry.mu.Unlock()
+		client = nil
 	}
 
 	refreshCtx, cancel := context.WithTimeout(ctx, i.refreshTimeout)
 	defer cancel()
 
+	createdLocalClient := false
 	if client == nil {
 		client, err = i.factory(record, password)
 		if err != nil {
-			return i.refreshFailure(entry, false, err)
+			return i.refreshFailure(entry, err)
 		}
+		createdLocalClient = true
+	}
+	fail := func(err error) (ServerView, error) {
+		if createdLocalClient && client != nil {
+			// The new client was never cached; release its idle transport
+			// resources instead of waiting for GC.
+			client.CloseIdleConnections()
+		}
+		return i.refreshFailure(entry, err)
 	}
 
 	overview, err := client.Overview(refreshCtx)
 	if err != nil {
-		return i.refreshFailure(entry, false, err)
-	}
-	clients, err := client.Clients(refreshCtx)
-	if err != nil {
-		return i.refreshFailure(entry, false, err)
+		return fail(err)
 	}
 	summary, summaryErr := client.ConfigSummary(refreshCtx)
 	if summaryErr != nil && classifyError(summaryErr, true) != ServerStateUnsupported {
-		return i.refreshFailure(entry, false, summaryErr)
+		return fail(summaryErr)
 	}
 
 	entry.mu.Lock()
@@ -505,8 +596,12 @@ func (i *Inventory) Refresh(ctx context.Context, id string) (ServerView, error) 
 		return ServerView{}, fmt.Errorf("server %q was removed", id)
 	}
 	entry.client = client
+	entry.clientBaseURL = record.BaseURL
+	entry.clientUsername = record.UpstreamUsername
+	entry.clientTLSSkipVerify = record.TLSSkipVerify
+	entry.clientPasswordEnc = record.UpstreamPasswordEnc
 	entry.view.State = ServerStateOnline
-	entry.view.ClientCount = len(clients)
+	entry.view.ClientCount = overview.OnlineClients
 	entry.view.MappingCount = overview.ActiveMappings
 	entry.view.LastRefresh = i.now().UTC()
 	entry.view.LastError = ""
@@ -538,6 +633,10 @@ func (i *Inventory) RemoveWithContext(ctx context.Context, id string) error {
 	if i == nil || i.store == nil {
 		return fmt.Errorf("manager inventory is not configured")
 	}
+	opLock := i.operationLock(id)
+	opLock.Lock()
+	defer opLock.Unlock()
+
 	record, ok := i.serverRecord(id)
 	if !ok {
 		return fmt.Errorf("unknown server %q", id)
@@ -546,7 +645,7 @@ func (i *Inventory) RemoveWithContext(ctx context.Context, id string) error {
 		ServerID:   record.ID,
 		ServerName: record.Name,
 		Action:     "server.remove",
-		Result:     "ok",
+		Result:     "pending",
 	}); err != nil {
 		return err
 	}
@@ -560,6 +659,12 @@ func (i *Inventory) RemoveWithContext(ctx context.Context, id string) error {
 		})
 		return err
 	}
+	i.appendAuditBestEffort(ctx, AuditEntry{
+		ServerID:   record.ID,
+		ServerName: record.Name,
+		Action:     "server.remove",
+		Result:     "ok",
+	})
 
 	i.mu.Lock()
 	entry := i.entries[id]
@@ -570,6 +675,10 @@ func (i *Inventory) RemoveWithContext(ctx context.Context, id string) error {
 		entry.removed = true
 		client := entry.client
 		entry.client = nil
+		entry.clientBaseURL = ""
+		entry.clientUsername = ""
+		entry.clientTLSSkipVerify = false
+		entry.clientPasswordEnc = ""
 		entry.mu.Unlock()
 		if client != nil {
 			client.CloseIdleConnections()
@@ -604,8 +713,8 @@ func (i *Inventory) probe(ctx context.Context, record ServerRecord, password []b
 	return view, nil
 }
 
-func (i *Inventory) refreshFailure(entry *serverRuntime, optional bool, err error) (ServerView, error) {
-	state := classifyError(err, optional)
+func (i *Inventory) refreshFailure(entry *serverRuntime, err error) (ServerView, error) {
+	state := classifyError(err, false)
 	entry.mu.Lock()
 	entry.view.State = state
 	entry.view.LastError = err.Error()
@@ -614,6 +723,10 @@ func (i *Inventory) refreshFailure(entry *serverRuntime, optional bool, err erro
 			entry.client.CloseIdleConnections()
 		}
 		entry.client = nil
+		entry.clientBaseURL = ""
+		entry.clientUsername = ""
+		entry.clientTLSSkipVerify = false
+		entry.clientPasswordEnc = ""
 	}
 	view := entry.view
 	entry.mu.Unlock()
@@ -676,12 +789,28 @@ func (i *Inventory) serverRecord(id string) (ServerRecord, bool) {
 	if i == nil || i.store == nil {
 		return ServerRecord{}, false
 	}
-	for _, record := range i.store.State().Servers {
+	return serverRecordFrom(i.store.State().Servers, id)
+}
+
+func serverRecordFrom(records []ServerRecord, id string) (ServerRecord, bool) {
+	for _, record := range records {
 		if record.ID == id {
 			return record, true
 		}
 	}
 	return ServerRecord{}, false
+}
+
+// validationFromStoreError maps the store's atomic duplicate-name rejection to
+// the same operator-facing validation class as the pre-flight name check.
+func validationFromStoreError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "duplicate server name") {
+		return &ValidationError{Message: err.Error()}
+	}
+	return err
 }
 
 func (i *Inventory) syncLocked(records []ServerRecord) {
@@ -696,7 +825,31 @@ func (i *Inventory) syncLocked(records []ServerRecord) {
 			i.entries[record.ID] = &serverRuntime{view: viewFromRecord(record)}
 			continue
 		}
+
 		entry.mu.Lock()
+		identityChanged := entry.view.BaseURL != record.BaseURL ||
+			entry.view.UpstreamUsername != record.UpstreamUsername ||
+			entry.view.TLSSkipVerify != record.TLSSkipVerify
+		passwordChanged := entry.client != nil && entry.clientPasswordEnc != record.UpstreamPasswordEnc
+		var staleClient *upstream.Client
+		if identityChanged {
+			// Cached version/counts belong to the previous upstream identity.
+			entry.view.Version = ""
+			entry.view.Mode = ""
+			entry.view.ClientCount = 0
+			entry.view.MappingCount = 0
+			entry.view.LastRefresh = time.Time{}
+			entry.view.LastError = ""
+			entry.view.State = ServerStateUnknown
+		}
+		if identityChanged || passwordChanged {
+			staleClient = entry.client
+			entry.client = nil
+			entry.clientBaseURL = ""
+			entry.clientUsername = ""
+			entry.clientTLSSkipVerify = false
+			entry.clientPasswordEnc = ""
+		}
 		entry.view.ID = record.ID
 		entry.view.Name = record.Name
 		entry.view.BaseURL = record.BaseURL
@@ -705,6 +858,10 @@ func (i *Inventory) syncLocked(records []ServerRecord) {
 		entry.view.CreatedAt = record.CreatedAt
 		entry.view.UpdatedAt = record.UpdatedAt
 		entry.mu.Unlock()
+
+		if staleClient != nil {
+			staleClient.CloseIdleConnections()
+		}
 	}
 	for id, entry := range i.entries {
 		if _, ok := seen[id]; ok {
@@ -714,6 +871,10 @@ func (i *Inventory) syncLocked(records []ServerRecord) {
 		entry.removed = true
 		client := entry.client
 		entry.client = nil
+		entry.clientBaseURL = ""
+		entry.clientUsername = ""
+		entry.clientTLSSkipVerify = false
+		entry.clientPasswordEnc = ""
 		entry.mu.Unlock()
 		if client != nil {
 			client.CloseIdleConnections()

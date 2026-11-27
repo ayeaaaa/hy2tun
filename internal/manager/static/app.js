@@ -247,6 +247,7 @@
         window.location.reload();
       } catch (_error) {
         showNotice("无法连接到管理器，请检查网络。", "error");
+      } finally {
         button.disabled = false;
       }
     });

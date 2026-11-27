@@ -29,17 +29,23 @@ type fakeUpstream struct {
 	mu                  sync.Mutex
 	requestCount        int
 	loginCount          int
+	unprefixedRequests  int
 	overviewInFlight    int
 	overviewMaxInFlight int
 	overviewDelay       time.Duration
 	rejectAll           bool
+	configSummaryStatus int
+	configVersion       string
 	acceptedPasswords   map[string]bool
 }
+
+const fakeUpstreamBasePath = "/hy2tund"
 
 func newFakeUpstream(t *testing.T) *fakeUpstream {
 	t.Helper()
 	fake := &fakeUpstream{
 		acceptedPasswords: map[string]bool{"upstream-pw": true, "new-pw": true},
+		configVersion:     "v1.7.4",
 	}
 	fake.server = httptest.NewServer(http.HandlerFunc(fake.handle))
 	t.Cleanup(fake.close)
@@ -48,7 +54,7 @@ func newFakeUpstream(t *testing.T) *fakeUpstream {
 
 // BaseURL includes a path prefix so the inventory must rely on the upstream
 // adapter's existing URL joining instead of assembling paths itself.
-func (f *fakeUpstream) BaseURL() string { return f.server.URL + "/hy2tund" }
+func (f *fakeUpstream) BaseURL() string { return f.server.URL + fakeUpstreamBasePath }
 
 func (f *fakeUpstream) close() { f.closeOnce.Do(f.server.Close) }
 
@@ -64,6 +70,18 @@ func (f *fakeUpstream) setOverviewDelay(delay time.Duration) {
 	f.mu.Unlock()
 }
 
+func (f *fakeUpstream) setConfigSummaryStatus(status int) {
+	f.mu.Lock()
+	f.configSummaryStatus = status
+	f.mu.Unlock()
+}
+
+func (f *fakeUpstream) setConfigVersion(version string) {
+	f.mu.Lock()
+	f.configVersion = version
+	f.mu.Unlock()
+}
+
 func (f *fakeUpstream) requests() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -74,6 +92,12 @@ func (f *fakeUpstream) logins() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.loginCount
+}
+
+func (f *fakeUpstream) unprefixed() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.unprefixedRequests
 }
 
 func (f *fakeUpstream) maxOverviewInFlight() int {
@@ -87,12 +111,19 @@ func (f *fakeUpstream) handle(w http.ResponseWriter, r *http.Request) {
 	f.requestCount++
 	rejectAll := f.rejectAll
 	delay := f.overviewDelay
+	configStatus := f.configSummaryStatus
+	configVersion := f.configVersion
 	f.mu.Unlock()
 
 	path := r.URL.Path
-	if strings.HasPrefix(path, "/hy2tund") {
-		path = strings.TrimPrefix(path, "/hy2tund")
+	if !strings.HasPrefix(path, fakeUpstreamBasePath+"/") {
+		f.mu.Lock()
+		f.unprefixedRequests++
+		f.mu.Unlock()
+		http.NotFound(w, r)
+		return
 	}
+	path = strings.TrimPrefix(path, fakeUpstreamBasePath)
 	if !strings.HasPrefix(path, "/api/") {
 		http.NotFound(w, r)
 		return
@@ -174,8 +205,12 @@ func (f *fakeUpstream) handle(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 	case "/api/config/summary":
+		if configStatus != 0 && configStatus != http.StatusOK {
+			writeTestJSON(w, configStatus, map[string]any{"error": http.StatusText(configStatus), "code": "unsupported"})
+			return
+		}
 		writeTestJSON(w, http.StatusOK, map[string]any{
-			"version": "v1.7.4",
+			"version": configVersion,
 			"mode":    "hy2+tcp",
 			"listen":  ":443",
 		})
@@ -258,6 +293,7 @@ func TestInventoryAddTestsLoginEncryptsPasswordAndRefreshes(t *testing.T) {
 	require.False(t, view.LastRefresh.IsZero())
 	require.Empty(t, view.LastError)
 	require.GreaterOrEqual(t, upstream.logins(), 1)
+	require.Zero(t, upstream.unprefixed(), "all upstream requests must keep the configured /hy2tund prefix")
 
 	raw := storeRaw(t, inv)
 	require.NotContains(t, raw, "upstream-pw")
@@ -268,8 +304,11 @@ func TestInventoryAddTestsLoginEncryptsPasswordAndRefreshes(t *testing.T) {
 	require.Equal(t, "upstream-pw", string(password))
 
 	entries := auditEntries(t, audit)
-	require.NotEmpty(t, entries)
+	require.GreaterOrEqual(t, len(entries), 2)
+	require.Equal(t, "server.add", entries[len(entries)-2].Action)
+	require.Equal(t, "pending", entries[len(entries)-2].Result)
 	require.Equal(t, "server.add", entries[len(entries)-1].Action)
+	require.Equal(t, "ok", entries[len(entries)-1].Result)
 	require.NotContains(t, readAuditRaw(t, audit), "upstream-pw")
 }
 
@@ -397,7 +436,9 @@ func TestInventoryRemoveIsLocalAndAudited(t *testing.T) {
 	require.Equal(t, before, upstream.requests(), "removing inventory must not call the upstream server")
 
 	entries := auditEntries(t, audit)
-	require.NotEmpty(t, entries)
+	require.GreaterOrEqual(t, len(entries), 2)
+	require.Equal(t, "server.remove", entries[len(entries)-2].Action)
+	require.Equal(t, "pending", entries[len(entries)-2].Result)
 	last := entries[len(entries)-1]
 	require.Equal(t, "server.remove", last.Action)
 	require.Equal(t, view.ID, last.ServerID)
@@ -444,23 +485,138 @@ func TestInventoryRefreshClassifiesErrorsAndKeepsInventory(t *testing.T) {
 	require.Equal(t, view.ID, store.State().Servers[0].ID)
 }
 
-func TestInventoryRefreshSerializesPerServer(t *testing.T) {
+func TestInventoryRefreshBlocksOnPerServerIDLock(t *testing.T) {
 	upstream := newFakeUpstream(t)
 	inv, _, _ := testInventory(t)
 	view, err := inv.Add(context.Background(), addServerRequest("us", upstream.BaseURL()))
 	require.NoError(t, err)
-	upstream.setOverviewDelay(15 * time.Millisecond)
 
-	var wg sync.WaitGroup
-	for range 4 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, _ = inv.Refresh(context.Background(), view.ID)
-		}()
+	// Holding the server-ID lock must prevent Refresh from reaching the
+	// upstream API. This fails if the shared inventory lock is removed, even
+	// though upstream.Client itself also happens to serialize calls.
+	lock := inv.operationLock(view.ID)
+	lock.Lock()
+	before := upstream.requests()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = inv.Refresh(context.Background(), view.ID)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	require.Equal(t, before, upstream.requests(), "Refresh must wait for the per-server-ID lock")
+	lock.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Refresh did not resume after the per-server-ID lock was released")
 	}
-	wg.Wait()
-	require.Equal(t, 1, upstream.maxOverviewInFlight())
+	require.Greater(t, upstream.requests(), before)
+}
+
+func TestInventoryUpdateWaitsForPerServerIDLock(t *testing.T) {
+	upstream := newFakeUpstream(t)
+	inv, store, _ := testInventory(t)
+	view, err := inv.Add(context.Background(), addServerRequest("us", upstream.BaseURL()))
+	require.NoError(t, err)
+
+	lock := inv.operationLock(view.ID)
+	lock.Lock()
+	before := upstream.requests()
+	done := make(chan error, 1)
+	go func() {
+		done <- inv.Update(context.Background(), view.ID, UpdateServerRequest{
+			Name: "us2", BaseURL: upstream.BaseURL(), Username: "admin",
+		})
+	}()
+	time.Sleep(100 * time.Millisecond)
+	require.Equal(t, before, upstream.requests(), "Update must wait for the same per-server-ID lock as Refresh")
+	require.Equal(t, "us", findServerRecord(t, store, "us").Name)
+	lock.Unlock()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Update did not resume after the per-server-ID lock was released")
+	}
+	require.Equal(t, "us2", findServerRecord(t, store, "us2").Name)
+}
+
+func TestInventoryRefreshRecreatesClientAfterDirectStoreIdentityChange(t *testing.T) {
+	first := newFakeUpstream(t)
+	inv, store, _ := testInventory(t)
+	view, err := inv.Add(context.Background(), addServerRequest("us", first.BaseURL()))
+	require.NoError(t, err)
+	require.Equal(t, "v1.7.4", view.Version)
+
+	second := newFakeUpstream(t)
+	second.setConfigVersion("v1.8.0")
+	record := findServerRecord(t, store, "us")
+	record.BaseURL = second.BaseURL()
+	require.NoError(t, store.UpdateServer(record, nil))
+
+	refreshed, err := inv.Refresh(context.Background(), view.ID)
+	require.NoError(t, err)
+	require.Equal(t, second.BaseURL(), refreshed.BaseURL)
+	require.Equal(t, "v1.8.0", refreshed.Version, "the old cached client must not be reused for the new base URL")
+	require.Equal(t, "online", refreshed.State)
+}
+
+func TestInventoryRefreshClearsCachedClientAfterDirectPasswordChange(t *testing.T) {
+	upstream := newFakeUpstream(t)
+	inv, store, _ := testInventory(t)
+	view, err := inv.Add(context.Background(), addServerRequest("us", upstream.BaseURL()))
+	require.NoError(t, err)
+
+	require.NoError(t, store.SetServerPassword(view.ID, []byte("new-pw")))
+	_, ok := inv.Get(view.ID)
+	require.True(t, ok)
+	entry := inv.entries[view.ID]
+	require.NotNil(t, entry)
+	entry.mu.Lock()
+	cached := entry.client
+	entry.mu.Unlock()
+	require.Nil(t, cached, "a direct Store.SetServerPassword must invalidate the cached client")
+
+	refreshed, err := inv.Refresh(context.Background(), view.ID)
+	require.NoError(t, err)
+	require.Equal(t, "online", refreshed.State)
+}
+
+func TestInventoryRefreshMarksUnsupportedConfigSummary(t *testing.T) {
+	upstream := newFakeUpstream(t)
+	inv, store, _ := testInventory(t)
+	view, err := inv.Add(context.Background(), addServerRequest("us", upstream.BaseURL()))
+	require.NoError(t, err)
+	require.Equal(t, "v1.7.4", view.Version)
+
+	upstream.setConfigSummaryStatus(http.StatusNotImplemented)
+	refreshed, err := inv.Refresh(context.Background(), view.ID)
+	require.Error(t, err)
+	var connection *ServerConnectionError
+	require.ErrorAs(t, err, &connection)
+	require.Equal(t, "unsupported", connection.State)
+	require.Equal(t, "unsupported", refreshed.State)
+	require.Equal(t, "v1.7.4", refreshed.Version, "unsupported config summary must keep prior display data")
+	require.NotEmpty(t, refreshed.LastError)
+	require.Len(t, store.State().Servers, 1)
+}
+
+func TestStoreRejectsCaseInsensitiveDuplicateServerNames(t *testing.T) {
+	store := testStore(t)
+	first := ServerRecord{
+		ID: "srv_case_1", Name: "us", BaseURL: "https://us.example/hy2tund",
+		UpstreamUsername: "admin",
+	}
+	require.NoError(t, store.AddServer(first, []byte("pw")))
+	second := ServerRecord{
+		ID: "srv_case_2", Name: "US", BaseURL: "https://us2.example/hy2tund",
+		UpstreamUsername: "admin",
+	}
+	err := store.AddServer(second, []byte("pw"))
+	require.ErrorContains(t, err, "duplicate server name")
+	require.Len(t, store.State().Servers, 1)
 }
 
 func TestInventoryRefreshAllIsBounded(t *testing.T) {
