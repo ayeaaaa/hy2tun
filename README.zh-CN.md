@@ -428,6 +428,29 @@ sudo ./scripts/install.sh client
 脚本会安装二进制和 systemd unit，创建 `/etc/hy2tun` 与 `/var/lib/hy2tun`，
 并且只在配置不存在时复制示例配置。启动服务前请先编辑配置。
 
+## hy2tun-manager（可选多服务端控制台）
+
+[![manager release](https://img.shields.io/github/v/release/ayeaaaa/hy2tun?filter=hy2tun-manager-*&label=hy2tun-manager)](https://github.com/ayeaaaa/hy2tun/releases/tag/hy2tun-manager-v0.1.0)
+
+`hy2tun-manager` 是一个独立、可选的多服务端控制台，用于管理已有的
+`hy2tund` 服务端。每台服务端只需接入一次（反向代理后的 Web 地址和管理员
+凭据），之后就可以在一个页面里管理整个集群：
+
+- 服务端清单、状态、版本、模式、客户端数和映射数
+- 客户端列表，以及映射新增、修改、删除、启用/禁用
+- 映射的 `public` / `local` 暴露范围
+- 服务端传输模式、端口策略、Web 管理员和 trust-proxy
+- 服务端凭据轮换/撤销，以及每台在线客户端的同步结果
+
+manager 只调用服务端现有 Web API，不改变 `hy2tund`/`hy2tun` 数据面；客户端
+不会连接 manager。第一版明确不修改客户端本机配置，也不做客户端到服务端的
+连接编排，这些属于后续功能。
+
+manager 使用独立的 Linux amd64/arm64 发布包。安装、反向代理、首次登录、
+重置管理员和安全说明见
+[`docs/hy2tun-manager.zh-CN.md`](docs/hy2tun-manager.zh-CN.md)。由于它持有
+所有上游服务端的管理员凭据，应把它视为高敏感的单管理员服务。
+
 ## 配置检查
 
 不绑定端口、不写状态文件，只校验配置：

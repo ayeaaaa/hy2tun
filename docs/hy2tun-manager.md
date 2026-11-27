@@ -1,5 +1,7 @@
 # hy2tun-manager operator guide
 
+[English](hy2tun-manager.md) | [简体中文](hy2tun-manager.zh-CN.md)
+
 `hy2tun-manager` is an optional, separate control plane for a fleet of existing
 `hy2tund` servers. It aggregates server status and lets one administrator manage
 clients, mappings, server settings, and credentials through one Web UI. It does
@@ -19,7 +21,8 @@ This archive contains:
 - `hy2tun-manager` — the static manager binary,
 - `manager.example.yaml` — an example config,
 - `hy2tun-manager.service` — an example systemd unit,
-- `README.md` — this guide.
+- `README.md` — this guide (English).
+- `README.zh-CN.md` — the Simplified Chinese guide.
 
 ## Requirements
 
@@ -268,8 +271,9 @@ VERSION=1.0.0 ./scripts/release-manager.sh
 `version.Date` supplied through `-ldflags`. Its two archives are named
 `hy2tun-manager_<version>_linux_amd64.tar.gz` and
 `hy2tun-manager_<version>_linux_arm64.tar.gz`. Each archive contains exactly
-`hy2tun-manager`, `manager.example.yaml`, `hy2tun-manager.service`, and
-`README.md`; it never includes `hy2tund` or `hy2tun`. `--dry-run` prints the
+`hy2tun-manager`, `manager.example.yaml`, `hy2tun-manager.service`,
+`README.md`, and `README.zh-CN.md`; it never includes `hy2tund` or `hy2tun`.
+`--dry-run` prints the
 planned archive paths without building. `make build` and `scripts/release.sh`
 continue to produce only the existing `hy2tund`/`hy2tun` artifacts.
 

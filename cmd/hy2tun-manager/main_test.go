@@ -298,6 +298,7 @@ func TestReleaseManagerArchives(t *testing.T) {
 		sort.Strings(names)
 		require.Equal(t, []string{
 			"README.md",
+			"README.zh-CN.md",
 			"hy2tun-manager",
 			"hy2tun-manager.service",
 			"manager.example.yaml",

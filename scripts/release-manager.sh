@@ -55,7 +55,7 @@ for tool in tar gzip; do
 		exit 1
 	}
 done
-for source in examples/manager.yaml scripts/systemd/hy2tun-manager.service docs/hy2tun-manager.md; do
+for source in examples/manager.yaml scripts/systemd/hy2tun-manager.service docs/hy2tun-manager.md docs/hy2tun-manager.zh-CN.md; do
 	[ -f "$source" ] || {
 		echo "release-manager: missing $source" >&2
 		exit 1
@@ -86,8 +86,9 @@ package() {
 	cp examples/manager.yaml "$pkg/manager.example.yaml"
 	cp scripts/systemd/hy2tun-manager.service "$pkg/hy2tun-manager.service"
 	cp docs/hy2tun-manager.md "$pkg/README.md"
+	cp docs/hy2tun-manager.zh-CN.md "$pkg/README.zh-CN.md"
 	chmod 0755 "$pkg/hy2tun-manager"
-	chmod 0644 "$pkg/manager.example.yaml" "$pkg/hy2tun-manager.service" "$pkg/README.md"
+	chmod 0644 "$pkg/manager.example.yaml" "$pkg/hy2tun-manager.service" "$pkg/README.md" "$pkg/README.zh-CN.md"
 
 	name="hy2tun-manager_${VERSION}_${os}_${arch}"
 	archive="$DIST/$name.tar.gz"

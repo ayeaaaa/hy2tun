@@ -505,6 +505,31 @@ The script installs the binary and systemd unit, creates `/etc/hy2tun` and
 `/var/lib/hy2tun`, and copies the example config only when it does not already
 exist. Edit the config before starting the service.
 
+## hy2tun-manager (optional multi-server control plane)
+
+[![manager release](https://img.shields.io/github/v/release/ayeaaaa/hy2tun?filter=hy2tun-manager-*&label=hy2tun-manager)](https://github.com/ayeaaaa/hy2tun/releases/tag/hy2tun-manager-v0.1.0)
+
+`hy2tun-manager` is a separate, optional control plane for a fleet of existing
+`hy2tund` servers. Add each server's reverse-proxied Web URL and administrator
+credentials once, then manage the fleet from one page:
+
+- server inventory, status, version, mode, client and mapping counts
+- client list and mapping add/edit/delete/enable/disable
+- `public`/`local` mapping exposure
+- server transport mode, port policy, Web administrator and trust-proxy
+- server credential rotation and revoke, with per-client sync results
+
+The manager only calls the existing server Web APIs. It does not change the
+`hy2tund`/`hy2tun` data plane, and clients never connect to it. It intentionally
+does not edit client-local configuration or schedule client-to-server
+connections; those remain separate follow-up work.
+
+Manager releases are independent Linux amd64/arm64 archives. See
+[`docs/hy2tun-manager.md`](docs/hy2tun-manager.md) for installation,
+reverse-proxy, first-login, reset-admin, and security details. The manager is a
+single-administrator, high-sensitivity service because it holds the upstream
+server administrator credentials.
+
 ## Configuration check
 
 Validate a configuration without binding sockets or writing state:
