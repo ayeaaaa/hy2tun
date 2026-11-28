@@ -38,14 +38,16 @@ type WebServer struct {
 	login           *LoginHandler
 	passwordLimiter *shared.LoginLimiter
 
-	loginTemplate    *template.Template
-	accountTemplate  *template.Template
-	overviewTemplate *template.Template
-	serversTemplate  *template.Template
-	serverTemplate   *template.Template
-	clientsTemplate  *template.Template
-	clientTemplate   *template.Template
-	settingsTemplate *template.Template
+	loginTemplate        *template.Template
+	accountTemplate      *template.Template
+	overviewTemplate     *template.Template
+	serversTemplate      *template.Template
+	serverTemplate       *template.Template
+	clientsTemplate      *template.Template
+	clientTemplate       *template.Template
+	fleetClientsTemplate *template.Template
+	fleetClientTemplate  *template.Template
+	settingsTemplate     *template.Template
 
 	handler http.Handler
 }
@@ -129,6 +131,14 @@ func NewWebServer(store *Store, audit *AuditLog, cfg Config, log *slog.Logger) (
 	if err != nil {
 		return nil, fmt.Errorf("manager: parse client template: %w", err)
 	}
+	fleetClientsTemplate, err := shared.ParsePage(managerAssets, "templates/layout.html", "templates/fleet_clients.html")
+	if err != nil {
+		return nil, fmt.Errorf("manager: parse fleet clients template: %w", err)
+	}
+	fleetClientTemplate, err := shared.ParsePage(managerAssets, "templates/layout.html", "templates/fleet_client.html")
+	if err != nil {
+		return nil, fmt.Errorf("manager: parse fleet client template: %w", err)
+	}
 	settingsTemplate, err := shared.ParsePage(managerAssets, "templates/layout.html", "templates/server_settings.html")
 	if err != nil {
 		return nil, fmt.Errorf("manager: parse server settings template: %w", err)
@@ -139,23 +149,25 @@ func NewWebServer(store *Store, audit *AuditLog, cfg Config, log *slog.Logger) (
 	}
 
 	server := &WebServer{
-		store:            store,
-		audit:            audit,
-		cfg:              cfg,
-		log:              log,
-		base:             basePath,
-		static:           staticFS,
-		sessions:         sessions,
-		login:            login,
-		passwordLimiter:  shared.NewLoginLimiter(5, time.Minute, time.Minute),
-		loginTemplate:    loginTemplate,
-		accountTemplate:  accountTemplate,
-		overviewTemplate: overviewTemplate,
-		serversTemplate:  serversTemplate,
-		serverTemplate:   serverTemplate,
-		clientsTemplate:  clientsTemplate,
-		clientTemplate:   clientTemplate,
-		settingsTemplate: settingsTemplate,
+		store:                store,
+		audit:                audit,
+		cfg:                  cfg,
+		log:                  log,
+		base:                 basePath,
+		static:               staticFS,
+		sessions:             sessions,
+		login:                login,
+		passwordLimiter:      shared.NewLoginLimiter(5, time.Minute, time.Minute),
+		loginTemplate:        loginTemplate,
+		accountTemplate:      accountTemplate,
+		overviewTemplate:     overviewTemplate,
+		serversTemplate:      serversTemplate,
+		serverTemplate:       serverTemplate,
+		clientsTemplate:      clientsTemplate,
+		clientTemplate:       clientTemplate,
+		fleetClientsTemplate: fleetClientsTemplate,
+		fleetClientTemplate:  fleetClientTemplate,
+		settingsTemplate:     settingsTemplate,
 	}
 	server.handler = server.routes()
 	return server, nil
@@ -186,6 +198,11 @@ func (s *WebServer) routes() http.Handler {
 	mux.Handle("GET /{$}", s.requireAuth(http.HandlerFunc(s.handleOverviewPage)))
 	mux.Handle("GET /account", s.requireAuth(http.HandlerFunc(s.handleAccountPage)))
 	mux.Handle("PUT /api/account/password", s.mutation(http.HandlerFunc(s.handleChangePassword)))
+
+	// Client-centric fleet view. The server inventory remains the management
+	// backend; this page is the primary post-login view.
+	mux.Handle("GET /clients", s.requireAuth(http.HandlerFunc(s.handleFleetClientsPage)))
+	mux.Handle("GET /clients/{clientID}", s.requireAuth(http.HandlerFunc(s.handleFleetClientPage)))
 
 	// Inventory pages and JSON APIs. All mutations keep the Task 2 auth and
 	// CSRF gates; destructive removal additionally requires the server name.
@@ -281,7 +298,7 @@ func (s *WebServer) withSecurityHeaders(next http.Handler) http.Handler {
 func (s *WebServer) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if s.sessions.Valid(r) {
-		http.Redirect(w, r, s.base, http.StatusSeeOther)
+		http.Redirect(w, r, s.base+"clients", http.StatusSeeOther)
 		return
 	}
 	s.render(w, http.StatusOK, s.loginTemplate, loginPageData{pageBase: s.page("登录", "")})

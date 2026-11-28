@@ -97,7 +97,7 @@
           body: new URLSearchParams(new FormData(loginForm)),
         });
         if (response.status === 204) {
-          window.location.assign(basePath);
+          window.location.assign(`${basePath}clients`);
           return;
         }
         if (errorBox) {

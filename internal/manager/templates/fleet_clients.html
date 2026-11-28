@@ -1,0 +1,84 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">客户机视图</p>
+    <h1>客户端</h1>
+    <p class="muted">按客户端 ID 聚合所有服务端；同一 ID 的多条连接会合并到一台客户机。</p>
+  </div>
+  <div class="page-actions">
+    <a class="btn btn-quiet" href="{{.BasePath}}servers">管理服务器</a>
+  </div>
+</div>
+
+{{if not .InventoryConfigured}}
+<section class="panel placeholder-panel">
+  <div class="empty-state">
+    <span class="empty-mark" aria-hidden="true"></span>
+    <h2>还没有接入服务端</h2>
+    <p class="muted">先添加服务端，manager 才能读取并聚合客户端。</p>
+    <p class="empty-actions"><a class="btn btn-primary" href="{{.BasePath}}servers">添加服务器</a></p>
+  </div>
+</section>
+{{else}}
+{{if .Errors}}
+<div class="alert" role="alert">
+  <strong>部分服务端读取失败：</strong>
+  <ul>
+    {{range .Errors}}<li>{{.ServerName}}：{{.Message}}</li>{{end}}
+  </ul>
+</div>
+{{end}}
+
+{{if .Clients}}
+<section class="panel" aria-labelledby="fleet-clients-heading">
+  <div class="panel-section panel-heading">
+    <h2 id="fleet-clients-heading">全部客户机</h2>
+    <p class="muted">共 {{len .Clients}} 台客户机；客户端 ID 是跨服务端的聚合主键。</p>
+  </div>
+  <div class="table-wrap">
+    <table class="data-table client-table">
+      <thead>
+        <tr>
+          <th scope="col">客户机</th>
+          <th scope="col">状态</th>
+          <th scope="col">连接的服务端</th>
+          <th scope="col" class="num">映射</th>
+          <th scope="col">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Clients}}
+        <tr>
+          <td>
+            <a class="server-link" href="{{$.BasePath}}clients/{{.PathID}}">{{.DisplayName}}</a>
+            <div class="muted mono wrap">{{if .ID}}{{.ID}}{{else}}无 client.id{{end}}</div>
+            {{if .Conflict}}<span class="state-badge warn">同名冲突</span>{{end}}
+          </td>
+          <td><span class="state-badge {{.StateClass}}">{{.StateLabel}}</span></td>
+          <td>
+            {{range .Servers}}
+            <div><a class="server-link" href="{{$.BasePath}}servers/{{.ClientPath}}">{{.ServerName}}</a>
+              <span class="muted mono">{{.BaseURL}}</span>
+              <span class="state-badge {{.StateClass}}">{{.StateLabel}}</span>
+            </div>
+            {{end}}
+          </td>
+          <td class="num">{{.MappingCount}}</td>
+          <td><a class="btn btn-quiet btn-sm" href="{{$.BasePath}}clients/{{.PathID}}">查看详情</a></td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</section>
+{{else if not .Errors}}
+<section class="panel placeholder-panel">
+  <div class="empty-state">
+    <span class="empty-mark" aria-hidden="true"></span>
+    <h2>还没有客户端</h2>
+    <p class="muted">服务端尚未报告已注册的客户端。</p>
+  </div>
+</section>
+{{end}}
+{{end}}
+{{end}}

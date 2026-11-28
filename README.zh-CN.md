@@ -430,12 +430,13 @@ sudo ./scripts/install.sh client
 
 ## hy2tun-manager（可选多服务端控制台）
 
-[![manager release](https://img.shields.io/github/v/release/ayeaaaa/hy2tun?filter=hy2tun-manager-*&label=hy2tun-manager)](https://github.com/ayeaaaa/hy2tun/releases/tag/hy2tun-manager-v0.1.3)
+[![manager release](https://img.shields.io/github/v/release/ayeaaaa/hy2tun?filter=hy2tun-manager-*&label=hy2tun-manager)](https://github.com/ayeaaaa/hy2tun/releases/tag/hy2tun-manager-v0.1.4)
 
 `hy2tun-manager` 是一个独立、可选的多服务端控制台，用于管理已有的
 `hy2tund` 服务端。每台服务端只需接入一次（反向代理后的 Web 地址和管理员
 凭据），之后就可以在一个页面里管理整个集群：
 
+- 以 `client.id` 聚合的客户机视角，展示每台客户机连接的上游服务端
 - 服务端清单、状态、版本、模式、客户端数和映射数
 - 客户端列表，以及映射新增、修改、删除、启用/禁用
 - 映射的 `public` / `local` 暴露范围

@@ -131,6 +131,24 @@ a {
   letter-spacing: -0.02em;
 }
 
+.topbar-nav {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  margin-right: auto;
+  margin-left: 28px;
+  font-size: 13px;
+}
+
+.topbar-nav a {
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.topbar-nav a:hover {
+  color: var(--accent);
+}
+
 .brand-sub {
   color: var(--text-muted);
   font-size: 0.82rem;

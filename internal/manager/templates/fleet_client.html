@@ -1,0 +1,66 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <p class="eyebrow"><a class="back-link" href="{{.BasePath}}clients">客户端</a></p>
+    <h1>{{if .Missing}}客户端不存在{{else}}{{.Client.DisplayName}}{{end}}</h1>
+    {{if not .Missing}}<p class="muted mono wrap">{{.Client.ID}}</p>{{end}}
+  </div>
+  <div class="page-actions">
+    {{if not .Missing}}<span class="state-badge {{.Client.StateClass}}">{{.Client.StateLabel}}</span>{{end}}
+    <a class="btn btn-quiet" href="{{.BasePath}}clients">返回客户端列表</a>
+  </div>
+</div>
+
+{{if .Missing}}
+<section class="panel placeholder-panel">
+  <div class="empty-state">
+    <h2>客户端不存在</h2>
+    <p class="muted">该客户端 ID 当前没有出现在任何在线服务端的客户端列表中。</p>
+  </div>
+</section>
+{{else}}
+{{if .Errors}}
+<div class="alert" role="alert">
+  <strong>部分服务端读取失败：</strong>
+  <ul>
+    {{range .Errors}}<li>{{.ServerName}}：{{.Message}}</li>{{end}}
+  </ul>
+</div>
+{{end}}
+
+<section class="panel" aria-labelledby="client-connections-heading">
+  <div class="panel-section panel-heading">
+    <h2 id="client-connections-heading">连接的服务端</h2>
+    <p class="muted">按客户端 ID 聚合；每个服务端连接都可以进入该服务端的映射编辑器。</p>
+  </div>
+  <div class="table-wrap">
+    <table class="data-table server-table">
+      <thead>
+        <tr>
+          <th scope="col">服务端</th>
+          <th scope="col">管理地址</th>
+          <th scope="col">状态</th>
+          <th scope="col">版本</th>
+          <th scope="col" class="num">映射</th>
+          <th scope="col">最后在线</th>
+          <th scope="col">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Client.Servers}}
+        <tr>
+          <td><a class="server-link" href="{{$.BasePath}}servers/{{.ClientPath}}">{{.ServerName}}</a></td>
+          <td class="mono wrap">{{.BaseURL}}</td>
+          <td><span class="state-badge {{.StateClass}}">{{.StateLabel}}</span></td>
+          <td>{{if .Version}}{{.Version}}{{else}}—{{end}}</td>
+          <td class="num">{{.Mappings}}</td>
+          <td>{{time .LastSeen}}</td>
+          <td><a class="btn btn-quiet btn-sm" href="{{$.BasePath}}servers/{{.ClientPath}}/clients/{{$.Client.PathID}}">查看映射</a></td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</section>
+{{end}}
+{{end}}

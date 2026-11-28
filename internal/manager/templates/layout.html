@@ -14,11 +14,15 @@
   {{if .Username}}
   <header class="topbar">
     <div class="topbar-inner">
-      <a class="brand" href="{{.BasePath}}" aria-label="hy2tun 管理器首页">
+      <a class="brand" href="{{.BasePath}}clients" aria-label="hy2tun 管理器客户端首页">
         <span class="brand-dot" aria-hidden="true"></span>
         <span class="brand-name">hy2tun</span>
         <span class="brand-sub">管理器</span>
       </a>
+      <nav class="topbar-nav" aria-label="主导航">
+        <a href="{{.BasePath}}clients">客户端</a>
+        <a href="{{.BasePath}}servers">服务器</a>
+      </nav>
       <div class="topbar-actions">
         <span class="user">{{.Username}}</span>
         <a class="btn btn-quiet" href="{{.BasePath}}account">修改密码</a>

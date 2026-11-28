@@ -37,11 +37,25 @@ manager 只保存：
 - 多用户、角色权限
 - 在 manager 内嵌原始 `hy2tund` 控制台
 
+## 客户机视角
+
+manager 的主视图是 **客户端**。登录后会读取每个已配置服务端的客户端列表，并按
+稳定的上游 `client.id` 聚合：
+
+- 服务端 A、B 上相同的 `client.id` 显示为一台客户机，下面列出两条服务端连接；
+- 同名但 ID 不同会保留为两行，不会静默合并成同一台机器；
+- 同一 ID 但名称不同会标记为冲突；
+- 没有可用 ID 的记录仍会显示，但归为“未归组客户端”。
+
+客户机详情页会列出它连接的每台服务端，包括管理地址、在线状态、版本、映射数量，
+以及进入该服务端映射编辑器的链接。**服务器** 页面仍保留，负责服务端接入和上游
+API 凭据管理；数据面仍是原有的 `hy2tund`/`hy2tun`，manager 只做聚合。
+
 ## 下载
 
 manager 使用独立版本和发布标签：
 
-<https://github.com/ayeaaaa/hy2tun/releases/tag/hy2tun-manager-v0.1.3>
+<https://github.com/ayeaaaa/hy2tun/releases/tag/hy2tun-manager-v0.1.4>
 
 归档包含：
 
@@ -55,7 +69,7 @@ manager 使用独立版本和发布标签：
 ## 安装
 
 ```sh
-tar -xzf hy2tun-manager_0.1.3_linux_amd64.tar.gz
+tar -xzf hy2tun-manager_0.1.4_linux_amd64.tar.gz
 sudo useradd --system --user-group --home-dir /var/lib/hy2tun-manager \
   --shell /usr/sbin/nologin hy2tun-manager
 sudo install -m 0755 hy2tun-manager /usr/local/bin/hy2tun-manager
@@ -192,7 +206,7 @@ sudo systemctl start hy2tun-manager
 
 ```sh
 make build-manager
-VERSION=0.1.3 ./scripts/release-manager.sh
+VERSION=0.1.4 ./scripts/release-manager.sh
 ```
 
 只构建 Linux amd64/arm64。发布脚本不会修改 `hy2tund`/`hy2tun` 的现有发布矩阵。

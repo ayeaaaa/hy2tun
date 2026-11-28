@@ -37,6 +37,25 @@ This archive contains:
 - The existing server Web consoles must already be reachable and have a known
   administrator username/password.
 
+## Client-centric view
+
+The primary view is **Clients**. After login, the manager reads the client
+list from every configured server and groups records by their stable upstream
+`client.id`:
+
+- the same `client.id` on server A and server B is shown as one client with two
+  server connections;
+- the same display name with different IDs stays as two rows, so different
+  machines are never silently merged;
+- the same ID with different names is marked as a conflict;
+- a record without a usable ID is kept visible as an ungrouped client.
+
+The client detail page lists every connected server with its management URL,
+online state, version, mapping count, and a link to that server's mapping
+editor. The server inventory remains available under **Servers** and is still
+the source of truth for upstream API access. Read the server/client data plane
+unchanged; this is a manager-side aggregation rule.
+
 ## Install from the archive
 
 ```sh

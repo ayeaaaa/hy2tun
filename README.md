@@ -507,12 +507,14 @@ exist. Edit the config before starting the service.
 
 ## hy2tun-manager (optional multi-server control plane)
 
-[![manager release](https://img.shields.io/github/v/release/ayeaaaa/hy2tun?filter=hy2tun-manager-*&label=hy2tun-manager)](https://github.com/ayeaaaa/hy2tun/releases/tag/hy2tun-manager-v0.1.3)
+[![manager release](https://img.shields.io/github/v/release/ayeaaaa/hy2tun?filter=hy2tun-manager-*&label=hy2tun-manager)](https://github.com/ayeaaaa/hy2tun/releases/tag/hy2tun-manager-v0.1.4)
 
 `hy2tun-manager` is a separate, optional control plane for a fleet of existing
 `hy2tund` servers. Add each server's reverse-proxied Web URL and administrator
 credentials once, then manage the fleet from one page:
 
+- client-centric fleet view grouped by stable `client.id`, showing each
+  client's connected upstream servers
 - server inventory, status, version, mode, client and mapping counts
 - client list and mapping add/edit/delete/enable/disable
 - `public`/`local` mapping exposure
